@@ -1,6 +1,6 @@
 # Hardware
 
-> **Read [`../README.md` §3](../README.md) first.** This document sizes the envelope by asking
+> **Read [the README's "Why small is fast"](../README.md#why-small-is-fast) first.** This document sizes the envelope by asking
 > *"how much payload can this balloon lift?"* — which is the right question when choosing from
 > off-the-shelf balloons. The README asks the complementary question: *"how does envelope size
 > affect lap time?"* The answer there is that acceleration is inversely proportional to envelope

@@ -5,7 +5,7 @@
  * Nothing in core/ may hold a tunable as a file-scope constant.
  *
  * Starting values are derived from this vehicle's own physics (README
- * section 3, docs/05 section 3) - see params.c. They are a starting point
+ * "Why small is fast", docs/05 section 3) - see params.c. They are a starting point
  * for bring-up, not a prediction. Re-tune per docs/07 section 7.
  */
 #ifndef BLIMP_PARAMS_H

@@ -10,7 +10,7 @@
  * dimensionally meaningless.
  *
  * So the defaults below are derived instead from this vehicle's own physics
- * (README section 3, docs/05 section 3): place each loop at a chosen natural
+ * (README "Why small is fast", docs/05 section 3): place each loop at a chosen natural
  * frequency for the estimated effective inertia, and damp it critically.
  *
  *   altitude:  kp = m_eff * wn^2,  kd = 2 * zeta * wn * m_eff

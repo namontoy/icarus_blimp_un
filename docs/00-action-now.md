@@ -125,7 +125,7 @@ addresses, motor-driver topology, antenna keep-out, firmware branch — is in
 **Buy one balloon and weigh its lift.** Cost: a few dollars and an afternoon.
 
 There is a ~9× discrepancy between the rulebook's "50-inch balloon ≈ 1 m³" and the MochiSwarm
-paper's "120 grams of net buoyancy" for the same balloon (see [README §3.5](../README.md)).
+paper's "120 grams of net buoyancy" for the same balloon (see [the README](../README.md#what-50-inch-balloon-really-means)).
 Separately, the envelope's film areal density is unknown within a factor of two (42 vs 85 g/m²),
 which swings usable payload at Bogotá between ~200 g and ~88 g.
 
