@@ -1,0 +1,41 @@
+# Host test/DLL build output (tools/build.py)
+build/
+build_tmp/
+
+# ESP-IDF build output (firmware/)
+firmware/build/
+firmware/sdkconfig
+firmware/sdkconfig.old
+firmware/managed_components/
+
+# Python
+__pycache__/
+*.pyc
+
+# Project-local virtual environment (recreate with: python tools/setup_env.py)
+.venv/
+venv/
+
+# Tool caches
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+
+# MuJoCo
+MUJOCO_LOG.TXT
+
+# Transient logs
+build_log.txt
+
+# Third-party documents: kept locally, not committed (see reference/README.md)
+reference/*.pdf
+reference/*.txt
+
+# Personal scratch space
+_scratch/
+
+# OS / editor clutter
+Thumbs.db
+desktop.ini
+.DS_Store
+*.swp
