@@ -3,7 +3,7 @@
 Live list of what is wrong, unresolved, or deliberately deferred in the code.
 Everything here was found by building and running, not by inspection.
 
-Status as of the airframe rewrite (2026-09-21, evening):
+Status at the current code (closed-loop rows: `run_course.py --max-time 220`, seed 0):
 
 ```
 host unit tests   11,276 checks, 0 failures                    PASS
@@ -13,11 +13,22 @@ MuJoCo scene, two-body vehicle, real course geometry           ALL CHECKS PASS
 closed loop, course 1, NO altitude sensor (the real PCB)       3/3 loops, best 21.6 s
 closed loop, course 2, NO altitude sensor                      2/3 loops, best 54.1 s
 closed loop, course 1, downward ToF fitted                     3/3 loops, best 22.4 s
-closed loop, course 2, downward ToF fitted                     2/3 loops, best 44.7 s
+closed loop, course 2, downward ToF fitted                     3/3 loops, best 23.6 s
 ```
 
-The vehicle now completes both courses in simulation on the confirmed hardware.
+Seed 0 is one draw of the sensor noise. Across seeds 0-4 (same settings):
+
+```
+                     NO altitude sensor                downward ToF
+course 1             12/15 loops, best 20.0-48.3 s     15/15 loops, best 22.4-27.0 s
+course 2              7/15 loops, best 33.7-56.9 s     15/15 loops, best 22.3-27.1 s
+failsafe tripped     in 10 of 10 runs                  in 0 of 10 runs
+```
+
+The vehicle completes both courses in simulation on the confirmed hardware.
 Every number above is a simulation of an unmeasured vehicle; see section 2.
+The default `--max-time` (150 s) includes the 60 s gyro-bias convergence, so it
+usually ends a run before the third loop - use 220 s to compare against this table.
 
 ---
 
@@ -74,8 +85,9 @@ altitude fix (section 4) makes this workable - it is what took vision-only from
 A VL53L1X time-of-flight breakout (~2 g, ~USD 3, I2C, 4 m range) on the same bus
 as the MPU-6050 removes the problem entirely: the estimator already fuses it,
 the firmware already has `BLIMP_BOARD_HAS_TOF` and a reserved address, and the
-sim's `--altitude-source tof` shows the result. Course 2 with ToF ran 10 s
-faster per loop than without. A BMP390 barometer is the weaker alternative
+sim's `--altitude-source tof` shows the result: across five noise seeds every
+loop completed and the failsafe never tripped, against 19 of 30 loops and a
+failsafe in every run without it (status table above). A BMP390 barometer is the weaker alternative
 (+/-0.2 m noise against a 0.55 m balloon).
 
 ---
@@ -118,9 +130,11 @@ real camera's field of view and the real camera stream.
 - The motor-to-GPIO assignment (FL=7, FR=4, RL=3, RR=1) is this project's
   choice. Run the motor identification mode (`BLIMP_BOOT_MOTOR_ID_MODE`) with
   the props off and write down what actually spins.
-- Course 2 loop times (45-55 s) are twice course 1's: the figure-eight's
-  diagonal legs are longer and its turns sharper, and every turn costs surge on
-  a unidirectional pair. Tuning target, not a bug.
+- Without an altitude sensor, course 2 is much slower than course 1 (best laps
+  33.7-56.9 s vs 20.0-48.3 s). The figure-eight's diagonal legs are longer and
+  its turns sharper, and every turn costs surge on a unidirectional pair - but
+  with the ToF both courses run at the same pace (22-27 s), so most of the gap
+  looks like altitude handling rather than geometry. Tuning target, not a bug.
 - Startup still needs 60 s of stillness for the gyro bias to converge
   (`BLIMP_EST_CONVERGE_S`). Untimed under Rule 4, but plan the pre-run routine
   around it.

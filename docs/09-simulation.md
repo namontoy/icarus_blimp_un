@@ -1,17 +1,21 @@
 # Simulation (`sim/`)
 
-> **STATUS (2026-09-21, evening): the vehicle completes both courses.** The scene and
+> **STATUS: the vehicle completes both courses.** The scene and
 > harness were rebuilt for the confirmed airframe - four fixed unidirectional motors on a
 > two-body vehicle (envelope + gondola with legs, buoyancy at the envelope centre, trimmed
 > 6 gf heavy), no altitude sensor unless `--altitude-source` says otherwise, camera on the
 > gondola, an offboard search hint and an any-balloon altitude fix in the observation.
 >
-> | run | result |
+> | run (all with `--max-time 220`, seed 0) | result |
 > |---|---|
 > | `run_course.py --course 1` (no altitude sensor, the real PCB) | 3/3 loops, best 21.6 s |
-> | `run_course.py --course 2` | 2/3 loops in 220 s, best 54.1 s |
+> | `run_course.py --course 2` | 2/3 loops, best 54.1 s |
 > | `run_course.py --course 1 --altitude-source tof` | 3/3 loops, best 22.4 s |
-> | `run_course.py --course 2 --altitude-source tof` | 2/3 loops in 220 s, best 44.7 s |
+> | `run_course.py --course 2 --altitude-source tof` | 3/3 loops, best 23.6 s |
+>
+> The default `--max-time` of 150 s includes the 60 s gyro-bias convergence and usually ends
+> the run before the third loop. Spread across noise seeds 0-4 is in
+> [docs/10](10-known-issues.md).
 >
 > Everything below section 0 that describes a tilting bicopter, `left_tilt`/`right_tilt`
 > actuators, `--lateral`, `thrust_l`/`thrust_r`/`tilt`/`thrust_lat` fields or the old
