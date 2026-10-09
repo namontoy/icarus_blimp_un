@@ -260,6 +260,14 @@ convergence, so the default 150 s budget usually stops before the third loop; ad
 `--max-time 220` to reproduce the table above. `--help` lists every option, and
 [docs/09](docs/09-simulation.md) explains the output.
 
+To reproduce the whole table, or to judge whether a change helped, run the same matrix across
+seeds:
+
+```powershell
+python tools/sim_sweep.py                                       # both courses, none + ToF, seeds 0-4
+python tools/sim_sweep.py --courses 1 --altitude-sources tof --seeds 0-9 --markdown
+```
+
 ### Test one core module
 
 ```powershell
@@ -282,6 +290,19 @@ idf.py -p COM5 flash monitor
 > which motor actually spins for each position; then set it back to `0`. Measure real motor
 > thrust on a thrust stand too: the controller still assumes a 35 gf-per-motor placeholder, and
 > Rule 13 compliance depends on the real number.
+
+### Working with Claude Code
+
+The repository carries a shared Claude Code setup. [CLAUDE.md](CLAUDE.md) gives Claude the
+project's rules, commands and gotchas, and `.claude/skills/` adds three workflows:
+
+| Skill | What it does |
+|---|---|
+| `/core-change` | Checklist for changing the C flight controller safely; Claude also applies it on its own when editing `core/` |
+| `/sim-sweep` | Runs the seed sweep, compares it with the recorded results and updates the tables |
+| `/flash-firmware` | Builds and flashes the ESP32-S3, including motor-identification mode; runs only when you type it |
+
+Keep personal notes in `CLAUDE.local.md`; it is gitignored.
 
 ---
 

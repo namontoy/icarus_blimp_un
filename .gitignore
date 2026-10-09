@@ -34,6 +34,10 @@ reference/*.txt
 # Personal scratch space
 _scratch/
 
+# Personal Claude Code files (the shared ones are CLAUDE.md and .claude/skills/)
+CLAUDE.local.md
+.claude/settings.local.json
+
 # OS / editor clutter
 Thumbs.db
 desktop.ini
