@@ -34,12 +34,14 @@ WHAT EACH SUITE COVERS:
     4. scene generation, both courses
     5. scene physics checks             buoyancy, balloon heights, course geometry
     6. one closed-loop lap, course 1    proves the vehicle still flies at all
+    7. agent skills in sync             Codex copies in .agents/skills match the
+                                        .claude/skills originals (tools/sync_skills.py)
 
   full (adds)
-    7. both courses x 3 loops, with and without a simulated altitude sensor
+    8. both courses x 3 loops, with and without a simulated altitude sensor
 
   firmware (adds)
-    8. idf.py build for the ESP32-S3    via tools/idf_build.bat, which handles
+    9. idf.py build for the ESP32-S3    via tools/idf_build.bat, which handles
                                         the four documented Windows/ESP-IDF traps
 """
 from __future__ import annotations
@@ -158,6 +160,11 @@ def main(argv: list[str] | None = None) -> int:
         ok &= r.step("closed loop, course 1, one lap",
                      [sim, "sim/run_course.py", "--course", "1", "--loops", "1",
                       "--max-time", "120", "--quiet"])
+
+    print(f"{DIM}agent files{OFF}")
+    if gate():
+        ok &= r.step("skills in sync (.agents from .claude)",
+                     [host, "tools/sync_skills.py", "--check"])
 
     if ns.full:
         print(f"{DIM}simulation matrix{OFF}")

@@ -17,7 +17,7 @@ rules, the UMNG address handles registration and logistics.
 >
 > Buenos días,
 >
-> Somos un equipo de la Universidad Militar Nueva Granada interesado en participar en la
+> Somos un equipo de la Universidad Nacional de Colombia interesado en participar en la
 > categoría **IAR (International Airship Racing)** de LARC 2026.
 >
 > Notamos que la fecha de preinscripción indicada en el sitio (14 de septiembre de 2026) ya
@@ -42,7 +42,7 @@ rules, the UMNG address handles registration and logistics.
 > Agradecemos su orientación.
 >
 > Cordialmente,
-> [nombre] — Universidad Militar Nueva Granada
+> [nombre] — Universidad Nacional de Colombia
 
 ### A2 → `dantonio@oakland.edu`, cc `saldana@lehigh.edu` (category rules, in English)
 
@@ -50,7 +50,7 @@ rules, the UMNG address handles registration and logistics.
 >
 > Dear Prof. D'Antonio, Prof. Saldaña,
 >
-> We are a team from Universidad Militar Nueva Granada preparing an entry for IAR-LARC 2026.
+> We are a team from Universidad Nacional de Colombia preparing an entry for IAR-LARC 2026.
 > We have read `IAR_LARC2026.pdf` (27 March 2026) carefully. A few points are load-bearing for
 > our design and we would rather ask than guess.
 >
@@ -96,7 +96,7 @@ rules, the UMNG address handles registration and logistics.
 > Thank you — we are looking forward to the first edition.
 >
 > Best regards,
-> [name] — Universidad Militar Nueva Granada
+> [name] — Universidad Nacional de Colombia
 
 ---
 

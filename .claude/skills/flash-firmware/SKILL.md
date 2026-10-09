@@ -1,13 +1,13 @@
 ---
 name: flash-firmware
-description: Build and flash the ESP32-S3 firmware to the blimp's ESP-FLY board on Windows, optionally in motor-identification mode. Touches real hardware, so it only runs when a person types /flash-firmware.
+description: Build and flash the ESP32-S3 firmware to the blimp's ESP-FLY board on Windows, optionally in motor-identification mode. Touches real hardware, so it runs only when a person explicitly asks for it.
 disable-model-invocation: true
 argument-hint: "[COM port] [motor-id]"
 ---
 
 # Flash the firmware
 
-Arguments: `$ARGUMENTS` (an optional COM port, and `motor-id` to flash motor-identification mode).
+The request may name a COM port, and may ask for motor-identification mode.
 
 This drives real hardware. Before any step that can spin a motor, confirm with the person.
 

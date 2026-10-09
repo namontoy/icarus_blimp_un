@@ -39,8 +39,8 @@ description: Checklist for changing the blimp's C flight controller in core/ (es
 4. Run `python tools/build.py dll`, then `python tools/verify.py --full`.
 5. For a header or parameter change, also run `python tools/verify.py --firmware`, because the
    firmware compiles the same headers. If ESP-IDF is not installed, say so; don't skip silently.
-6. If the change can affect how the blimp flies, run `/sim-sweep` and compare with the recorded
-   table in docs/10.
+6. If the change can affect how the blimp flies, follow the sim-sweep skill
+   (`python tools/sim_sweep.py`) and compare with the recorded table in docs/10.
 
 ## Finish
 

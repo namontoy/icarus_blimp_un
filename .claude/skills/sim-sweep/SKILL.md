@@ -6,13 +6,14 @@ argument-hint: "[--courses 1,2] [--altitude-sources none,tof] [--seeds 0-4] [--e
 
 # Measuring simulated performance
 
-Arguments for the sweep, if any were given: `$ARGUMENTS`
+If the request names courses, altitude sources, seeds or an envelope diameter, pass them to the
+script as options (`python tools/sim_sweep.py --help` lists them).
 
 1. Rebuild the controller with `python tools/build.py dll`. The sweep refuses to run without a
    DLL but cannot tell whether it is stale.
-2. Run `python tools/sim_sweep.py $ARGUMENTS -v`. The default is both courses, no altitude sensor
-   and ToF, seeds 0-4, 220 s per run: 20 runs, a few minutes with 4 in parallel. Add `--markdown`
-   for a table that can be pasted into a document.
+2. Run `python tools/sim_sweep.py -v` with those options. The default is both courses, no
+   altitude sensor and ToF, seeds 0-4, 220 s per run: 20 runs, a few minutes with 4 in parallel.
+   Add `--markdown` for a table that can be pasted into a document.
 3. Compare with the recorded baseline, the seed-spread table in `docs/10-known-issues.md`, which
    uses the same defaults. Name what moved: loops completed, the best-lap range, and runs with
    failsafe. A shift that stays inside the seed spread is not evidence of an improvement.

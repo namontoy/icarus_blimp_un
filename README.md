@@ -1,9 +1,9 @@
 # DroneUN
 
-**An autonomous airship racer for IAR-LARC 2026**, Universidad Militar Nueva Granada's entry
-in *International Airship Racing at LARC* in Bogotá.
+**An autonomous blimp for IAR-LARC 2026**, a Universidad Nacional de Colombia team's entry in
+*International Airship Racing at LARC*, held at Universidad Militar Nueva Granada in Bogotá.
 
-A helium airship has to fly itself around a course and physically touch four tethered red
+A helium blimp has to fly itself around a course and physically touch four tethered red
 balloons in a set order, on two different courses. The lowest combined time wins. The catch:
 **all motors together may produce at most 100 grams-force of thrust.**
 
@@ -291,18 +291,22 @@ idf.py -p COM5 flash monitor
 > thrust on a thrust stand too: the controller still assumes a 35 gf-per-motor placeholder, and
 > Rule 13 compliance depends on the real number.
 
-### Working with Claude Code
+### Working with coding agents
 
-The repository carries a shared Claude Code setup. [CLAUDE.md](CLAUDE.md) gives Claude the
-project's rules, commands and gotchas, and `.claude/skills/` adds three workflows:
+[AGENTS.md](AGENTS.md) holds the project's rules, commands and gotchas for any coding agent.
+OpenAI Codex reads it directly, as do many other agents (see [agents.md](https://agents.md)), and
+[CLAUDE.md](CLAUDE.md) imports it for Claude Code. Three workflows are packaged as skills:
 
 | Skill | What it does |
 |---|---|
-| `/core-change` | Checklist for changing the C flight controller safely; Claude also applies it on its own when editing `core/` |
-| `/sim-sweep` | Runs the seed sweep, compares it with the recorded results and updates the tables |
-| `/flash-firmware` | Builds and flashes the ESP32-S3, including motor-identification mode; runs only when you type it |
+| `core-change` | Checklist for changing the C flight controller safely; agents also apply it on their own when editing `core/` |
+| `sim-sweep` | Runs the seed sweep, compares it with the recorded results and updates the tables |
+| `flash-firmware` | Builds and flashes the ESP32-S3, including motor-identification mode; runs only when you ask for it |
 
-Keep personal notes in `CLAUDE.local.md`; it is gitignored.
+In Claude Code, run a skill as `/sim-sweep`; in Codex, as `$sim-sweep` or from `/skills`. The
+originals live in `.claude/skills/`. After editing one, run `python tools/sync_skills.py` to
+regenerate the Codex copies in `.agents/skills/`; `tools/verify.py` fails until you do. Keep
+personal Claude notes in `CLAUDE.local.md`, which is gitignored.
 
 ---
 
