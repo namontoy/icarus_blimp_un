@@ -49,6 +49,26 @@ static void initialize_filesystem(void)
 
 void app_main(void)
 {
+    /*
+     * Motors first, before the console, the filesystem and the I2C bus.
+     *
+     * Nothing here needs the motor driver this early - the eight DRV8833
+     * input pins do. From chip reset they are high-impedance inputs, and with
+     * VM already live off the step-up that leaves both bridges in a state
+     * nobody commanded. Registering the command is not enough: it only adds
+     * a console entry, and the pins would stay floating until someone typed
+     * 'motor' for the first time. Initialising here bounds that window to
+     * the few milliseconds of early boot.
+     *
+     * Not ESP_ERROR_CHECK: a motor driver that fails to come up must not cost
+     * us the console, which is how we would find out why.
+     */
+    esp_err_t motor_err = motors_init();
+    if (motor_err != ESP_OK) {
+        ESP_LOGE(TAG, "motor driver failed to start: %s - thrusters unavailable",
+                 esp_err_to_name(motor_err));
+    }
+
     esp_console_repl_t *repl = NULL;
     esp_console_repl_config_t repl_config = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
 
@@ -86,7 +106,7 @@ void app_main(void)
     register_mag();
     register_baro();
     register_tof();
-    register_motor();
+    register_motor();     /* already initialised above */
 
     /* Status LED runs in its own task, so the REPL below stays responsive. */
     led_blink_start();
