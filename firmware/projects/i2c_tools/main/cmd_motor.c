@@ -134,10 +134,17 @@ static int                s_fs_timeout_ms = CONFIG_MOTOR_FAILSAFE_MS;
 static volatile int64_t   s_fs_last_feed_us;
 static volatile bool      s_fs_tripped;
 /*
- * The failsafe stays disarmed until something actually commands a motor.
- * Before that there is nothing to fail safe from - the bridges are already
- * coasting - and a timer that fires at every boot would log an error every
- * boot, which is how a safety mechanism gets trained into background noise.
+ * The failsafe is armed if and only if at least one motor carries a non-zero
+ * command. That is the whole of the rule, and both halves matter:
+ *
+ * - Nothing driven, nothing to guard. At boot, and after any deliberate stop,
+ *   the bridges are already coasting; a timer that fired there would log an
+ *   error after every boot and after every bounded console run, which is how
+ *   a safety mechanism gets trained into background noise - and this is the
+ *   one mechanism whose entire value is that it still gets believed.
+ * - Something driven, something to guard. A latched duty with no controller
+ *   behind it is the failure that accelerates the airship into a wall, and
+ *   the PWM peripheral will hold it forever.
  */
 static volatile bool      s_fs_armed;
 
@@ -239,26 +246,43 @@ static void failsafe_tick(void *arg)
     if (idle_ms < s_fs_timeout_ms) {
         return;
     }
-    /* Set the flag before coasting so motors_coast() cannot be mistaken for
-       a fresh command and clear it. */
+    /* Write the bridges directly rather than through motors_coast(), which
+       re-derives the armed state and would clear the flag we are about to
+       set. Disarm first: once the commands are zeroed there is nothing
+       latched, so a second tick must not report this again. */
+    s_fs_armed = false;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    motor_write_all_static(0);
+    xSemaphoreGive(s_lock);
     s_fs_tripped = true;
-    motors_coast();
+
     ESP_LOGE(TAG, "failsafe: no thrust command for %lld ms - all motors coasting",
              (long long)idle_ms);
 }
 
-/* Restart the clock without arming: for setup paths, which are not evidence
-   that a controller is running. */
-static void failsafe_mark(void)
+/*
+ * Restart the clock and re-derive whether there is anything to guard. Called
+ * after every path that changes a command, so the armed state is a function
+ * of what the bridges are actually doing rather than of which call happened
+ * to run last.
+ */
+static void failsafe_sync(void)
 {
+    bool driven = false;
+    for (int m = 0; m < MOTOR_COUNT; m++) {
+        if (fabsf(s_cmd[m]) >= MOTOR_ZERO_EPS) {
+            driven = true;
+            break;
+        }
+    }
     s_fs_last_feed_us = esp_timer_get_time();
     s_fs_tripped = false;
+    s_fs_armed = driven;
 }
 
 void motors_failsafe_feed(void)
 {
-    failsafe_mark();
-    s_fs_armed = true;
+    failsafe_sync();
 }
 
 bool motors_failsafe_tripped(void)
@@ -272,7 +296,7 @@ esp_err_t motors_failsafe_set_timeout_ms(int timeout_ms)
         return ESP_ERR_INVALID_ARG;
     }
     s_fs_timeout_ms = timeout_ms;
-    failsafe_mark();
+    failsafe_sync();
     return ESP_OK;
 }
 
@@ -397,7 +421,7 @@ esp_err_t motors_init(void)
     if (err != ESP_OK) {
         return err;
     }
-    failsafe_mark();
+    failsafe_sync();
     err = esp_timer_start_periodic(s_fs_timer, MOTOR_FAILSAFE_TICK_MS * 1000);
     if (err != ESP_OK) {
         return err;
@@ -418,8 +442,8 @@ esp_err_t motors_init(void)
              s_decay == MOTOR_DECAY_SLOW ? "slow" : "fast",
              s_deadband * 100.0f);
     if (s_fs_timeout_ms > 0) {
-        ESP_LOGI(TAG, "failsafe arms on the first thrust command, then coasts "
-                      "all motors after %d ms without one", s_fs_timeout_ms);
+        ESP_LOGI(TAG, "failsafe armed only while a motor is driven, then coasts "
+                      "all of them after %d ms without a command", s_fs_timeout_ms);
     } else {
         ESP_LOGW(TAG, "failsafe disabled: a latched command will run forever");
     }
@@ -517,6 +541,7 @@ void motors_coast(void)
     xSemaphoreTake(s_lock, portMAX_DELAY);
     motor_write_all_static(0);
     xSemaphoreGive(s_lock);
+    failsafe_sync();        // nothing driven now, so nothing to guard
 }
 
 void motors_brake(void)
@@ -618,7 +643,7 @@ static void print_status(void)
     } else if (s_fs_armed) {
         printf("failsafe %d ms, armed\n", s_fs_timeout_ms);
     } else {
-        printf("failsafe %d ms, arms on the first thrust command\n",
+        printf("failsafe %d ms, idle - nothing is being driven\n",
                s_fs_timeout_ms);
     }
 #if CONFIG_MOTOR_NSLEEP_GPIO >= 0
