@@ -1,0 +1,17 @@
+# Board: Waveshare ESP32-S3-Zero (ESP32-S3FH4R2)
+
+# 4 MB flash in package (overrides the 2MB in sdkconfig.defaults)
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# USB-C goes straight to the chip's native USB (GPIO19/20): no UART bridge.
+# The whole app is an interactive prompt, so without this the console is dead,
+# not merely quiet.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# On-board WS2812 status LED
+CONFIG_EXAMPLE_BLINK_GPIO=21
+CONFIG_EXAMPLE_BLINK_PERIOD=3000
+
+# I2C pins for the GY-88 (SDA=4, SCL=5)
+CONFIG_EXAMPLE_I2C_MASTER_SDA=4
+CONFIG_EXAMPLE_I2C_MASTER_SCL=5

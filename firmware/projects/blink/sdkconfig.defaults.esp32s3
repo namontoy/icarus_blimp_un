@@ -1,0 +1,15 @@
+# Board: Waveshare ESP32-S3-Zero (ESP32-S3FH4R2)
+
+# On-board LED is a single addressable WS2812 pixel, driven over RMT
+CONFIG_BLINK_LED_STRIP=y
+CONFIG_BLINK_LED_STRIP_BACKEND_RMT=y
+CONFIG_BLINK_GPIO=21
+# 3 s for one full pass around the hue wheel
+CONFIG_BLINK_PERIOD=3000
+
+# 4 MB flash in package
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# USB-C goes straight to the chip's native USB (GPIO19/20): no UART bridge,
+# so route the console to USB Serial/JTAG or `idf.py monitor` stays silent.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
