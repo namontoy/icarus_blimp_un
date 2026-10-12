@@ -1,6 +1,12 @@
 /*
  * 'ping' console command: Parallax PING))) 28015 ultrasonic rangefinder.
  *
+ * PARKED, not built. Dropped from main/CMakeLists.txt and from the console
+ * while the motor wiring took GPIO 7-14; the sensor needs a pin assigned
+ * again before it comes back. To restore it: add "cmd_ping.c" to the SRCS
+ * list, and the include, register_ping() call and banner line to
+ * i2ctools_example_main.c. The code itself is unchanged and was working.
+ *
  * Measures the echo pulse on the sensor's single bidirectional SIG line and
  * converts it to distance, correcting the speed of sound with air temperature
  * read from the BMP180 already sitting on the I2C bus.

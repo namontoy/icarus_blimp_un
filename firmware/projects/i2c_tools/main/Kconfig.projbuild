@@ -37,5 +37,93 @@ menu "Example Configuration"
         default 3000
         help
             Time taken by one full revolution of the hue wheel.
+endmenu
+
+menu "Motor driver (DRV8833)"
+
+    # Pin for pin as wired. Each motor takes two lines, and which of the two
+    # counts as "forward" is set by how the motor leads and prop are fitted -
+    # correct a backwards thruster by swapping its pair here, not by negating
+    # the command upstream, so that the sign lives in one place.
+
+    config MOTOR_FL_IN1_GPIO
+        int "motor_FL - driver #1 IN1 GPIO"
+        range 0 48
+        default 13
+    config MOTOR_FL_IN2_GPIO
+        int "motor_FL - driver #1 IN2 GPIO"
+        range 0 48
+        default 12
+
+    config MOTOR_RL_IN1_GPIO
+        int "motor_RL - driver #1 IN3 GPIO"
+        range 0 48
+        default 11
+    config MOTOR_RL_IN2_GPIO
+        int "motor_RL - driver #1 IN4 GPIO"
+        range 0 48
+        default 10
+
+    config MOTOR_FR_IN1_GPIO
+        int "motor_FR - driver #2 IN1 GPIO"
+        range 0 48
+        default 9
+    config MOTOR_FR_IN2_GPIO
+        int "motor_FR - driver #2 IN2 GPIO"
+        range 0 48
+        default 8
+
+    config MOTOR_RR_IN1_GPIO
+        int "motor_RR - driver #2 IN3 GPIO"
+        range 0 48
+        default 7
+    config MOTOR_RR_IN2_GPIO
+        int "motor_RR - driver #2 IN4 GPIO"
+        range 0 48
+        default 14
+
+    config MOTOR_NSLEEP_GPIO
+        int "nSLEEP GPIO, or -1 if strapped high in hardware"
+        range -1 48
+        default -1
+        help
+            Both DRV8833s hold their outputs high-impedance while nSLEEP is
+            low, so it must be high before any motor turns. Leave this at -1
+            if the pin is tied to 3V3 on the board. Putting it on a GPIO buys
+            a real all-off state and a way to clear a driver fault.
+
+    config MOTOR_PWM_FREQ_HZ
+        int "PWM carrier frequency in Hz"
+        range 1000 100000
+        default 20000
+        help
+            Above roughly 18 kHz the carrier is out of hearing, which matters
+            on an airship whose envelope is an excellent sounding board. The
+            DRV8833 accepts up to 250 kHz, but higher frequencies cost
+            switching loss for no gain with motors this small. The driver
+            picks the finest LEDC duty resolution this frequency allows: at
+            20 kHz that is 11 bits, 2048 steps.
+
+    config MOTOR_DEADBAND_PERMILLE
+        int "Break-away duty in parts per thousand"
+        range 0 900
+        default 120
+        help
+            Smallest duty that actually starts the prop turning. Thrust
+            commands are mapped onto [deadband, 1.0] so that a small command
+            produces a small thrust instead of nothing at all.
+
+            120 is only a plausible starting point for a small brushed motor.
+            Measure the real value per motor with 'motor -m 1A --sweep' and
+            set it from what you see.
+
+    config MOTOR_FAILSAFE_MS
+        int "Coast all motors after this long with no command; 0 disables"
+        range 0 60000
+        default 1000
+        help
+            The PWM peripheral holds the last duty forever, so a controller
+            that stops running leaves the airship under full thrust. This
+            timer is what makes that failure stop the motors instead.
 
 endmenu

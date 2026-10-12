@@ -15,8 +15,8 @@
 #include "cmd_imu.h"
 #include "cmd_mag.h"
 #include "cmd_baro.h"
-#include "cmd_ping.h"
 #include "cmd_tof.h"
+#include "cmd_motor.h"
 #include "driver/i2c_master.h"
 #include "led_blink.h"
 
@@ -85,8 +85,8 @@ void app_main(void)
     register_imu();
     register_mag();
     register_baro();
-    register_ping();
     register_tof();
+    register_motor();
 
     /* Status LED runs in its own task, so the REPL below stays responsive. */
     led_blink_start();
@@ -103,8 +103,8 @@ void app_main(void)
     printf(" |  7. Try 'imu' for decoded MPU-6050 readings                |\n");
     printf(" |  8. Try 'mag' for HMC5883L field and heading               |\n");
     printf(" |  9. Try 'baro' for BMP180 pressure and altitude            |\n");
-    printf(" | 10. Try 'ping' for PING))) ultrasonic distance             |\n");
-    printf(" | 11. Try 'tof' for VL53L1X time-of-flight range             |\n");
+    printf(" | 10. Try 'tof' for VL53L1X time-of-flight range             |\n");
+    printf(" | 11. Try 'motor' to drive the DRV8833 thrusters             |\n");
     printf(" |                                                            |\n");
     printf(" ==============================================================\n\n");
 
