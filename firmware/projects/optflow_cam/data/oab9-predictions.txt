@@ -1,0 +1,16 @@
+roll 43.5 deg (phone), lens-to-target 137 cm taped, vfit, h1500, true move 270 +- 10 mm
+true projections:  y = 270*cos43.5 = 195.9 mm    x = 270*sin43.5 = 185.9 mm
+                   true x/y = tan43.5 = 0.9490   (+-1 deg of roll = +-3.5%)
+
+PREDICTIONS, written before the run:
+ 1 drift source.  world-horizontal drift must split near-evenly between the two
+   image axes at 45 deg.  split within ~2x  -> drift is in the world (mount, air,
+   illumination), and section 8.7's "y-axis bias" is misread.  stays 4-10x on one
+   image axis -> algorithm.
+ 2 spread.  if the out/back spread is larger on the y component than the x
+   component of the SAME motion, the y amplification is real and not between-run
+   noise.  sign must stay positive on both (vfit).
+ 3 cross-axis gain.  measured x/y = (gx/gy)*0.9490.
+   no gap  -> 0.949.    the ~10% gap  -> 1.044.   separation 10%, roll error 3.5%.
+ 4 speed.  0.160 px/fr on y, 0.152 on x, vs 0.22 at 90 deg.  absolute gains may
+   shift; compare axes within the run, not against oab7/oab8.

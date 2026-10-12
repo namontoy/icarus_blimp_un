@@ -1,0 +1,85 @@
+menu "Optical Flow Configuration"
+
+    choice OPTFLOW_BOARD
+        prompt "Camera board"
+        default OPTFLOW_BOARD_AI_THINKER
+        help
+            Selects the pin map in camera_pins.h.
+
+        config OPTFLOW_BOARD_AI_THINKER
+            bool "AI-Thinker ESP32-CAM"
+        config OPTFLOW_BOARD_ESP_EYE
+            bool "ESP-EYE"
+        config OPTFLOW_BOARD_XIAO_S3
+            bool "Seeed XIAO ESP32S3 Sense"
+    endchoice
+
+    config OPTFLOW_TARGET_FPS
+        int "Target frame rate (frames per second)"
+        range 1 30
+        default 15
+        help
+            Frames are paced to this rate deliberately. Optical flow for a blimp
+            needs nothing faster, and running the sensor slower is the single
+            most effective way to keep an ESP32-CAM cool. Changeable at runtime
+            with the 'f' command.
+
+    config OPTFLOW_XCLK_MHZ
+        int "Sensor clock XCLK (MHz)"
+        range 4 20
+        default 10
+        help
+            The OV2640 pixel pipeline is clocked from this. 20 MHz is the usual
+            example value; 10 MHz halves the sensor's own dissipation and is
+            still far more bandwidth than a paced 15 FPS QQVGA stream needs.
+            Below about 6 MHz some OV2640 modules fail to produce frames.
+
+    config OPTFLOW_HEIGHT_MM
+        int "Default height above the floor (mm)"
+        range 100 10000
+        default 2000
+        help
+            Used to convert pixel flow into millimetres per second. Pixel flow
+            scales with 1/height, so this number must be right - or supplied by
+            a rangefinder in flight. Changeable at runtime with the 'h' command.
+
+    config OPTFLOW_HFOV_DEG
+        int "Horizontal field of view (degrees)"
+        range 10 150
+        default 54
+        help
+            Horizontal FOV of the lens at the configured frame size. 54 degrees
+            is the computed horizontal component of the stock OV2640 65-degree
+            diagonal lens at 4:3. CALIBRATE THIS: it is a direct scale factor on
+            every velocity this firmware reports.
+
+    config OPTFLOW_BLOCK
+        int "Match block size (pixels)"
+        range 8 32
+        default 16
+
+    config OPTFLOW_SEARCH
+        int "Search radius (pixels)"
+        range 1 10
+        default 7
+        help
+            Bounds the largest measurable motion: at QQVGA, 2 m height and
+            15 FPS, 7 px is about +/-1.3 m/s. Larger costs cycles quadratically.
+
+    config OPTFLOW_GRID
+        int "Grid of match blocks (N x N)"
+        range 1 8
+        default 5
+        help
+            N*N blocks are matched per frame and the median is reported, so a
+            person walking underneath cannot drag the estimate with them.
+
+    config OPTFLOW_MIN_VAR
+        int "Minimum block variance to attempt a match"
+        range 0 10000
+        default 50
+        help
+            A featureless floor patch has no recoverable motion. Blocks below
+            this are reported as rejected rather than matched to noise.
+
+endmenu

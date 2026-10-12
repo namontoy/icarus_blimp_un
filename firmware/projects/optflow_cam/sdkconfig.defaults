@@ -1,0 +1,57 @@
+# ESP32-CAM optical flow: thermal and timing defaults.
+#
+# Every setting here that looks conservative is a heat decision. An AI-Thinker
+# ESP32-CAM has been measured above 90 C under load, and the usual causes are
+# the AMS1117 regulator dropping 5 V to 3.3 V as heat plus WiFi current bursts.
+# This firmware never starts a radio, so what is left is CPU and sensor clock.
+
+# 240 MHz, not 160. flow_match() costs 74-78 ms at 160 MHz. That fits inside the
+# 159.9 ms frame period of XCLK 10 MHz, but NOT inside the 79.95 ms period of
+# XCLK 20 MHz, which is what 12.5 FPS requires. Measured at 240 MHz: 49-52 ms,
+# a clean 1.5x scaling, leaving ~23 ms of margin after the ~7 ms blocking printf.
+# (An earlier comment here claimed 160 MHz was causing the driver to hand us
+# every second frame. That was wrong: raising the core clock cut the match time
+# as predicted and dt stayed at exactly 159.9 ms, which proves the frame rate is
+# set by the sensor, not by the loop.)
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240
+
+# 1 kHz tick. Frame pacing is done in milliseconds, and at the default 100 Hz a
+# "67 ms" period would quantise to 70 ms - a 4% rate error straight into the
+# velocity scale factor.
+CONFIG_FREERTOS_HZ=1000
+
+# PSRAM: the AI-Thinker board has it, and the camera driver wants it for larger
+# formats. We keep the frame buffers in internal DRAM anyway (QQVGA grayscale is
+# only 19 kB), so this is enabled for compatibility, not because we rely on it.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_SPEED_40M=y
+
+# Console on UART0 at the usual rate. The CSV stream is the product of this
+# firmware, so the console must stay plain and unbuffered.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
+
+# Optimise for speed: the per-frame matching budget is what limits the usable
+# frame rate, and -Og roughly triples it.
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# A brown-out on this board usually means the 5 V supply or the regulator, not a
+# software fault. Keep the detector on and at the default level so the symptom
+# is a clean reset with a logged reason rather than silent corruption.
+CONFIG_ESP_BROWNOUT_DET=y
+
+# If PSRAM is missing or fails to train, carry on rather than aborting: the
+# frame buffers are in internal DRAM and do not need it. Without this a PSRAM
+# fault is an early abort, which looks identical to a dead board.
+CONFIG_SPIRAM_IGNORE_NOTFOUND=y
+
+# XCLK 20 MHz, not 10. MEASURED: the OV2640 needs 1.599 M XCLK cycles per frame
+# in this mode (full-array readout, downsampled to QQVGA), so the frame period
+# scales inversely with XCLK: 10 MHz -> 159.9 ms (6.25 FPS), 20 MHz -> 79.95 ms
+# (12.5 FPS). Proven camera-limited, not loop-limited: raising the CPU to
+# 240 MHz cut flow_match() from 74-78 ms to 49-52 ms and dt did not budge.
+# This is a real thermal cost at the sensor - it is the price of 12.5 FPS, and
+# it is only affordable because the 240 MHz core keeps the match inside the
+# shorter 79.95 ms period.
+CONFIG_OPTFLOW_XCLK_MHZ=20
