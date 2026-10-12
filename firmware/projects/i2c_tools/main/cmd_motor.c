@@ -133,6 +133,13 @@ static esp_timer_handle_t s_fs_timer;
 static int                s_fs_timeout_ms = CONFIG_MOTOR_FAILSAFE_MS;
 static volatile int64_t   s_fs_last_feed_us;
 static volatile bool      s_fs_tripped;
+/*
+ * The failsafe stays disarmed until something actually commands a motor.
+ * Before that there is nothing to fail safe from - the bridges are already
+ * coasting - and a timer that fires at every boot would log an error every
+ * boot, which is how a safety mechanism gets trained into background noise.
+ */
+static volatile bool      s_fs_armed;
 
 /* ------------------------------------------------------------------ duty */
 
@@ -225,7 +232,7 @@ static void motor_write_all_static(uint32_t duty)
 static void failsafe_tick(void *arg)
 {
     (void)arg;
-    if (s_fs_timeout_ms <= 0 || s_fs_tripped) {
+    if (s_fs_timeout_ms <= 0 || s_fs_tripped || !s_fs_armed) {
         return;
     }
     int64_t idle_ms = (esp_timer_get_time() - s_fs_last_feed_us) / 1000;
@@ -240,10 +247,18 @@ static void failsafe_tick(void *arg)
              (long long)idle_ms);
 }
 
-void motors_failsafe_feed(void)
+/* Restart the clock without arming: for setup paths, which are not evidence
+   that a controller is running. */
+static void failsafe_mark(void)
 {
     s_fs_last_feed_us = esp_timer_get_time();
     s_fs_tripped = false;
+}
+
+void motors_failsafe_feed(void)
+{
+    failsafe_mark();
+    s_fs_armed = true;
 }
 
 bool motors_failsafe_tripped(void)
@@ -257,7 +272,7 @@ esp_err_t motors_failsafe_set_timeout_ms(int timeout_ms)
         return ESP_ERR_INVALID_ARG;
     }
     s_fs_timeout_ms = timeout_ms;
-    motors_failsafe_feed();
+    failsafe_mark();
     return ESP_OK;
 }
 
@@ -382,7 +397,7 @@ esp_err_t motors_init(void)
     if (err != ESP_OK) {
         return err;
     }
-    motors_failsafe_feed();
+    failsafe_mark();
     err = esp_timer_start_periodic(s_fs_timer, MOTOR_FAILSAFE_TICK_MS * 1000);
     if (err != ESP_OK) {
         return err;
@@ -403,8 +418,8 @@ esp_err_t motors_init(void)
              s_decay == MOTOR_DECAY_SLOW ? "slow" : "fast",
              s_deadband * 100.0f);
     if (s_fs_timeout_ms > 0) {
-        ESP_LOGI(TAG, "failsafe coasts all motors after %d ms without a command",
-                 s_fs_timeout_ms);
+        ESP_LOGI(TAG, "failsafe arms on the first thrust command, then coasts "
+                      "all motors after %d ms without one", s_fs_timeout_ms);
     } else {
         ESP_LOGW(TAG, "failsafe disabled: a latched command will run forever");
     }
@@ -596,11 +611,15 @@ static void print_status(void)
            ledc_get_freq(LEDC_LOW_SPEED_MODE, LEDC_TIMER_0), s_res_bits,
            s_duty_full, s_decay == MOTOR_DECAY_SLOW ? "slow" : "fast",
            s_deadband * 100.0f);
-    if (s_fs_timeout_ms > 0) {
-        printf("failsafe %d ms%s\n", s_fs_timeout_ms,
-               s_fs_tripped ? "  *** TRIPPED ***" : "");
-    } else {
+    if (s_fs_timeout_ms <= 0) {
         printf("failsafe off\n");
+    } else if (s_fs_tripped) {
+        printf("failsafe %d ms  *** TRIPPED ***\n", s_fs_timeout_ms);
+    } else if (s_fs_armed) {
+        printf("failsafe %d ms, armed\n", s_fs_timeout_ms);
+    } else {
+        printf("failsafe %d ms, arms on the first thrust command\n",
+               s_fs_timeout_ms);
     }
 #if CONFIG_MOTOR_NSLEEP_GPIO >= 0
     printf("nSLEEP driven high on GPIO %d\n", CONFIG_MOTOR_NSLEEP_GPIO);
