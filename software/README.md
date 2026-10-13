@@ -27,7 +27,7 @@ Close cfclient before starting. Both use local UDP port 2399, so only one can be
 ## Running
 
 ```bash
-~/github/crazyflie-clients-python/.venv/bin/python test_scripts/drone_gui.py
+python software/drone_gui.py
 ```
 
 It works from any directory. It imports `drone_dynamics.py` from its own folder.
@@ -105,16 +105,16 @@ This is the **open-loop** tendency. In flight the stabilizer counteracts it, so 
 
 Run the file directly for a self-check:
 ```bash
-~/github/crazyflie-clients-python/.venv/bin/python test_scripts/drone_dynamics.py
+python software/drone_dynamics.py
 ```
 
 ## `motor_diag.py`
 
 ```bash
-PY=~/github/crazyflie-clients-python/.venv/bin/python
-$PY test_scripts/motor_diag.py                      # read-only: params + 5 log samples
-$PY test_scripts/motor_diag.py --spin 3             # spin M3 at raw 10000 for 3 s
-$PY test_scripts/motor_diag.py --spin 3 --duty 25   # spin M3 at 25 % for 3 s
+PY=python
+$PY software/motor_diag.py                      # read-only: params + 5 log samples
+$PY software/motor_diag.py --spin 3             # spin M3 at raw 10000 for 3 s
+$PY software/motor_diag.py --spin 3 --duty 25   # spin M3 at 25 % for 3 s
 ```
 
 `stabilizer.rtStab` in its output is the quickest way to tell whether the stabilizer loop is running.

@@ -16,3 +16,5 @@ docs/reference/*.pdf
 
 # Host sweep binary (build output of bias_sweep.c, via host/Makefile)
 firmware/projects/*/host/bias_sweep
+software/cfcache/
+__pycache__/

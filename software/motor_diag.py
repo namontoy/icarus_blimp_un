@@ -8,9 +8,9 @@ stalling on MISC_GET_DEFAULT_VALUE requests that this firmware never answers.
 
 Run with the cfclient virtualenv, connected to the drone's Wi-Fi AP and with
 cfclient closed:
-    ~/github/crazyflie-clients-python/.venv/bin/python test_scripts/motor_diag.py
-    ~/github/crazyflie-clients-python/.venv/bin/python test_scripts/motor_diag.py --spin 4
-    ~/github/crazyflie-clients-python/.venv/bin/python test_scripts/motor_diag.py --spin 3 --duty 25
+    python software/motor_diag.py
+    python software/motor_diag.py --spin 4
+    python software/motor_diag.py --spin 3 --duty 25
 """
 import argparse
 import os

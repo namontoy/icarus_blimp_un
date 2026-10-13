@@ -1,0 +1,8 @@
+# Python tools in software/ (esp-drone bench tools). Tested with Python 3.10.
+# Same versions as the original PC2 virtualenv; scipy is the version resolved on the laptop.
+numpy==1.26.4
+scipy==1.15.3
+PyQt6==6.11.0
+pyqtgraph==0.14.0
+# esp-drone-aware cflib fork (UDP link with keep-alive), pinned to the commit PC2 used.
+cflib @ git+https://github.com/leeebo/crazyflie-lib-python.git@a430283a3b608db7c0b3227aa37d7120858c25ef

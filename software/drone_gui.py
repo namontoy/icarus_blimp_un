@@ -6,8 +6,8 @@ Uses the same direct cflib param writes as motor_diag.py (motorPowerSet.*), whic
 avoids the cfclient Parameters tab stalling on MISC_GET_DEFAULT_VALUE.
 The Wi-Fi part uses nmcli (NetworkManager). Close cfclient before running.
 
-Run with the cfclient virtualenv (has PyQt6, pyqtgraph and cflib):
-    ~/github/crazyflie-clients-python/.venv/bin/python test_scripts/drone_gui.py
+Run in the blimp-tools conda env (see software/SETUP.md):
+    python software/drone_gui.py
 
 Space or Esc = STOP (all motors to 0).
 """
