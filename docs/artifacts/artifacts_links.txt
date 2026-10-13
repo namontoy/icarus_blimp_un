@@ -1,0 +1,15 @@
+Motor's Magnetic field:
+https://claude.ai/artifact/PEXgvrVMNdFLjSLRScEXE8
+
+Wiring
+https://claude.ai/artifact/QTudRropWx3PCxCCmPxLkE
+
+Motor's placement
+https://claude.ai/artifact/PtrJ2Jkoi8oUvvQYAkAsgv
+
+Optical-flow motivation
+https://claude.ai/artifact/X57JeWqYWXjgwzQSo3AtGY
+
+Optical-flow implementation idea
+https://claude.ai/artifact/FwiyATq4wjgRC2rJZvZXo3#e49bd4b1-9eda
+
