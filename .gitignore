@@ -9,6 +9,7 @@ dependencies.lock
 
 # Host test binaries
 firmware/projects/*/host/test_flow_match
+firmware/projects/*/host/test_blob_detect
 
 # Reference papers: published third-party work, 35 MB, re-downloadable.
 # Citations and links are kept in docs/reference/README.md instead.
