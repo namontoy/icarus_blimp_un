@@ -120,7 +120,7 @@ The machine lines all start with `#!`:
 | Line | Meaning |
 |---|---|
 | `#!ACK <cmd>` / `#!NAK <cmd> -- <reason>` | Every command line gets one or the other, so a command garbled on the wire is caught instead of assumed. The viewer retries once. |
-| `#!CFG w= h= cell= hue= tol= sat= val= area= mm= fov= fps= awb= be= preset= baud= image= stream= settings=saved\|defaults\|modified` | The camera's live state. It is printed after every change and on `k`. |
+| `#!CFG w= h= cell= hue= tol= sat= val= area= mm= fov= fps= period_ms= awb= be= preset= baud= image= stream= settings=saved\|defaults\|modified` | The camera's live state. It is printed after every change and on `k`. `fps` can be fractional (`12.5`). `period_ms` is what the camera's loop actually waits on. |
 | `#!CAL ok\|refused hue= spread= sat= val=` | The result of `c`. |
 | `#!BAUD <n>` | Printed just before the camera changes speed (and on the 3 s revert). |
 | `#!FRAME seq= t_ms= w=160 h=120 fmt=rgb565be len=38400 crc=<hex>` | Followed by exactly `len` raw bytes, then `\n#!END seq=`. The CSV row for the same frame comes next. |

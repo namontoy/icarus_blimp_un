@@ -14,16 +14,21 @@ menu "Target Camera Configuration"
             bool "Seeed XIAO ESP32S3 Sense"
     endchoice
 
-    config TARGETCAM_TARGET_FPS
-        int "Target frame rate (frames per second)"
-        range 1 30
-        default 10
+    config TARGETCAM_FRAME_PERIOD_MS
+        int "Frame period (milliseconds)"
+        range 33 1000
+        default 80
         help
-            Frames are paced to this rate. Steering a blimp at a marker needs
-            nothing faster, and the idle time between frames is the thermal
-            budget. The sensor itself delivers about 12.5 FPS at XCLK 20 MHz
-            (measured on optflow_cam), so asking for more gains nothing.
-            Changeable at runtime with the 'f' command.
+            Frames, and so CSV rows, are paced to this period. 80 ms is 12.5 FPS,
+            the OV2640's own rate at XCLK 20 MHz: it spends a fixed 1.599 M XCLK
+            cycles per QQVGA frame, 80.00 ms (measured on optflow_cam). Pacing
+            at the sensor's period uses every frame at a constant latency; a
+            longer one skips frames and the age of the frame processed wanders.
+            XCLK and the tick come from the same crystal, so the two stay
+            locked. A shorter period gains nothing - the loop just waits on the
+            sensor - and costs the idle time that is the thermal budget.
+            A period, not a rate, because 12.5 is not an integer. Changeable at
+            runtime with 'f<fps>', which accepts decimals ('f12.5').
 
     config TARGETCAM_XCLK_MHZ
         int "Sensor clock XCLK (MHz)"
@@ -31,8 +36,9 @@ menu "Target Camera Configuration"
         default 20
         help
             The OV2640 frame period scales inversely with XCLK: optflow_cam
-            measured 159.9 ms at 10 MHz and 79.95 ms at 20 MHz. 10 MHz runs
-            cooler and caps the stream near 6 FPS.
+            measured 159.9 ms at 10 MHz and 80.00 ms at 20 MHz. 10 MHz runs
+            cooler and caps the stream at 6.25 FPS; set the frame period to
+            160 ms to match it.
 
     config TARGETCAM_HFOV_DEG
         int "Horizontal field of view (degrees)"

@@ -5,13 +5,15 @@
 
 #include "nvs.h"
 #include "nvs_flash.h"
+#include "sdkconfig.h"
 
 #define NS          "targetcam"
 #define KEY         "cfg"
 
 /* Bump when tc_settings_t changes meaning. The stored blob carries the version
-   and its size, so an old record is rejected instead of misread. */
-#define VERSION     1
+   and its size, so an old record is rejected instead of misread.
+   v2: the int16 'fps' became 'period_ms', so 12.5 FPS (80 ms) is storable. */
+#define VERSION     2
 
 typedef struct {
     uint16_t      version;
@@ -29,8 +31,9 @@ esp_err_t settings_init(void)
     return err;
 }
 
-bool settings_load(tc_settings_t *out)
+bool settings_load(tc_settings_t *out, bool *migrated)
 {
+    *migrated = false;
     nvs_handle_t h;
     if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) {
         return false;                       /* never saved */
@@ -39,8 +42,18 @@ bool settings_load(tc_settings_t *out)
     size_t len = sizeof r;
     esp_err_t err = nvs_get_blob(h, KEY, &r, &len);
     nvs_close(h);
-    if (err != ESP_OK || len != sizeof r ||
-        r.version != VERSION || r.size != sizeof r.s) {
+    if (err != ESP_OK || len != sizeof r || r.size != sizeof r.s) {
+        return false;
+    }
+    if (r.version == 1) {
+        /* Same layout, but the frame-rate slot held an integer fps. Every v1
+           record says 10, the only default that version had, so carrying it
+           over would quietly keep the board at 10 FPS after the update. The
+           calibration is what is worth keeping; the rate takes the build
+           default, and the caller says so. */
+        r.s.period_ms = CONFIG_TARGETCAM_FRAME_PERIOD_MS;
+        *migrated = true;
+    } else if (r.version != VERSION) {
         return false;
     }
     *out = r.s;

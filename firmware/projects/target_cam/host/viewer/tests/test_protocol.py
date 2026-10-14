@@ -23,7 +23,8 @@ def payload(seed=0, n=160 * 120 * 2):
 def stream(frame_data):
     return (b"# ---- target_cam boot ----\r\n"
             b"#!CFG w=160 h=120 cell=2 hue=0 tol=12 sat=110 val=50 area=25 mm=550 "
-            b"fov=54.0 fps=10 awb=1 be=1 preset=red baud=115200 image=0 stream=1 "
+            b"fov=54.0 fps=12.5 period_ms=80 awb=1 be=1 preset=red baud=115200 image=0 "
+            b"stream=1 "
             b"settings=defaults\r\n"
             b"#!ACK g\r\n"
             + P.encode_frame(7, 12345, frame_data)
@@ -60,6 +61,8 @@ def test_mixed_stream_any_chunking(seed):
     cfg, ack, frame, end, row, nak, baud, cal = ev[1:]
     assert cfg.v["hue"] == 0 and cfg.v["fov"] == 54.0 and cfg.v["preset"] == "red"
     assert cfg.v["settings"] == "defaults"
+    # 12.5 FPS is the sensor's own rate; it must not be truncated to 12.
+    assert cfg.v["fps"] == 12.5 and cfg.v["period_ms"] == 80
     assert ack.cmd == "g"
     assert frame.data == data and frame.seq == 7 and frame.t_ms == 12345
     assert frame.big_endian

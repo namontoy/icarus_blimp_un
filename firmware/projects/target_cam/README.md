@@ -22,6 +22,13 @@ up, the GPIO0 reflash window, and the flash LED driven low.
 >   boots cleanly, holds a steady **10.0 FPS** (`dt_ms` ≈ 100), and detection
 >   costs **≈ 8.2 ms** per frame. The RGB565 byte order is **big-endian**,
 >   as the source said.
+> - **Since 2026-10-14 the default pace is 12.5 FPS (80 ms), measured the same
+>   day:** 751 rows in 60 s (12.505 rows/s), `dt_ms` 80.0 on every row, no
+>   missing rows, detection 7.3–8.2 ms. Under `f30` the loop waits on the
+>   sensor and runs at the same 12.505 FPS, so this is the sensor's own rate in
+>   RGB565 and every frame is used. The 10 FPS figure above is from the old
+>   default. On the camera's clock the period averages 79.97 ms, not 80.00;
+>   why the 80 ms wait and the sensor agree that closely is not established.
 > - **The red preset did not detect the real balloon at 1.5 m.** The centre
 >   patch read hue 304 ± 109, sat 78, val 188: a wide hue spread and low
 >   saturation, probably from the mylar mirroring the room. Loose thresholds
@@ -157,7 +164,9 @@ log).
 **Settings in flash.** A boot starts from the Kconfig defaults and then loads
 any settings saved with `!save` (NVS namespace `targetcam`). The banner's
 `settings` line says which. `!reset` erases them. A reflash does not erase them
-unless you erase the whole flash.
+unless you erase the whole flash. A record saved by the 10 FPS firmware (record
+v1) is still loaded, calibration included, but its frame rate is replaced by the
+build default of 80 ms, and the banner says so; `!save` rewrites it as v2.
 
 For a camera mounted upside down, set `TARGETCAM_VFLIP` and `TARGETCAM_HMIRROR`
 in `menuconfig`. That keeps +az as "right of the nose" and +el as "above it".
@@ -179,7 +188,7 @@ steps 2–4 with a live image.
 ## First power-up checklist
 
 1. Run `host/target_monitor.py --port /dev/ttyACM0`. Check that rows arrive and
-   that `dt_ms` is ~100 ms (10 FPS target).
+   that `dt_ms` is ~80 ms (12.5 FPS target).
 2. Hold the target so it fills the centre of the view, then send **`c`**. The
    firmware samples the central 16×16 patch and sets hue, tolerance and floors
    from it.
@@ -212,7 +221,7 @@ Commands are case-sensitive: `S` is saturation, `s` is the stream.
 | `V<0-255>` | Minimum brightness |
 | `a<px>` | Smallest blob reported |
 | `d<mm>` | Real target diameter for range (default 550); `d0` turns range off |
-| `f<fps>` | Frame rate, 1–30 (the sensor gives ~12.5 at XCLK 20 MHz) |
+| `f<fps>` | Frame rate, 1–30, decimals allowed (`f12.5`). Rounded to a whole-ms period, and the reply gives the real one: `f15` is 67 ms (14.93 FPS). The sensor gives 12.5 at XCLK 20 MHz, so faster gains nothing. |
 | `w<0\|1>` | AWB frozen / auto |
 | `F<deg>` | Horizontal FOV, 10–150 (decimals allowed), for angles and range |
 | `o` | Flip RGB565 byte order |
@@ -305,7 +314,7 @@ measured distances (see the checklist).
 | `main/link.h/.c` | Raw frame transport (`#!FRAME`, CRC-32) and run-time baud changes with the 3 s safety revert. |
 | `main/settings.h/.c` | Versioned settings record in NVS (`!save` / `!load` / `!reset`). |
 | `main/camera_pins.h` | Pin maps: AI-Thinker, ESP-EYE, XIAO S3 (shared with optflow_cam). |
-| `main/Kconfig.projbuild` | Board, FPS, XCLK, FOV, flips, default colour, area, target size. |
+| `main/Kconfig.projbuild` | Board, frame period, XCLK, FOV, flips, default colour, area, target size. |
 | `sdkconfig.defaults` | 240 MHz, 1 kHz tick, PSRAM optional, brownout on. |
 | `host/test_blob_detect.c` | The verification suite above. |
 | `host/target_monitor.py` | Live viewer with an azimuth gauge, and a CSV logger (needs `pyserial`). |

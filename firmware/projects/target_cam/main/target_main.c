@@ -10,7 +10,9 @@
  * handling (boot report before the camera powers up, the GPIO0 reflash window,
  * flash LED driven low, radios never started):
  *
- *  1. HEAT. QQVGA, paced frames, no WiFi. The idle time is the point.
+ *  1. HEAT. QQVGA, paced frames, no WiFi. The idle time is the point. The
+ *     pace is 80 ms (12.5 FPS) by default: the sensor's own period at XCLK
+ *     20 MHz, so every frame it makes is used, and nothing faster exists.
  *
  *  2. HONEST FAILURE. ok=0 means NO TARGET, never "target dead ahead". A blob
  *     touching the frame edge is flagged clipped and gets no range, because
@@ -73,7 +75,7 @@ static const char *TAG = "target";
 #endif
 
 /* Runtime-adjustable state. Single-threaded, so no locking. */
-static int   s_target_fps = CONFIG_TARGETCAM_TARGET_FPS;
+static int   s_period_ms  = CONFIG_TARGETCAM_FRAME_PERIOD_MS;
 static float s_hfov_deg   = (float)CONFIG_TARGETCAM_HFOV_DEG;
 static float s_target_mm  = (float)CONFIG_TARGETCAM_TARGET_MM;
 static bool  s_streaming  = true;
@@ -123,6 +125,14 @@ static blob_cfg_t s_cfg = {
 };
 
 /* ------------------------------------------------------------------ */
+
+/* The pace is kept as a period because that is what the loop waits on, and
+   because 12.5 FPS - the sensor's rate - is not an integer. FPS is only how it
+   is shown. */
+static float frame_fps(void)
+{
+    return 1000.0f / (float)s_period_ms;
+}
 
 /* Focal length in pixels, from the pinhole model. Bearing and range both go
    through this, so an uncalibrated FOV scales every angle and every range. */
@@ -252,7 +262,7 @@ static void set_awb(bool on)
 
 static void live_defaults(void)
 {
-    s_target_fps     = CONFIG_TARGETCAM_TARGET_FPS;
+    s_period_ms      = CONFIG_TARGETCAM_FRAME_PERIOD_MS;
     s_hfov_deg       = (float)CONFIG_TARGETCAM_HFOV_DEG;
     s_target_mm      = (float)CONFIG_TARGETCAM_TARGET_MM;
     s_cfg.min_area   = CONFIG_TARGETCAM_MIN_AREA;
@@ -277,7 +287,7 @@ static tc_settings_t live_capture(void)
     t.min_area   = s_cfg.min_area;
     t.target_mm  = (int32_t)s_target_mm;
     t.hfov_deg   = s_hfov_deg;
-    t.fps        = (int16_t)s_target_fps;
+    t.period_ms  = (int16_t)s_period_ms;
     t.awb        = s_awb ? 1 : 0;
     t.big_endian = (int8_t)s_cfg.big_endian;
     t.preset     = (int8_t)s_preset;
@@ -294,7 +304,7 @@ static bool live_apply(const tc_settings_t *t)
         t->min_area < 1 || t->min_area > FRAME_W * FRAME_H ||
         t->target_mm < 0 || t->target_mm > 5000 ||
         !(t->hfov_deg >= 10.0f && t->hfov_deg <= 150.0f) ||
-        t->fps < 1 || t->fps > 30 ||
+        t->period_ms < 33 || t->period_ms > 1000 ||
         (t->awb != 0 && t->awb != 1) || (t->big_endian != 0 && t->big_endian != 1) ||
         t->preset < -1 || t->preset >= BLOB_PRESET_COUNT) {
         return false;
@@ -307,7 +317,7 @@ static bool live_apply(const tc_settings_t *t)
     s_cfg.big_endian = t->big_endian;
     s_target_mm      = (float)t->target_mm;
     s_hfov_deg       = t->hfov_deg;
-    s_target_fps     = t->fps;
+    s_period_ms      = t->period_ms;
     s_preset         = t->preset;
     /* Keep the preset's name only if its numbers still match: a firmware
        update may have retuned the preset since this record was saved. */
@@ -340,11 +350,11 @@ static const char *settings_state(void)
 static void print_cfg(void)
 {
     printf("#!CFG w=%d h=%d cell=%d hue=%d tol=%d sat=%d val=%d area=%d mm=%.0f "
-           "fov=%.1f fps=%d awb=%d be=%d preset=%s baud=%d image=%d stream=%d "
-           "settings=%s\n",
+           "fov=%.1f fps=%.4g period_ms=%d awb=%d be=%d preset=%s baud=%d image=%d "
+           "stream=%d settings=%s\n",
            FRAME_W, FRAME_H, s_cfg.cell, s_cfg.hue, s_cfg.hue_tol, s_cfg.sat_min,
-           s_cfg.val_min, s_cfg.min_area, s_target_mm, s_hfov_deg, s_target_fps,
-           s_awb ? 1 : 0, s_cfg.big_endian,
+           s_cfg.val_min, s_cfg.min_area, s_target_mm, s_hfov_deg, frame_fps(),
+           s_period_ms, s_awb ? 1 : 0, s_cfg.big_endian,
            s_preset >= 0 ? blob_preset_name(s_preset) : "custom",
            link_baud(), s_image ? 1 : 0, s_streaming ? 1 : 0, settings_state());
 }
@@ -355,9 +365,10 @@ static void print_banner(void)
 {
     float f = focal_px();
     printf("\n# ESP32-CAM forward colour target\n");
-    printf("# frame        %dx%d RGB565 (%s-endian), XCLK %d MHz, paced to %d FPS\n",
+    printf("# frame        %dx%d RGB565 (%s-endian), XCLK %d MHz, paced to %.4g FPS "
+           "(%d ms)\n",
            FRAME_W, FRAME_H, s_cfg.big_endian ? "big" : "little",
-           CONFIG_TARGETCAM_XCLK_MHZ, s_target_fps);
+           CONFIG_TARGETCAM_XCLK_MHZ, frame_fps(), s_period_ms);
     printf("# colour       %s: hue %d +/-%d deg, sat >= %d, val >= %d, AWB %s\n",
            s_preset >= 0 ? blob_preset_name(s_preset) : "custom",
            s_cfg.hue, s_cfg.hue_tol, s_cfg.sat_min, s_cfg.val_min,
@@ -382,7 +393,7 @@ static void print_banner(void)
     printf("# commands     p<red|blue|green|orange> preset | c calibrate on centre | "
            "H<deg> hue | T<deg> tol | S<0-255> sat | V<0-255> val\n");
     printf("#              a<px> area | d<mm> size | F<deg> h-FOV |");
-    printf(" f<fps> rate | w<0|1> AWB | o byte order | m mask | "
+    printf(" f<fps> rate (f12.5 ok) | w<0|1> AWB | o byte order | m mask | "
            "s stream | ? info\n");
     printf("#              k config | g grab frame | v<0|1> every frame | "
            "B<baud> link speed | !save | !load | !reset\n");
@@ -437,7 +448,8 @@ static cmd_res_t run_store_command(const char *line)
     }
     if (strcmp(line, "!load") == 0) {
         tc_settings_t t;
-        if (!settings_load(&t)) {
+        bool migrated;
+        if (!settings_load(&t, &migrated)) {
             snprintf(s_why, sizeof s_why, "nothing saved in flash");
             return CMD_NAK;
         }
@@ -447,7 +459,8 @@ static cmd_res_t run_store_command(const char *line)
         }
         s_ref = live_capture();
         s_ref_saved = true;
-        printf("# settings reloaded from flash\n");
+        printf("# settings reloaded from flash%s\n",
+               migrated ? " (v1 record: frame rate set to the build default)" : "");
         return CMD_OK;
     }
     if (strcmp(line, "!reset") == 0) {
@@ -530,10 +543,21 @@ static cmd_res_t run_command(const char *line)
         printf("# h-FOV %.1f deg -> f %.1f px\n", f, focal_px());
         return CMD_OK;
     }
-    case 'f':
-        if (!arg_in(line + 1, 1, 30, &v)) return CMD_NAK;
-        s_target_fps = v; printf("# target %d FPS\n", v);
+    case 'f': {
+        /* Fractional, because the sensor's own rate is 12.5. The loop paces
+           in whole milliseconds, so the rate is rounded to a period and the
+           reply says what was really set: f15 is 67 ms, 14.93 FPS. */
+        char *end;
+        float f = strtof(line + 1, &end);
+        while (*end == ' ') end++;
+        if (end == line + 1 || *end != '\0' || !(f >= 1.0f && f <= 30.0f)) {
+            snprintf(s_why, sizeof s_why, "out of range (1..30)");
+            return CMD_NAK;
+        }
+        s_period_ms = (int)lroundf(1000.0f / f);
+        printf("# frame period %d ms (%.4g FPS)\n", s_period_ms, frame_fps());
         return CMD_OK;
+    }
     case 'w':
         if (!arg_in(line + 1, 0, 1, &v)) return CMD_NAK;
         set_awb(v != 0);
@@ -799,11 +823,16 @@ void app_main(void)
                "unavailable\n", esp_err_to_name(nvs_err));
     } else {
         tc_settings_t t;
-        if (settings_load(&t)) {
+        bool migrated;
+        if (settings_load(&t, &migrated)) {
             if (live_apply(&t)) {
                 s_ref = live_capture();
                 s_ref_saved = true;
                 printf("# settings      loaded from flash\n");
+                if (migrated) {
+                    printf("# settings      v1 record: frame rate set to the build "
+                           "default %d ms; !save to rewrite it\n", s_period_ms);
+                }
             } else {
                 printf("# settings      saved record out of range, IGNORED: "
                        "running defaults\n");
@@ -869,7 +898,7 @@ void app_main(void)
 
     while (1) {
         /* Pace first, work second. The idle time is the thermal budget. */
-        TickType_t period_ticks = pdMS_TO_TICKS(1000 / s_target_fps);
+        TickType_t period_ticks = pdMS_TO_TICKS(s_period_ms);
         if (period_ticks == 0) {
             period_ticks = 1;
         }

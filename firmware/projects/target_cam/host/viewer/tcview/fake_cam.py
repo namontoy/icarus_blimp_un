@@ -26,8 +26,10 @@ from . import detector as D
 from .protocol import BAUDS, BOOT_BAUD, COLUMNS, encode_frame, frame_seconds
 
 W, H = 160, 120
-DEFAULT = dict(hue=0, tol=12, sat=110, val=50, area=25, mm=550, fov=54.0, fps=10,
-               awb=1, be=1, preset="red")
+# The pace is a period, as on the camera: 80 ms is 12.5 FPS, which no integer
+# fps can express.
+DEFAULT = dict(hue=0, tol=12, sat=110, val=50, area=25, mm=550, fov=54.0,
+               period_ms=80, awb=1, be=1, preset="red")
 
 
 def _rgb565(r, g, b) -> np.ndarray:
@@ -116,11 +118,12 @@ class FakeCamera:
     def _print_cfg(self):
         c = self.cfg
         self._print("#!CFG w=%d h=%d cell=2 hue=%d tol=%d sat=%d val=%d area=%d mm=%d "
-                    "fov=%.1f fps=%d awb=%d be=%d preset=%s baud=%d image=%d stream=%d "
-                    "settings=%s\n" % (W, H, c["hue"], c["tol"], c["sat"], c["val"],
-                                       c["area"], c["mm"], c["fov"], c["fps"], c["awb"],
-                                       c["be"], c["preset"], self.baud, int(self.image),
-                                       int(self.stream), self._settings_state()))
+                    "fov=%.1f fps=%.4g period_ms=%d awb=%d be=%d preset=%s baud=%d "
+                    "image=%d stream=%d settings=%s\n"
+                    % (W, H, c["hue"], c["tol"], c["sat"], c["val"], c["area"], c["mm"],
+                       c["fov"], 1000.0 / c["period_ms"], c["period_ms"], c["awb"],
+                       c["be"], c["preset"], self.baud, int(self.image),
+                       int(self.stream), self._settings_state()))
 
     # ---- commands ---------------------------------------------------------
 
@@ -166,7 +169,13 @@ class FakeCamera:
         elif c == "d":
             err = self._set_int("mm", arg, 0, 5000)
         elif c == "f":
-            err = self._set_int("fps", arg, 1, 30)
+            # Decimals allowed, rounded to a whole-ms period like lroundf().
+            try:
+                v = float(arg)
+                assert 1.0 <= v <= 30.0
+                self.cfg["period_ms"] = int(1000.0 / v + 0.5)
+            except (ValueError, AssertionError):
+                err = "out of range (1..30)"
         elif c == "w":
             err = self._set_int("awb", arg, 0, 1)
         elif c == "F":
@@ -268,7 +277,7 @@ class FakeCamera:
         prev = None
         nxt = t0
         while not self._stop.is_set():
-            nxt += 1.0 / self.cfg["fps"]
+            nxt += self.cfg["period_ms"] / 1000.0
             delay = nxt - time.monotonic()
             if delay > 0:
                 time.sleep(delay)

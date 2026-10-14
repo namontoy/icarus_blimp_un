@@ -41,6 +41,13 @@ def test_bench_session(app, rig):
     cal, flight = win.calib, win.flight
     assert wait(app, lambda: cal.cfg.get("hue") == 0), "no #!CFG from the camera"
     assert wait(app, lambda: flight.last_row is not None)
+    assert cal.cfg["fps"] == 12.5 and cal.cfg["period_ms"] == 80
+
+    # A fractional rate is rounded to a whole-ms period, and #!CFG says so.
+    win.send("f15")
+    assert wait(app, lambda: cal.cfg.get("period_ms") == 67)
+    win.send("f12.5")
+    assert wait(app, lambda: cal.cfg.get("period_ms") == 80 and win.link.pending() == 0)
 
     # Grab one frame: it arrives, its row pairs with it by t_ms.
     win.send("g")

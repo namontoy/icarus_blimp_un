@@ -9,7 +9,8 @@
  *
  * The record is a versioned, fixed-size struct. A record of another version or
  * size is ignored (defaults are used, and the banner says so) rather than
- * reinterpreted.
+ * reinterpreted. The one exception is the v1 record, which settings_load()
+ * migrates field by field: see there.
  */
 #pragma once
 
@@ -25,7 +26,7 @@ typedef struct {
     int32_t min_area;
     int32_t target_mm;      /* 0 = range off                                  */
     float   hfov_deg;
-    int16_t fps;
+    int16_t period_ms;      /* frame period; v1 stored an integer fps here    */
     int8_t  awb;            /* 1 auto, 0 frozen                               */
     int8_t  big_endian;
     int8_t  preset;         /* blob_preset_t, or -1 for hand-tuned            */
@@ -35,8 +36,9 @@ typedef struct {
    losing a calibration is better than a camera that will not boot. */
 esp_err_t settings_init(void);
 
-/* true and *out filled if a valid saved record exists. */
-bool settings_load(tc_settings_t *out);
+/* true and *out filled if a valid saved record exists. *migrated is set when
+   it was a v1 record, whose frame rate was replaced by the build default. */
+bool settings_load(tc_settings_t *out, bool *migrated);
 
 esp_err_t settings_save(const tc_settings_t *s);
 
