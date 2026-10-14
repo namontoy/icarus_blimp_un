@@ -43,6 +43,8 @@
 
 #include "camera_pins.h"
 #include "blob_detect.h"
+#include "link.h"
+#include "settings.h"
 
 static const char *TAG = "target";
 
@@ -78,20 +80,36 @@ static bool  s_streaming  = true;
 static bool  s_dump_mask;           /* set by 'm', served on the next frame */
 static bool  s_calibrate;           /* set by 'c', served on the next frame */
 static bool  s_awb        = true;
+static bool  s_image;               /* 'v1': send every frame to the PC viewer */
+static bool  s_grab;                /* 'g': send the next frame only */
+static int   s_pending_baud;        /* 'B': switched once its ACK is out */
 
 static void *s_work;                /* blob_detect workspace, allocated once */
 
+#if defined(CONFIG_TARGETCAM_PRESET_BLUE)
+#define DEFAULT_PRESET  BLOB_PRESET_BLUE
+#elif defined(CONFIG_TARGETCAM_PRESET_GREEN)
+#define DEFAULT_PRESET  BLOB_PRESET_GREEN
+#elif defined(CONFIG_TARGETCAM_PRESET_ORANGE)
+#define DEFAULT_PRESET  BLOB_PRESET_ORANGE
+#else
+#define DEFAULT_PRESET  BLOB_PRESET_RED
+#endif
+
 /* The colour preset in use, or -1 once thresholds are hand-tuned (H/T/S/V or
    'c'), so the banner never claims "red" for settings that are not red's. */
-#if defined(CONFIG_TARGETCAM_PRESET_BLUE)
-static int s_preset = BLOB_PRESET_BLUE;
-#elif defined(CONFIG_TARGETCAM_PRESET_GREEN)
-static int s_preset = BLOB_PRESET_GREEN;
-#elif defined(CONFIG_TARGETCAM_PRESET_ORANGE)
-static int s_preset = BLOB_PRESET_ORANGE;
-#else
-static int s_preset = BLOB_PRESET_RED;
-#endif
+static int s_preset = DEFAULT_PRESET;
+
+/* What the next boot would run: the record in flash, or the Kconfig defaults
+   when nothing is saved. #!CFG compares the live settings against it, so the
+   viewer can say "modified, not saved" - a calibration that dies with the next
+   power cycle should never look finished. */
+static tc_settings_t s_ref;
+static bool          s_ref_saved;
+static bool          s_nvs_ok;
+
+/* Why the last command was refused, for its #!NAK line. */
+static char s_why[64];
 
 static blob_cfg_t s_cfg = {
     .width      = FRAME_W,
@@ -230,6 +248,108 @@ static void set_awb(bool on)
 }
 
 /* ------------------------------------------------------------------ */
+/* Live settings <-> the record kept in flash                          */
+
+static void live_defaults(void)
+{
+    s_target_fps     = CONFIG_TARGETCAM_TARGET_FPS;
+    s_hfov_deg       = (float)CONFIG_TARGETCAM_HFOV_DEG;
+    s_target_mm      = (float)CONFIG_TARGETCAM_TARGET_MM;
+    s_cfg.min_area   = CONFIG_TARGETCAM_MIN_AREA;
+    s_cfg.big_endian = 1;
+    s_preset         = DEFAULT_PRESET;
+    blob_preset_apply(&s_cfg, s_preset);
+    /* Before the camera starts there is no sensor yet; set_awb() then only
+       records the wish, and app_main() applies it once the sensor is up. */
+    set_awb(true);
+}
+
+/* Zeroed first, so the struct's padding is zero too and two captures of the
+   same settings compare equal with memcmp(). */
+static tc_settings_t live_capture(void)
+{
+    tc_settings_t t;
+    memset(&t, 0, sizeof t);
+    t.hue        = (int16_t)s_cfg.hue;
+    t.hue_tol    = (int16_t)s_cfg.hue_tol;
+    t.sat_min    = (int16_t)s_cfg.sat_min;
+    t.val_min    = (int16_t)s_cfg.val_min;
+    t.min_area   = s_cfg.min_area;
+    t.target_mm  = (int32_t)s_target_mm;
+    t.hfov_deg   = s_hfov_deg;
+    t.fps        = (int16_t)s_target_fps;
+    t.awb        = s_awb ? 1 : 0;
+    t.big_endian = (int8_t)s_cfg.big_endian;
+    t.preset     = (int8_t)s_preset;
+    return t;
+}
+
+/* Apply a stored record, or change nothing and return false if any field is
+   outside the range its command accepts: a record from a buggy build must not
+   become a detector that silently matches nothing. */
+static bool live_apply(const tc_settings_t *t)
+{
+    if (t->hue < 0 || t->hue > 359 || t->hue_tol < 1 || t->hue_tol > 90 ||
+        t->sat_min < 0 || t->sat_min > 255 || t->val_min < 0 || t->val_min > 255 ||
+        t->min_area < 1 || t->min_area > FRAME_W * FRAME_H ||
+        t->target_mm < 0 || t->target_mm > 5000 ||
+        !(t->hfov_deg >= 10.0f && t->hfov_deg <= 150.0f) ||
+        t->fps < 1 || t->fps > 30 ||
+        (t->awb != 0 && t->awb != 1) || (t->big_endian != 0 && t->big_endian != 1) ||
+        t->preset < -1 || t->preset >= BLOB_PRESET_COUNT) {
+        return false;
+    }
+    s_cfg.hue        = t->hue;
+    s_cfg.hue_tol    = t->hue_tol;
+    s_cfg.sat_min    = t->sat_min;
+    s_cfg.val_min    = t->val_min;
+    s_cfg.min_area   = t->min_area;
+    s_cfg.big_endian = t->big_endian;
+    s_target_mm      = (float)t->target_mm;
+    s_hfov_deg       = t->hfov_deg;
+    s_target_fps     = t->fps;
+    s_preset         = t->preset;
+    /* Keep the preset's name only if its numbers still match: a firmware
+       update may have retuned the preset since this record was saved. */
+    if (s_preset >= 0) {
+        blob_cfg_t p = s_cfg;
+        blob_preset_apply(&p, s_preset);
+        if (p.hue != s_cfg.hue || p.hue_tol != s_cfg.hue_tol ||
+            p.sat_min != s_cfg.sat_min || p.val_min != s_cfg.val_min) {
+            s_preset = -1;
+        }
+    }
+    set_awb(t->awb != 0);
+    return true;
+}
+
+/* "saved" and "defaults" both mean a power cycle gives back exactly what is
+   running now; "modified" means it would not. */
+static const char *settings_state(void)
+{
+    tc_settings_t now = live_capture();
+    if (memcmp(&now, &s_ref, sizeof now) != 0) {
+        return "modified";
+    }
+    return s_ref_saved ? "saved" : "defaults";
+}
+
+/* The machine-readable config. Printed after every accepted command, so the
+   viewer's controls always show what the camera really uses rather than what
+   the PC last asked for. */
+static void print_cfg(void)
+{
+    printf("#!CFG w=%d h=%d cell=%d hue=%d tol=%d sat=%d val=%d area=%d mm=%.0f "
+           "fov=%.1f fps=%d awb=%d be=%d preset=%s baud=%d image=%d stream=%d "
+           "settings=%s\n",
+           FRAME_W, FRAME_H, s_cfg.cell, s_cfg.hue, s_cfg.hue_tol, s_cfg.sat_min,
+           s_cfg.val_min, s_cfg.min_area, s_target_mm, s_hfov_deg, s_target_fps,
+           s_awb ? 1 : 0, s_cfg.big_endian,
+           s_preset >= 0 ? blob_preset_name(s_preset) : "custom",
+           link_baud(), s_image ? 1 : 0, s_streaming ? 1 : 0, settings_state());
+}
+
+/* ------------------------------------------------------------------ */
 
 static void print_banner(void)
 {
@@ -254,32 +374,220 @@ static void print_banner(void)
     } else {
         printf("# range        off (set the target size with d<mm>)\n");
     }
+    const char *st = settings_state();
+    printf("# settings     %s\n",
+           strcmp(st, "saved") == 0    ? "saved (loaded from flash)" :
+           strcmp(st, "defaults") == 0 ? "defaults (nothing saved in flash)" :
+                                         "modified (not saved: !save keeps them)");
     printf("# commands     p<red|blue|green|orange> preset | c calibrate on centre | "
            "H<deg> hue | T<deg> tol | S<0-255> sat | V<0-255> val\n");
-    printf("#              a<px> area | d<mm> size |");
+    printf("#              a<px> area | d<mm> size | F<deg> h-FOV |");
     printf(" f<fps> rate | w<0|1> AWB | o byte order | m mask | "
            "s stream | ? info\n");
+    printf("#              k config | g grab frame | v<0|1> every frame | "
+           "B<baud> link speed | !save | !load | !reset\n");
     printf("# columns      t_ms,ok,cx_px,cy_px,az_deg,el_deg,area_px,w_px,h_px,"
            "fill,range_mm,clipped,blobs,matched_px,b2_az,b2_el,b2_range_mm,"
            "b3_az,b3_el,b3_range_mm,b4_az,b4_el,b4_range_mm,dt_ms,proc_us\n");
     fflush(stdout);
 }
 
-/* Parse an integer argument and apply it if it is in range. */
+/* Parse an integer argument. Trailing junk is refused, not ignored: on the
+   bench a burst of commands arrived with bytes dropped and changed, and
+   "H33x" must not quietly become hue 33. */
 static bool arg_in(const char *s, int lo, int hi, int *out)
 {
     char *end;
     long v = strtol(s, &end, 10);
-    if (end == s || v < lo || v > hi) {
-        printf("# out of range (%d..%d)\n", lo, hi);
+    while (*end == ' ') end++;
+    if (end == s || *end != '\0' || v < lo || v > hi) {
+        snprintf(s_why, sizeof s_why, "out of range (%d..%d)", lo, hi);
         return false;
     }
     *out = (int)v;
     return true;
 }
 
-/* Commands are case-sensitive: 'S' sets saturation, 's' toggles the stream.
-   Read without blocking so pacing is never disturbed. */
+/* How a command went, for the protocol line poll_commands() prints after it. */
+typedef enum {
+    CMD_NAK,        /* refused; s_why says why                                 */
+    CMD_OK,         /* done: #!ACK, then #!CFG                                 */
+    CMD_LATER,      /* accepted, finishes later: #!ACK now, no #!CFG yet       */
+} cmd_res_t;
+
+/* The '!' commands touch flash, so they are whole words: no single corrupted
+   byte can turn into a write. */
+static cmd_res_t run_store_command(const char *line)
+{
+    if (!s_nvs_ok) {
+        snprintf(s_why, sizeof s_why, "flash storage (NVS) did not initialise");
+        return CMD_NAK;
+    }
+    if (strcmp(line, "!save") == 0) {
+        tc_settings_t t = live_capture();
+        esp_err_t err = settings_save(&t);
+        if (err != ESP_OK) {
+            snprintf(s_why, sizeof s_why, "save failed: %s", esp_err_to_name(err));
+            return CMD_NAK;
+        }
+        s_ref = t;
+        s_ref_saved = true;
+        printf("# settings saved to flash; every boot now starts with them\n");
+        return CMD_OK;
+    }
+    if (strcmp(line, "!load") == 0) {
+        tc_settings_t t;
+        if (!settings_load(&t)) {
+            snprintf(s_why, sizeof s_why, "nothing saved in flash");
+            return CMD_NAK;
+        }
+        if (!live_apply(&t)) {
+            snprintf(s_why, sizeof s_why, "saved record is out of range; ignored");
+            return CMD_NAK;
+        }
+        s_ref = live_capture();
+        s_ref_saved = true;
+        printf("# settings reloaded from flash\n");
+        return CMD_OK;
+    }
+    if (strcmp(line, "!reset") == 0) {
+        esp_err_t err = settings_erase();
+        if (err != ESP_OK) {
+            snprintf(s_why, sizeof s_why, "erase failed: %s", esp_err_to_name(err));
+            return CMD_NAK;
+        }
+        live_defaults();
+        s_ref = live_capture();
+        s_ref_saved = false;
+        printf("# saved settings erased; running the Kconfig defaults\n");
+        return CMD_OK;
+    }
+    snprintf(s_why, sizeof s_why, "unknown command (!save, !load, !reset)");
+    return CMD_NAK;
+}
+
+static cmd_res_t run_command(const char *line)
+{
+    int v;
+    switch (line[0]) {
+    case '!':
+        return run_store_command(line);
+    case 'c':
+        s_calibrate = true;
+        return CMD_LATER;               /* #!CFG follows the calibration */
+    case 'p': {
+        /* 'p red', 'pred', 'p0' and 'pr' all select red. */
+        const char *a = line + 1;
+        while (*a == ' ') a++;
+        int p = (*a >= '0' && *a <= '9') ? atoi(a) : blob_preset_find(a);
+        if (!blob_preset_apply(&s_cfg, p)) {
+            snprintf(s_why, sizeof s_why, "unknown preset (red, blue, green, orange)");
+            return CMD_NAK;
+        }
+        s_preset = p;
+        printf("# preset %s: hue %d +/-%d, sat >= %d, val >= %d\n",
+               blob_preset_name(p), s_cfg.hue, s_cfg.hue_tol,
+               s_cfg.sat_min, s_cfg.val_min);
+        return CMD_OK;
+    }
+    case 'H':
+        if (!arg_in(line + 1, 0, 359, &v)) return CMD_NAK;
+        s_cfg.hue = v; s_preset = -1; printf("# hue %d\n", v);
+        return CMD_OK;
+    case 'T':
+        if (!arg_in(line + 1, 1, 90, &v)) return CMD_NAK;
+        s_cfg.hue_tol = v; s_preset = -1; printf("# hue tol %d\n", v);
+        return CMD_OK;
+    case 'S':
+        if (!arg_in(line + 1, 0, 255, &v)) return CMD_NAK;
+        s_cfg.sat_min = v; s_preset = -1; printf("# sat min %d\n", v);
+        return CMD_OK;
+    case 'V':
+        if (!arg_in(line + 1, 0, 255, &v)) return CMD_NAK;
+        s_cfg.val_min = v; s_preset = -1; printf("# val min %d\n", v);
+        return CMD_OK;
+    case 'a':
+        if (!arg_in(line + 1, 1, FRAME_W * FRAME_H, &v)) return CMD_NAK;
+        s_cfg.min_area = v;
+        printf("# min area %d px\n", v);
+        return CMD_OK;
+    case 'd':
+        if (!arg_in(line + 1, 0, 5000, &v)) return CMD_NAK;
+        s_target_mm = (float)v;
+        printf("# target size %d mm%s\n", v, v ? "" : " (range off)");
+        return CMD_OK;
+    case 'F': {
+        /* Fractional, because the FOV is measured, and 1 deg of h-FOV is ~2%
+           of every bearing and range. */
+        char *end;
+        float f = strtof(line + 1, &end);
+        while (*end == ' ') end++;
+        if (end == line + 1 || *end != '\0' || !(f >= 10.0f && f <= 150.0f)) {
+            snprintf(s_why, sizeof s_why, "out of range (10..150)");
+            return CMD_NAK;
+        }
+        s_hfov_deg = f;
+        printf("# h-FOV %.1f deg -> f %.1f px\n", f, focal_px());
+        return CMD_OK;
+    }
+    case 'f':
+        if (!arg_in(line + 1, 1, 30, &v)) return CMD_NAK;
+        s_target_fps = v; printf("# target %d FPS\n", v);
+        return CMD_OK;
+    case 'w':
+        if (!arg_in(line + 1, 0, 1, &v)) return CMD_NAK;
+        set_awb(v != 0);
+        printf("# AWB %s\n", s_awb ? "auto" : "frozen at current gains");
+        return CMD_OK;
+    case 'o':
+        s_cfg.big_endian = !s_cfg.big_endian;
+        printf("# RGB565 byte order now %s-endian\n",
+               s_cfg.big_endian ? "big" : "little");
+        return CMD_OK;
+    case 'm':
+        s_dump_mask = true;
+        return CMD_OK;
+    case 's':
+        s_streaming = !s_streaming;
+        printf("# streaming %s\n", s_streaming ? "on" : "off");
+        return CMD_OK;
+    case 'k':
+        return CMD_OK;                  /* the #!CFG line is the answer */
+    case 'g':
+        s_grab = true;
+        return CMD_OK;
+    case 'v':
+        if (!arg_in(line + 1, 0, 1, &v)) return CMD_NAK;
+        s_image = v != 0;
+        printf("# image %s\n", s_image ? "every frame (timing is NOT flight-representative)"
+                                       : "off");
+        return CMD_OK;
+    case 'B':
+        if (!arg_in(line + 1, 1, 4000000, &v)) return CMD_NAK;
+        if (!link_baud_allowed(v)) {
+            snprintf(s_why, sizeof s_why,
+                     "unsupported (115200 230400 460800 921600 1500000 2000000)");
+            return CMD_NAK;
+        }
+        s_pending_baud = v;
+        return CMD_LATER;               /* the viewer confirms with 'k' */
+    case '?':
+        print_banner();
+        return CMD_OK;
+    default:
+        snprintf(s_why, sizeof s_why, "unknown command");
+        return CMD_NAK;
+    }
+}
+
+/*
+ * Commands are case-sensitive: 'S' sets saturation, 's' toggles the stream.
+ * Read without blocking so pacing is never disturbed.
+ *
+ * Every line gets "#!ACK <line>" or "#!NAK <line> -- <reason>", so the viewer
+ * knows each command arrived intact instead of assuming it did; the human
+ * "# ..." lines are unchanged, for a plain terminal and target_monitor.py.
+ */
 static void poll_commands(void)
 {
     static char line[32];
@@ -298,79 +606,28 @@ static void poll_commands(void)
             continue;
         }
         len = 0;
-        int v;
-        switch (line[0]) {
-        case 'c':
-            s_calibrate = true;
-            break;
-        case 'p': {
-            /* 'p red', 'pred', 'p0' and 'pr' all select red. */
-            const char *a = line + 1;
-            while (*a == ' ') a++;
-            int p = (*a >= '0' && *a <= '9') ? atoi(a) : blob_preset_find(a);
-            if (blob_preset_apply(&s_cfg, p)) {
-                s_preset = p;
-                printf("# preset %s: hue %d +/-%d, sat >= %d, val >= %d\n",
-                       blob_preset_name(p), s_cfg.hue, s_cfg.hue_tol,
-                       s_cfg.sat_min, s_cfg.val_min);
-            } else {
-                printf("# unknown preset (red, blue, green, orange)\n");
-            }
-            break;
+        cmd_res_t res = run_command(line);
+        if (res != CMD_NAK) {
+            /* Only a line that parsed as a command proves the PC can talk at
+               this baud; line noise can end in a newline by chance. */
+            link_note_command();
         }
-        case 'H':
-            if (arg_in(line + 1, 0, 359, &v)) { s_cfg.hue = v; s_preset = -1; printf("# hue %d\n", v); }
-            break;
-        case 'T':
-            if (arg_in(line + 1, 1, 90, &v)) { s_cfg.hue_tol = v; s_preset = -1; printf("# hue tol %d\n", v); }
-            break;
-        case 'S':
-            if (arg_in(line + 1, 0, 255, &v)) { s_cfg.sat_min = v; s_preset = -1; printf("# sat min %d\n", v); }
-            break;
-        case 'V':
-            if (arg_in(line + 1, 0, 255, &v)) { s_cfg.val_min = v; s_preset = -1; printf("# val min %d\n", v); }
-            break;
-        case 'a':
-            if (arg_in(line + 1, 1, FRAME_W * FRAME_H, &v)) {
-                s_cfg.min_area = v;
-                printf("# min area %d px\n", v);
+        if (res == CMD_NAK) {
+            printf("# %s\n", s_why);
+            printf("#!NAK %s -- %s\n", line, s_why);
+        } else {
+            printf("#!ACK %s\n", line);
+            if (res == CMD_OK) {
+                print_cfg();
             }
-            break;
-        case 'd':
-            if (arg_in(line + 1, 0, 5000, &v)) {
-                s_target_mm = (float)v;
-                printf("# target size %d mm%s\n", v, v ? "" : " (range off)");
-            }
-            break;
-        case 'f':
-            if (arg_in(line + 1, 1, 30, &v)) { s_target_fps = v; printf("# target %d FPS\n", v); }
-            break;
-        case 'w':
-            if (arg_in(line + 1, 0, 1, &v)) {
-                set_awb(v != 0);
-                printf("# AWB %s\n", s_awb ? "auto" : "frozen at current gains");
-            }
-            break;
-        case 'o':
-            s_cfg.big_endian = !s_cfg.big_endian;
-            printf("# RGB565 byte order now %s-endian\n",
-                   s_cfg.big_endian ? "big" : "little");
-            break;
-        case 'm':
-            s_dump_mask = true;
-            break;
-        case 's':
-            s_streaming = !s_streaming;
-            printf("# streaming %s\n", s_streaming ? "on" : "off");
-            break;
-        case '?':
-            print_banner();
-            break;
-        default:
-            printf("# unknown command '%c'\n", line[0]);
-            break;
         }
         fflush(stdout);
+        if (s_pending_baud) {
+            /* After the ACK, which has to go out at the speed the PC is
+               still listening on. */
+            link_set_baud(s_pending_baud);
+            s_pending_baud = 0;
+        }
     }
 }
 
@@ -396,6 +653,8 @@ static void calibrate(const uint8_t *frame)
 
     printf("# calibrate    centre %dx%d: hue %d +/-%d, sat %d, val %d\n",
            CAL_PATCH, CAL_PATCH, c.hue, c.hue_spread, c.sat, c.val);
+    printf("#!CAL %s hue=%d spread=%d sat=%d val=%d\n",
+           c.sat < 70 ? "refused" : "ok", c.hue, c.hue_spread, c.sat, c.val);
     if (c.sat < 70) {
         printf("# calibrate    REFUSED: saturation %d is too low to separate from "
                "walls. Fill the centre with the target, or use a more vivid one.\n",
@@ -417,7 +676,9 @@ static void calibrate(const uint8_t *frame)
 
 /* 'm': the mask exactly as the detector sees it, 4x4 pixels per character.
    '#' at least half the pixels match, '+' some do, '.' none; 'X' marks the
-   reported centroid. The only way to see what is going on without WiFi. */
+   reported centroid. The text fallback for when the PC viewer is not to hand.
+   It tests pixels one by one rather than through blob_mask(), which would
+   need a 19 kB buffer in DRAM that is already holding two frames. */
 static void dump_mask(const uint8_t *frame, const blob_result_t *r)
 {
     int xc = r->found ? (int)r->b[0].cx / 4 : -1;
@@ -526,7 +787,32 @@ void app_main(void)
 {
     boot_report();
     quiesce_heat_sources();
-    blob_preset_apply(&s_cfg, s_preset);
+
+    /* Kconfig defaults first; a saved calibration, if any, replaces them. */
+    live_defaults();
+    s_ref = live_capture();
+    s_ref_saved = false;
+    esp_err_t nvs_err = settings_init();
+    s_nvs_ok = nvs_err == ESP_OK;
+    if (!s_nvs_ok) {
+        printf("# settings      NVS init failed (%s): running defaults, !save "
+               "unavailable\n", esp_err_to_name(nvs_err));
+    } else {
+        tc_settings_t t;
+        if (settings_load(&t)) {
+            if (live_apply(&t)) {
+                s_ref = live_capture();
+                s_ref_saved = true;
+                printf("# settings      loaded from flash\n");
+            } else {
+                printf("# settings      saved record out of range, IGNORED: "
+                       "running defaults\n");
+            }
+        } else {
+            printf("# settings      nothing saved: running Kconfig defaults\n");
+        }
+    }
+    fflush(stdout);
 
     if (!blob_cfg_valid(&s_cfg)) {
         ESP_LOGE(TAG, "detector configuration is invalid for a %dx%d frame",
@@ -544,6 +830,7 @@ void app_main(void)
 
     /* Take over UART0 so reads can be non-blocking. stdout keeps working. */
     ESP_ERROR_CHECK(uart_driver_install(UART_NUM_0, 256, 0, 0, NULL, 0));
+    link_init();
 
     escape_hatch_delay();
 
@@ -569,8 +856,13 @@ void app_main(void)
         }
         vTaskDelay(pdMS_TO_TICKS(50));
     }
+    /* A saved "AWB frozen" freezes here, at the gains the settle just found -
+       the camera had no sensor to talk to when the settings were loaded. */
+    set_awb(s_awb);
 
     print_banner();
+    print_cfg();
+    fflush(stdout);
 
     int64_t prev_capture_us = 0;
     TickType_t next_wake = xTaskGetTickCount();
@@ -584,6 +876,9 @@ void app_main(void)
         xTaskDelayUntil(&next_wake, period_ticks);
 
         poll_commands();
+        /* After poll_commands(), so a confirming command that queued up while
+           a slow frame was going out counts before the revert deadline. */
+        link_poll();
 
         camera_fb_t *fb = esp_camera_fb_get();
         if (fb == NULL) {
@@ -603,6 +898,8 @@ void app_main(void)
         if (s_calibrate) {
             s_calibrate = false;
             calibrate(fb->buf);
+            print_cfg();
+            fflush(stdout);
         }
 
         int64_t t0 = esp_timer_get_time();
@@ -613,6 +910,15 @@ void app_main(void)
         if (s_dump_mask) {
             s_dump_mask = false;
             dump_mask(fb->buf, &r);
+        }
+        /* The frame goes out before its CSV row, with the same t_ms, so the PC
+           can draw this detection on these pixels. The buffer is held while
+           it is sent; with two buffers and GRAB_LATEST the driver keeps
+           filling the other. */
+        if (s_grab || s_image) {
+            s_grab = false;
+            link_send_frame(fb->buf, fb->len, FRAME_W, FRAME_H,
+                            s_cfg.big_endian, capture_us / 1000);
         }
         esp_camera_fb_return(fb);
 

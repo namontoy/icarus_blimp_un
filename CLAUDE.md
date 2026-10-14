@@ -10,6 +10,7 @@ An indoor autonomous blimp that has to hover at 2 m (band 1.85–2.25 m). It is 
 |---|---|---|
 | `firmware/projects/i2c_tools/` | ESP32-S3 (Waveshare ESP32-S3-Zero) | The flight-controller-to-be: GY-88 IMU/mag/baro, altimeter, four DRV8833 thrusters. The name comes from the Espressif `i2c_tools` example it grew out of, and the console prompt is still `i2c-tools>`. |
 | `firmware/projects/optflow_cam/` | ESP32-CAM (AI-Thinker, original ESP32) | Downward optical flow. It prints CSV over UART to a laptop. |
+| `firmware/projects/target_cam/` | ESP32-CAM (AI-Thinker, original ESP32) | Forward colour-blob detector for the red waypoint balloons. It prints CSV over UART. `host/viewer/` (`tcview`, its own `targetcam` conda env) shows the raw image over the same serial link and is where the user calibrates by hand. Settings persist in NVS. |
 | `firmware/projects/blink/` | — | Stock ESP-IDF example, kept as a toolchain smoke test. |
 | `software/` | host | Python bench tools imported from a **separate quadcopter project (esp-drone)**. They speak CRTP-over-UDP to esp-drone firmware, **not** to anything in this repo. See `docs/esp-drone-tools-report.md` §8 for what would need to change to use them here. |
 

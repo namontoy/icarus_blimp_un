@@ -77,7 +77,7 @@ typedef struct {
    IAR-LARC waypoints are red mylar balloons); the others let the same
    firmware be tested with whatever balloons are to hand. Red and orange are
    only 25 degrees apart, so their windows are deliberately narrow and do not
-   overlap - see host test 13 for the cross-confusion check. */
+   overlap - see host test 14 for the cross-confusion check. */
 typedef enum {
     BLOB_PRESET_RED = 0,
     BLOB_PRESET_BLUE,
@@ -114,6 +114,13 @@ uint16_t blob_pixel(const blob_cfg_t *cfg, const uint8_t *frame, int x, int y);
 /* 1 if this pixel passes the colour test. Exposed so a caller can draw the mask
    for debugging exactly as the detector sees it. */
 int blob_pixel_matches(const blob_cfg_t *cfg, uint16_t px);
+
+/* The whole frame's colour test, one byte per pixel (1 match, 0 not), row-major
+   into `mask`, which must hold width*height bytes. Exactly blob_pixel_matches()
+   per pixel: the camera's 'm' dump and the PC viewer's overlay both come from
+   here, so neither can drift from what the detector sees. Returns the number
+   of matching pixels. */
+int blob_mask(const blob_cfg_t *cfg, const uint8_t *frame, uint8_t *mask);
 
 /*
  * Detect the largest blobs of the configured colour in an RGB565 frame.

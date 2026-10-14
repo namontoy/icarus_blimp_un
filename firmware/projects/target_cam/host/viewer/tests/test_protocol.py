@@ -1,0 +1,140 @@
+"""The stream splitter, on text, CSV and framed binary split at random read
+boundaries, plus the ways a frame can arrive broken."""
+import random
+
+import pytest
+
+from tcview import protocol as P
+
+ROW = ("12345,1,80.50,60.25,0.17,-0.08,123,14,13,0.68,1520,0,1,140,"
+       "0.00,0.00,-1,0.00,0.00,-1,0.00,0.00,-1,100.0,8200")
+
+
+def payload(seed=0, n=160 * 120 * 2):
+    rng = random.Random(seed)
+    data = bytearray(rng.randrange(256) for _ in range(n))
+    # Make sure the awkward bytes are in there: newlines and a fake header.
+    data[100:102] = b"\r\n"
+    data[500:509] = b"#!FRAME s"
+    data[1000] = 0x0A
+    return bytes(data)
+
+
+def stream(frame_data):
+    return (b"# ---- target_cam boot ----\r\n"
+            b"#!CFG w=160 h=120 cell=2 hue=0 tol=12 sat=110 val=50 area=25 mm=550 "
+            b"fov=54.0 fps=10 awb=1 be=1 preset=red baud=115200 image=0 stream=1 "
+            b"settings=defaults\r\n"
+            b"#!ACK g\r\n"
+            + P.encode_frame(7, 12345, frame_data)
+            + ROW.encode() + b"\r\n"
+            b"#!NAK H999 -- out of range (0..359)\r\n"
+            b"#!BAUD 921600\r\n"
+            b"#!CAL refused hue=304 spread=109 sat=78 val=188\r\n")
+
+
+def feed_chunked(parser, data, rng):
+    events = []
+    i = 0
+    while i < len(data):
+        k = rng.choice([1, 2, 3, 7, 64, 1000, 5000, 40000])
+        events += parser.feed(data[i:i + k])
+        i += k
+    return events
+
+
+def kinds(events):
+    return [type(e).__name__ for e in events]
+
+
+def test_crc_matches_firmware_check_value():
+    # esp_rom_crc32_le(0, "123456789", 9), printed by link_init() at boot.
+    assert P.crc32(b"123456789") == 0xCBF43926
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_mixed_stream_any_chunking(seed):
+    data = payload(seed)
+    ev = feed_chunked(P.StreamParser(), stream(data), random.Random(seed))
+    assert kinds(ev) == ["Comment", "Cfg", "Ack", "Frame", "End", "Row", "Nak", "Baud", "Cal"]
+    cfg, ack, frame, end, row, nak, baud, cal = ev[1:]
+    assert cfg.v["hue"] == 0 and cfg.v["fov"] == 54.0 and cfg.v["preset"] == "red"
+    assert cfg.v["settings"] == "defaults"
+    assert ack.cmd == "g"
+    assert frame.data == data and frame.seq == 7 and frame.t_ms == 12345
+    assert frame.big_endian
+    assert end.seq == 7
+    assert row.v["t_ms"] == 12345 and row.v["ok"] == 1 and row.v["proc_us"] == 8200
+    assert nak.cmd == "H999" and nak.reason == "out of range (0..359)"
+    assert baud.baud == 921600
+    assert not cal.ok and cal.v["hue"] == 304
+
+
+def test_log_line_inside_payload_drops_frame_and_resyncs():
+    data = payload(1)
+    pkt = P.encode_frame(3, 500, data)
+    k = len(pkt) // 2
+    broken = pkt[:k] + b"W (1234) cam_hal: EV-VSYNC-OVF\r\n" + pkt[k:]
+    p = P.StreamParser()
+    ev = p.feed(broken + ROW.encode() + b"\r\n" + P.encode_frame(4, 600, data))
+    assert isinstance(ev[0], P.FrameError) and ev[0].reason == "CRC mismatch"
+    assert any(isinstance(e, P.Row) for e in ev), "the row after the broken frame survives"
+    good = [e for e in ev if isinstance(e, P.Frame)]
+    assert len(good) == 1 and good[0].seq == 4 and good[0].data == data
+    assert p.frames_bad == 1 and p.frames_ok == 1
+
+
+def test_truncated_frame_expires_and_text_after_it_is_recovered():
+    data = payload(2)
+    pkt = P.encode_frame(5, 700, data)
+    cut = pkt[:2000]                       # the camera reset mid-frame...
+    reboot = b"\r\n\r\n# ---- target_cam boot ----\r\n# reset reason  power-on\r\n"
+    p = P.StreamParser()
+    ev = p.feed(cut + reboot, now=0.0)
+    assert ev == [] and p.in_frame         # the boot text is inside the "payload" for now
+    assert p.expire(now=1.0, baud=115200) == []        # not overdue yet
+    ev = p.expire(now=10.0, baud=115200)
+    assert isinstance(ev[0], P.FrameError) and "truncated" in ev[0].reason
+    texts = [e.text for e in ev if isinstance(e, P.Comment)]
+    assert "# ---- target_cam boot ----" in texts and "# reset reason  power-on" in texts
+    assert not p.in_frame
+
+
+def test_bad_headers_are_junk_not_frames():
+    p = P.StreamParser()
+    ev = p.feed(b"#!FRAME seq=1 t_ms=2 w=160 h=120 fmt=rgb565be len=99 crc=0\r\n"
+                b"#!FRAME seq=x\r\n" + ROW.encode() + b"\r\n")
+    assert kinds(ev) == ["Junk", "Junk", "Row"]
+    assert not p.in_frame
+
+
+def test_rows_with_wrong_column_count_are_not_rows():
+    assert P.parse_row(ROW) is not None
+    assert P.parse_row(ROW + ",1") is None
+    assert not isinstance(P.parse_line(ROW[:-5]), P.Row)
+
+
+def test_binary_noise_without_newline_is_bounded():
+    p = P.StreamParser()
+    ev = p.feed(bytes(range(11, 256)) * 40)      # no 0x0A at all
+    assert len(ev) == 1 and isinstance(ev[0], P.Junk)
+
+
+def test_little_endian_frame_decodes_by_its_label():
+    import numpy as np
+    px = np.array([[0xF800, 0x07E0], [0x001F, 0xFFFF]], dtype=np.uint16)
+    for be in (True, False):
+        raw = px.astype(">u2" if be else "<u2").tobytes()
+        f = P.Frame(0, 0, 2, 2, "rgb565be" if be else "rgb565le", raw)
+        rgb = f.rgb()
+        assert tuple(rgb[0, 0]) == (255, 0, 0)
+        assert tuple(rgb[0, 1]) == (0, 255, 0)
+        assert tuple(rgb[1, 0]) == (0, 0, 255)
+        assert tuple(rgb[1, 1]) == (255, 255, 255)
+
+
+def test_crc_that_looks_like_a_float_is_still_a_frame():
+    # "76555e46" parses as 7.6555e+50; the header must not turn into junk.
+    p = P.StreamParser()
+    ev = p.feed(b"#!FRAME seq=1 t_ms=2 w=1 h=1 fmt=rgb565be len=2 crc=76555e46\r\n\x00\x00")
+    assert len(ev) == 1 and isinstance(ev[0], P.FrameError) and ev[0].reason == "CRC mismatch"

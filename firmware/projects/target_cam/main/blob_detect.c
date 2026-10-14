@@ -110,6 +110,18 @@ int blob_pixel_matches(const blob_cfg_t *c, uint16_t px)
     return dh <= c->hue_tol;
 }
 
+int blob_mask(const blob_cfg_t *c, const uint8_t *frame, uint8_t *mask)
+{
+    int n = 0;
+    for (int y = 0; y < c->height; y++)
+        for (int x = 0; x < c->width; x++) {
+            int m = blob_pixel_matches(c, blob_pixel(c, frame, x, y));
+            mask[(size_t)y * (size_t)c->width + (size_t)x] = (uint8_t)m;
+            n += m;
+        }
+    return n;
+}
+
 static uint16_t uf_find(uint16_t *parent, uint16_t a)
 {
     while (parent[a] != a) {

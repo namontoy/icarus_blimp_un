@@ -440,6 +440,34 @@ static void test_presets(void)
     check(!blob_preset_apply(&c, BLOB_PRESET_COUNT), "out-of-range preset accepted");
 }
 
+static void test_mask(void)
+{
+    printf("15. blob_mask agrees with blob_pixel_matches on every pixel, both\n"
+           "    byte orders (the PC viewer's overlay is built from blob_mask)\n");
+    static uint8_t mask[W * H];
+    for (int be = 0; be <= 1; be++) {
+        blob_cfg_t c = red_cfg();
+        c.big_endian = be;
+        background(be);
+        disc(60, 50, 14, 220, 30, 25, NULL, NULL, NULL, be);
+        disc(120, 80, 6, 230, 20, 60, NULL, NULL, NULL, be);
+        int n = blob_mask(&c, frame, mask);
+        int bad = 0, count = 0;
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++) {
+                int m = blob_pixel_matches(&c, blob_pixel(&c, frame, x, y));
+                bad += mask[y * W + x] != m;
+                count += m;
+            }
+        blob_result_t r;
+        blob_detect(&c, frame, work_buf, &r);
+        printf("   %s-endian: %d matching, %d disagreements, detector matched %d\n",
+               be ? "big" : "little", n, bad, r.matched);
+        check(bad == 0, "mask disagrees with blob_pixel_matches");
+        check(n == count && n == r.matched, "mask count differs from the detector's");
+    }
+}
+
 int main(void)
 {
     test_centroid();
@@ -456,6 +484,7 @@ int main(void)
     test_mylar_range();
     test_four_balloons();
     test_presets();
+    test_mask();
     printf("\n%s (%d failure%s)\n", failures ? "FAILED" : "PASSED",
            failures, failures == 1 ? "" : "s");
     return failures ? 1 : 0;
