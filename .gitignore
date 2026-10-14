@@ -21,3 +21,6 @@ firmware/projects/*/host/bias_sweep
 software/cfcache/
 __pycache__/
 .pytest_cache/
+
+# Per-machine VS Code and ESP-IDF extension settings (paths differ between the two computers)
+.vscode/
