@@ -126,7 +126,7 @@ which would make the range read long.
 Same toolchain as optflow_cam:
 
 ```bash
-source /home/talos/.espressif/tools/activate_idf_v5.5.5.sh
+source $HOME/.espressif/tools/activate_idf_v5.5.5.sh
 idf.py -C firmware/projects/target_cam set-target esp32
 idf.py -C firmware/projects/target_cam build
 ```
@@ -138,7 +138,7 @@ is what worked on 2026-10-13. `idf.py flash` and auto-reset did not:
    holding BOOT.
 2. From `target_cam/build`:
    ```bash
-   /home/talos/.espressif/tools/python/v5.5.5/venv/bin/python -m esptool --chip esp32 \
+   $HOME/.espressif/tools/python/v5.5.5/venv/bin/python -m esptool --chip esp32 \
        -p /dev/ttyACM0 -b 115200 --before no_reset --after no_reset write_flash @flash_args
    ```
    Stay at 115200: the bridge wedged once after a 460800 flash.

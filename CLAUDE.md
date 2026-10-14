@@ -21,13 +21,13 @@ The two chips are not linked yet. `docs/inter-board-link-plan.md` (untracked dra
 ESP-IDF was installed with EIM, so the activation script sits at a non-standard path:
 
 ```bash
-source /home/talos/.espressif/tools/activate_idf_v5.5.5.sh
+source $HOME/.espressif/tools/activate_idf_v5.5.5.sh
 ```
 
 After activation `idf.py` is a shell function, so `timeout`, `xargs` and similar can't exec it. From scripts or tool calls, invoke it directly:
 
 ```bash
-IDF_PY="/home/talos/.espressif/tools/python/v5.5.5/venv/bin/python /home/talos/.espressif/v5.5.5/esp-idf/tools/idf.py"
+IDF_PY="$HOME/.espressif/tools/python/v5.5.5/venv/bin/python $HOME/.espressif/v5.5.5/esp-idf/tools/idf.py"
 $IDF_PY -C firmware/projects/i2c_tools set-target esp32s3   # once per fresh build dir
 $IDF_PY -C firmware/projects/i2c_tools build
 $IDF_PY -C firmware/projects/i2c_tools -p /dev/ttyACM0 flash
