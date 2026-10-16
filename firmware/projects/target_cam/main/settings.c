@@ -12,8 +12,16 @@
 
 /* Bump when tc_settings_t changes meaning. The stored blob carries the version
    and its size, so an old record is rejected instead of misread.
-   v2: the int16 'fps' became 'period_ms', so 12.5 FPS (80 ms) is storable. */
-#define VERSION     2
+   v2: the int16 'fps' became 'period_ms', so 12.5 FPS (80 ms) is storable.
+   v3: 'stage' and 'cnn_k' (the learned detector). They sit in what was the
+       struct's tail padding, so all three versions have the same size, and
+       only the version tells them apart. */
+#define VERSION     3
+
+/* The migration below relies on the size staying 28 B; adding a field that
+   grows it makes every older record fail the size check instead. */
+_Static_assert(sizeof(tc_settings_t) == 28, "tc_settings_t changed size: "
+               "older records will no longer migrate; review settings_load()");
 
 typedef struct {
     uint16_t      version;
@@ -45,6 +53,12 @@ bool settings_load(tc_settings_t *out, bool *migrated)
     if (err != ESP_OK || len != sizeof r || r.size != sizeof r.s) {
         return false;
     }
+    if (r.version == 1 || r.version == 2) {
+        /* v1 and v2 had no learned stages: they ran the HSV detector. Their
+           tail bytes were padding, so these two are set rather than read. */
+        r.s.stage = 0;
+        r.s.cnn_k = 2;
+    }
     if (r.version == 1) {
         /* Same layout, but the frame-rate slot held an integer fps. Every v1
            record says 10, the only default that version had, so carrying it
@@ -53,7 +67,7 @@ bool settings_load(tc_settings_t *out, bool *migrated)
            default, and the caller says so. */
         r.s.period_ms = CONFIG_TARGETCAM_FRAME_PERIOD_MS;
         *migrated = true;
-    } else if (r.version != VERSION) {
+    } else if (r.version != 2 && r.version != VERSION) {
         return false;
     }
     *out = r.s;

@@ -23,10 +23,14 @@ try:
 except ImportError:
     sys.exit("pyserial is required:  pip install pyserial")
 
-COLUMNS = ["t_ms", "ok", "cx_px", "cy_px", "az_deg", "el_deg", "area_px",
-           "w_px", "h_px", "fill", "range_mm", "clipped", "blobs", "matched_px",
-           "b2_az", "b2_el", "b2_range_mm", "b3_az", "b3_el", "b3_range_mm",
-           "b4_az", "b4_el", "b4_range_mm", "dt_ms", "proc_us"]
+# v1 (25 columns, no version) and v2 (35, ending in csv_v=2). The same lists
+# as viewer/tcview/protocol.py; this script stays standalone on purpose.
+COLUMNS_V1 = ["t_ms", "ok", "cx_px", "cy_px", "az_deg", "el_deg", "area_px",
+              "w_px", "h_px", "fill", "range_mm", "clipped", "blobs", "matched_px",
+              "b2_az", "b2_el", "b2_range_mm", "b3_az", "b3_el", "b3_range_mm",
+              "b4_az", "b4_el", "b4_range_mm", "dt_ms", "proc_us"]
+COLUMNS_V2 = COLUMNS_V1 + ["stage", "conf", "b2_conf", "b3_conf", "b4_conf",
+                           "t_px_us", "t_b_us", "t_c_us", "loop_us", "csv_v"]
 
 GAUGE = 31                      # characters across the field of view
 HFOV_DEG = 54.0                 # only for drawing the gauge
@@ -34,13 +38,15 @@ HFOV_DEG = 54.0                 # only for drawing the gauge
 
 def parse_row(line):
     parts = line.split(",")
-    if len(parts) != len(COLUMNS):
-        return None
     try:
         vals = [float(p) for p in parts]
     except ValueError:
         return None
-    return dict(zip(COLUMNS, vals))
+    if len(parts) == len(COLUMNS_V1):
+        return dict(zip(COLUMNS_V1, vals), stage=0, loop_us=-1, csv_v=1)
+    if len(parts) == len(COLUMNS_V2) and vals[-1] == 2:
+        return dict(zip(COLUMNS_V2, vals))
+    return None
 
 
 def gauge(row):
@@ -131,8 +137,10 @@ def main():
             else:
                 status = "no target  (matched %d px)" % row["matched_px"]
 
-            sys.stdout.write("\r%s %s  %4.1f FPS  %4.0f us    "
-                             % (gauge(row), status, fps, row["proc_us"]))
+            sys.stdout.write("\r%s %s  %4.1f FPS  %4.0f us  stage %d  loop %s    "
+                             % (gauge(row), status, fps, row["proc_us"], row["stage"],
+                                "%.1f ms" % (row["loop_us"] / 1000.0)
+                                if row["loop_us"] >= 0 else "-"))
             sys.stdout.flush()
     except KeyboardInterrupt:
         pass

@@ -23,13 +23,14 @@ import tty
 import numpy as np
 
 from . import detector as D
-from .protocol import BAUDS, BOOT_BAUD, COLUMNS, encode_frame, frame_seconds
+from .protocol import BAUDS, BOOT_BAUD, COLUMNS, CSV_VERSION, encode_frame, frame_seconds
 
 W, H = 160, 120
-# The pace is a period, as on the camera: 80 ms is 12.5 FPS, which no integer
-# fps can express.
+# The sensor is the clock, as on the camera: a frame every 79.968 ms at XCLK
+# 20 MHz, and the rows come every n-th one ('f' picks n).
+SENSOR_US = 1599360.0 / 20
 DEFAULT = dict(hue=0, tol=12, sat=110, val=50, area=25, mm=550, fov=54.0,
-               period_ms=80, awb=1, be=1, preset="red")
+               every=1, awb=1, be=1, preset="red", stage=0, cnn_k=2)
 
 
 def _rgb565(r, g, b) -> np.ndarray:
@@ -85,6 +86,7 @@ class FakeCamera:
         self.revert_at = 0.0
         self.corrupt_every = corrupt_every
         self.seq = 0
+        self.loop_us = 0
         self.scene = Scene()
         self._stop = threading.Event()
         self._rx = bytearray()
@@ -118,12 +120,21 @@ class FakeCamera:
     def _print_cfg(self):
         c = self.cfg
         self._print("#!CFG w=%d h=%d cell=2 hue=%d tol=%d sat=%d val=%d area=%d mm=%d "
-                    "fov=%.1f fps=%.4g period_ms=%d awb=%d be=%d preset=%s baud=%d "
-                    "image=%d stream=%d settings=%s\n"
+                    "fov=%.1f fps=%.3g period_ms=%.1f sensor_us=%.0f awb=%d be=%d preset=%s baud=%d "
+                    "image=%d stream=%d settings=%s stage=%d stage_eff=%d lut=none "
+                    "clf=none cnn=none cnn_k=%d csv=%d fw=fake collect=0\n"
                     % (W, H, c["hue"], c["tol"], c["sat"], c["val"], c["area"], c["mm"],
-                       c["fov"], 1000.0 / c["period_ms"], c["period_ms"], c["awb"],
+                       c["fov"], 1000.0 / self._period_ms(), self._period_ms(), SENSOR_US,
+                       c["awb"],
                        c["be"], c["preset"], self.baud, int(self.image),
-                       int(self.stream), self._settings_state()))
+                       int(self.stream), self._settings_state(), c["stage"],
+                       self._stage_eff(), c["cnn_k"], CSV_VERSION))
+
+    def _period_ms(self) -> float:
+        return self.cfg["every"] * SENSOR_US / 1000.0
+
+    def _stage_eff(self) -> int:
+        return D.lib().tc_stage_effective(self.cfg["stage"], D.models())
 
     # ---- commands ---------------------------------------------------------
 
@@ -144,7 +155,11 @@ class FakeCamera:
         c, arg = line[0], line[1:].strip()
         err = None
         later = False
-        if line == "!save":
+        if c in "comskg?" and len(line) > 1:
+            # As on the camera: an echoed fragment of its own output must not
+            # act as a command because it happens to start with one.
+            err = "'%s' takes no argument" % c
+        elif line == "!save":
             self.saved = dict(self.cfg)
         elif line == "!load":
             if self.saved is None:
@@ -154,8 +169,14 @@ class FakeCamera:
         elif line == "!reset":
             self.saved = None
             self.cfg = dict(DEFAULT)
+        elif line.split(" ")[0] == "!stage":
+            a = line[7:] if line[6:7] == " " else ""
+            if not (a.strip().isdigit() and 0 <= int(a) <= D.TC_STAGE_MAX):
+                err = "usage: !stage <0-%d>" % D.TC_STAGE_MAX
+            else:
+                self.cfg["stage"] = int(a)
         elif c == "!":
-            err = "unknown command (!save, !load, !reset)"
+            err = "unknown command (!save, !load, !reset, !stage)"
         elif c == "H":
             err = self._set_int("hue", arg, 0, 359, True)
         elif c == "T":
@@ -169,11 +190,13 @@ class FakeCamera:
         elif c == "d":
             err = self._set_int("mm", arg, 0, 5000)
         elif c == "f":
-            # Decimals allowed, rounded to a whole-ms period like lroundf().
+            # Decimals allowed, rounded to whole sensor frames like the camera:
+            # at least one, at most what fits in a second.
             try:
                 v = float(arg)
                 assert 1.0 <= v <= 30.0
-                self.cfg["period_ms"] = int(1000.0 / v + 0.5)
+                n = int(1e6 / v / SENSOR_US + 0.5)
+                self.cfg["every"] = max(1, min(int(1e6 / SENSOR_US), n))
             except (ValueError, AssertionError):
                 err = "out of range (1..30)"
         elif c == "w":
@@ -277,12 +300,13 @@ class FakeCamera:
         prev = None
         nxt = t0
         while not self._stop.is_set():
-            nxt += self.cfg["period_ms"] / 1000.0
+            nxt += self._period_ms() / 1000.0
             delay = nxt - time.monotonic()
             if delay > 0:
                 time.sleep(delay)
             else:
                 nxt = time.monotonic()
+            wake = time.perf_counter()
             self._poll_commands()
             if self.revert_at and time.monotonic() >= self.revert_at:
                 self.revert_at = 0.0
@@ -310,7 +334,7 @@ class FakeCamera:
                                     preset="custom")
                 self._print_cfg()
             t1 = time.perf_counter()
-            r = D.detect(st, frame)
+            tr = D.pipeline(st, frame, self.cfg["stage"], timed=True)
             proc_us = int((time.perf_counter() - t1) * 1e6)
             if self.grab or self.image:
                 self.grab = False
@@ -324,9 +348,11 @@ class FakeCamera:
             dt = 0.0 if prev is None else (now - prev) * 1000
             prev = now
             if self.stream:
-                self._write(self._row(r, t_ms, dt, proc_us).encode())
+                self._write(self._row(tr, t_ms, dt, proc_us).encode())
+            self.loop_us = int((time.perf_counter() - wake) * 1e6)
 
-    def _row(self, r, t_ms, dt, proc_us) -> str:
+    def _row(self, tr, t_ms, dt, proc_us) -> str:
+        r = tr.r
         fov = self.cfg["fov"]
         f = (W / 2) / math.tan(math.radians(fov) / 2)
         mm = self.cfg["mm"]
@@ -357,5 +383,8 @@ class FakeCamera:
                 a2, e2, r2 = geom(r.b[k])
             vals += ["%.2f" % a2, "%.2f" % e2, "%.0f" % r2]
         vals += ["%.1f" % dt, "%d" % proc_us]
+        vals += ["%d" % tr.stage] + ["%.3g" % c for c in tr.conf]
+        vals += ["%d" % tr.t_px_us, "%d" % tr.t_b_us, "%d" % tr.t_c_us,
+                 "%d" % self.loop_us, "%d" % CSV_VERSION]
         assert len(vals) == len(COLUMNS)
         return ",".join(vals) + "\r\n"

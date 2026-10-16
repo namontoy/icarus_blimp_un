@@ -9,6 +9,11 @@ figure is decoded from the camera's own rows.
 The green "flight-identical" banner is shown only when the camera's own #!CFG
 confirms image off, 115200 baud and streaming on, and no frame has arrived
 recently. It is the camera's word, not the viewer's assumption.
+
+The pacing check counts every row whose dt_ms is not the configured period
+(80.0 ms at 12.5 FPS). The hard requirement is zero such rows with every stage
+enabled, so the count runs since connection (or the last reset), not over a
+window: one late frame in ten minutes must still show.
 """
 from __future__ import annotations
 
@@ -43,6 +48,9 @@ class FlightTab(QWidget):
         self.rec = None
         self.rec_n = 0
         self.rec_path = None
+        self.n_rows = 0                     # since connection / reset
+        self.n_dt_bad = 0
+        self.worst_dt = 0.0
 
         root = QVBoxLayout(self)
         self.banner = QLabel()
@@ -90,6 +98,10 @@ class FlightTab(QWidget):
         self.rec_lbl = QLabel("rows are written verbatim to target_cam/data/")
         self.rec_lbl.setWordWrap(True)
         rec.addWidget(self.rec_lbl, 1)
+        rst = QPushButton("Reset counts")
+        rst.setToolTip("Zero the dt != period count, e.g. after changing the stage")
+        rst.clicked.connect(self.reset_counts)
+        rec.addWidget(rst)
         col.addLayout(rec)
         col.addStretch(1)
 
@@ -155,9 +167,27 @@ class FlightTab(QWidget):
         while self.rows and now - self.rows[0][0] > HISTORY_S + 2:
             self.rows.popleft()
         self.last_row = row
+        v = row.v
+        if v["dt_ms"] > 0:                  # the first row after boot has none
+            self.n_rows += 1
+            if abs(v["dt_ms"] - self._period()) >= 0.05:
+                self.n_dt_bad += 1
+                self.worst_dt = max(self.worst_dt, v["dt_ms"])
         if self.rec:
+            if self.rec_n == 0:
+                # The header names the columns of the rows that actually arrive,
+                # so a v1 camera's file still reads back correctly.
+                self.rec.write(",".join(P.columns_for(int(v["csv_v"]))) + "\n")
             self.rec.write(row.raw + "\n")
             self.rec_n += 1
+
+    def _period(self) -> float:
+        p = self.cfg.get("period_ms")
+        return float(p) if isinstance(p, (int, float)) and p > 0 else 80.0
+
+    def reset_counts(self):
+        self.n_rows = self.n_dt_bad = 0
+        self.worst_dt = 0.0
 
     def tick(self):
         """10 Hz from the main window."""
@@ -287,15 +317,36 @@ class FlightTab(QWidget):
         okp = 100.0 * sum(1 for r in recent if r["ok"]) / len(recent)
         link = self.main.link
         bps = link.counters.rate() if link else 0.0
+        c = self.cfg
+        last = recent[-1]
+
+        def p50max(key):
+            a = np.array([r[key] for r in recent], dtype=float)
+            a = a[np.isfinite(a)]
+            return "p50 %6.0f max %6.0f" % (np.median(a), a.max()) if a.size else "  (v1 row: not reported)"
+
+        bad = ("%d of %d rows, worst %.1f" % (self.n_dt_bad, self.n_rows, self.worst_dt)
+               if self.n_dt_bad else "0 of %d rows" % self.n_rows)
         self.health.setText(
+            "stage      %d running (requested %s; lut %s, clf %s, cnn %s)  csv v%d\n"
             "rows/s     %5.1f   (camera fps setting %s)\n"
             "dt_ms      mean %6.1f  jitter (sd) %5.1f  max %6.1f\n"
+            "dt != %-4g %s\n"
             "proc_us    mean %6.0f  max %6.0f\n"
+            "t_px_us    %s\n"
+            "t_b_us     %s\n"
+            "t_c_us     %s\n"
+            "loop_us    %s   (budget %d us)\n"
             "ok         %5.1f %% of rows in the last 5 s\n"
             "wire       %6.0f bytes/s at %s baud (%.1f %% of capacity)"
-            % (rate, self.cfg.get("fps", "?"),
+            % (last["stage"], c.get("stage", "?"), c.get("lut", "?"), c.get("clf", "?"),
+               c.get("cnn", "?"), last["csv_v"],
+               rate, c.get("fps", "?"),
                dt.mean() if dt.size else 0, dt.std() if dt.size else 0,
-               dt.max() if dt.size else 0, pu.mean(), pu.max(), okp, bps,
+               dt.max() if dt.size else 0, self._period(), bad,
+               pu.mean(), pu.max(),
+               p50max("t_px_us"), p50max("t_b_us"), p50max("t_c_us"), p50max("loop_us"),
+               int(self._period() * 1000), okp, bps,
                link.baud if link else "?",
                100.0 * bps * 10 / link.baud if link and link.baud else 0))
 
@@ -304,8 +355,7 @@ class FlightTab(QWidget):
             DATA_DIR.mkdir(parents=True, exist_ok=True)
             self.rec_path = DATA_DIR / time.strftime("flight_%Y%m%d_%H%M%S.csv")
             self.rec = open(self.rec_path, "w")
-            self.rec.write(",".join(P.COLUMNS) + "\n")
-            self.rec_n = 0
+            self.rec_n = 0                  # the header goes in with the first row
             self.rec_btn.setText("Stop recording")
         else:
             if self.rec:

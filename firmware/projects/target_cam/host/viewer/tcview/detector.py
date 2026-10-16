@@ -1,8 +1,9 @@
 """
 The camera's own detector, called from Python.
 
-host/libblob_detect.so is ../main/blob_detect.c compiled for this PC: the same
-source file the firmware runs. So the viewer's mask overlay, its per-pixel
+host/libblob_detect.so is the camera's portable sources (../main/blob_detect.c
+and tc_pipeline.c, the list is SRC in host/Makefile) compiled for this PC: the
+same files the firmware runs. So the viewer's mask overlay, its per-pixel
 H/S/V readout and its region statistics are the camera's arithmetic, not a
 Python re-implementation that could drift from it (the hue of a pixel, for
 example, comes from integer 5/6/5-bit maths that a float HSV would not
@@ -15,6 +16,7 @@ from __future__ import annotations
 import ctypes as C
 import os
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -23,9 +25,11 @@ import numpy as np
 HOST_DIR = Path(__file__).resolve().parents[2]          # target_cam/host
 MAIN_DIR = HOST_DIR.parent / "main"
 LIB_PATH = HOST_DIR / "libblob_detect.so"
-SOURCES = [MAIN_DIR / "blob_detect.c", MAIN_DIR / "blob_detect.h"]
+SOURCES = [MAIN_DIR / n for n in ("blob_detect.c", "blob_detect.h",
+                                   "tc_pipeline.c", "tc_pipeline.h")]
 
 BLOB_MAX_REPORT = 4
+TC_STAGE_MAX = 3
 PRESETS = ["red", "blue", "green", "orange"]
 CAL_PATCH = 16          # target_main.c: the centre patch 'c' samples
 
@@ -45,6 +49,25 @@ class Blob(C.Structure):
 class BlobResult(C.Structure):
     _fields_ = [("found", C.c_int), ("n_report", C.c_int), ("n_blobs", C.c_int),
                 ("matched", C.c_int), ("b", Blob * BLOB_MAX_REPORT)]
+
+
+class TcModels(C.Structure):
+    """tc_models_t: validated model pointers, NULL = absent. All NULL until the
+    learned stages exist, so every request falls back to stage 0."""
+    _fields_ = [("lut", C.c_void_p), ("clf", C.c_void_p), ("cnn", C.c_void_p)]
+
+
+class TcResult(C.Structure):
+    _fields_ = [("r", BlobResult), ("stage", C.c_int),
+                ("conf", C.c_float * BLOB_MAX_REPORT),
+                ("t_px_us", C.c_int32), ("t_b_us", C.c_int32), ("t_c_us", C.c_int32),
+                ("t_total_us", C.c_int32)]
+
+
+# blob_clock_fn: int64_t (*)(void). A Python clock costs a microsecond or two
+# per call, so times measured through it are the PC's, not the camera's.
+CLOCK_FN = C.CFUNCTYPE(C.c_int64)
+_PY_CLOCK = CLOCK_FN(lambda: time.perf_counter_ns() // 1000)
 
 
 class BlobColor(C.Structure):
@@ -79,6 +102,12 @@ def load_library() -> C.CDLL:
                                 C.c_int, P(BlobColor)]
     lib.blob_sample.restype = None
     lib.blob_preset_apply.argtypes = [P(BlobCfg), C.c_int]
+    lib.tc_stage_available.argtypes = [P(TcModels)]
+    lib.tc_stage_effective.argtypes = [C.c_int, P(TcModels)]
+    lib.tc_pipeline_run.argtypes = [P(BlobCfg), C.c_int, P(TcModels), C.c_char_p,
+                                    C.c_void_p, CLOCK_FN, P(TcResult)]
+    lib.tc_crc32.argtypes = [C.c_char_p, C.c_size_t]
+    lib.tc_crc32.restype = C.c_uint32
     return lib
 
 
@@ -167,6 +196,32 @@ def detect(st: Settings, frame: bytes) -> BlobResult:
     r = BlobResult()
     lib().blob_detect(C.byref(c), frame, C.cast(work, C.c_void_p), C.byref(r))
     return r
+
+
+def models() -> TcModels:
+    """The models the viewer can offer the pipeline: none yet (Phase 0)."""
+    return TcModels()
+
+
+def pipeline(st: Settings, frame: bytes, stage: int = 0, m: TcModels | None = None,
+             timed: bool = False) -> TcResult:
+    """tc_pipeline_run(): the camera's whole detector at the requested stage,
+    with the same fallback. timed=True passes a PC clock, for the fake camera."""
+    c = st.c()
+    if not lib().blob_cfg_valid(C.byref(c)):
+        raise ValueError("invalid detector configuration")
+    work = (C.c_uint32 * ((lib().blob_workspace_bytes(C.byref(c)) + 3) // 4))()
+    m = m if m is not None else models()
+    out = TcResult()
+    clock = _PY_CLOCK if timed else CLOCK_FN()      # CLOCK_FN() is NULL
+    lib().tc_pipeline_run(C.byref(c), int(stage), C.byref(m), frame,
+                          C.cast(work, C.c_void_p), clock, C.byref(out))
+    return out
+
+
+def crc32(data: bytes) -> int:
+    """tc_crc32(), the check model records carry."""
+    return lib().tc_crc32(data, len(data))
 
 
 def sample(st: Settings, frame: bytes, x0: int, y0: int, w: int, h: int) -> BlobColor:

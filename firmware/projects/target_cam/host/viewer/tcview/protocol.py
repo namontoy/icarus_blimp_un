@@ -6,6 +6,7 @@ What comes out of the camera on UART0 is one byte stream that mixes:
 
   text lines (each ends "\\r\\n"; the console turns every "\\n" into "\\r\\n")
     t_ms,ok,cx_px,...          the CSV row - the only thing the ESP32-S3 uses
+                               (v1: 25 columns; v2: 35, the last one csv_v=2)
     # ...                      human-readable banner, replies, mask dumps
     #!CFG k=v k=v ...          the settings the camera is really using
     #!ACK <cmd>                a command arrived intact and was accepted
@@ -31,11 +32,36 @@ from typing import Optional
 
 import numpy as np
 
-# The 25 columns, identical to firmware's print_banner() and target_monitor.py.
-COLUMNS = ["t_ms", "ok", "cx_px", "cy_px", "az_deg", "el_deg", "area_px",
-           "w_px", "h_px", "fill", "range_mm", "clipped", "blobs", "matched_px",
-           "b2_az", "b2_el", "b2_range_mm", "b3_az", "b3_el", "b3_range_mm",
-           "b4_az", "b4_el", "b4_range_mm", "dt_ms", "proc_us"]
+# The CSV row, identical to firmware's print_banner() and target_monitor.py.
+#
+# v1 had no version column; it is recognised by its 25 columns. v2 appends ten
+# after proc_us, so every v1 column keeps its index and an old reader that only
+# takes the first 25 still works. A v2 row ends in csv_v=2, and a 35-column row
+# claiming another version is refused rather than guessed at.
+#   stage            effective detector stage, 0..3 (after any fallback)
+#   conf, bN_conf    confidence 0..1 per reported blob; -1 = not computed
+#   t_px_us          per-pixel colour test (HSV, or the learned table)
+#   t_b_us, t_c_us   blob classifier, CNN
+#   loop_us          the PREVIOUS loop's busy time, CSV print included
+COLUMNS_V1 = ["t_ms", "ok", "cx_px", "cy_px", "az_deg", "el_deg", "area_px",
+              "w_px", "h_px", "fill", "range_mm", "clipped", "blobs", "matched_px",
+              "b2_az", "b2_el", "b2_range_mm", "b3_az", "b3_el", "b3_range_mm",
+              "b4_az", "b4_el", "b4_range_mm", "dt_ms", "proc_us"]
+COLUMNS_V2 = COLUMNS_V1 + ["stage", "conf", "b2_conf", "b3_conf", "b4_conf",
+                           "t_px_us", "t_b_us", "t_c_us", "loop_us", "csv_v"]
+CSV_VERSION = 2
+COLUMNS = COLUMNS_V2            # what the current firmware prints
+
+# What a v1 row did not measure. Timings are NaN, not 0: "not reported" must
+# not read as "took no time". stage 0 and conf -1 are what v1 firmware really
+# ran: the HSV detector, with no classifier.
+V1_FILL = {"stage": 0.0, "conf": -1.0, "b2_conf": -1.0, "b3_conf": -1.0,
+           "b4_conf": -1.0, "t_px_us": float("nan"), "t_b_us": float("nan"),
+           "t_c_us": float("nan"), "loop_us": float("nan"), "csv_v": 1.0}
+
+
+def columns_for(version: int) -> list:
+    return COLUMNS_V1 if version == 1 else COLUMNS_V2
 
 BOOT_BAUD = 115200
 BAUDS = [115200, 230400, 460800, 921600, 1500000, 2000000]
@@ -175,14 +201,23 @@ def parse_kv(s: str, convert: bool = True) -> dict:
 
 
 def parse_row(line: str) -> Optional[dict]:
+    """A CSV row of either version -> a dict with every v2 key (v1 rows get
+    V1_FILL), or None if it is not a row this reader understands."""
     parts = line.split(",")
-    if len(parts) != len(COLUMNS):
+    if len(parts) not in (len(COLUMNS_V1), len(COLUMNS_V2)):
         return None
     try:
         vals = [float(p) for p in parts]
     except ValueError:
         return None
-    return dict(zip(COLUMNS, vals))
+    if len(parts) == len(COLUMNS_V1):
+        row = dict(zip(COLUMNS_V1, vals))
+        row.update(V1_FILL)
+        return row
+    row = dict(zip(COLUMNS_V2, vals))
+    if row["csv_v"] != CSV_VERSION:
+        return None
+    return row
 
 
 def parse_line(line: str):

@@ -11,8 +11,9 @@
  * flash LED driven low, radios never started):
  *
  *  1. HEAT. QQVGA, paced frames, no WiFi. The idle time is the point. The
- *     pace is 80 ms (12.5 FPS) by default: the sensor's own period at XCLK
- *     20 MHz, so every frame it makes is used, and nothing faster exists.
+ *     sensor sets the pace: at XCLK 20 MHz it makes a frame every 79.968 ms
+ *     (12.5 FPS), the loop takes each one as it completes, and nothing faster
+ *     exists. 'f' can only choose every n-th frame.
  *
  *  2. HONEST FAILURE. ok=0 means NO TARGET, never "target dead ahead". A blob
  *     touching the frame edge is flagged clipped and gets no range, because
@@ -39,12 +40,14 @@
 #include "esp_heap_caps.h"
 #include "esp_system.h"
 #include "esp_chip_info.h"
+#include "esp_app_desc.h"
 #include "driver/gpio.h"
 #include "driver/uart.h"
 #include "sdkconfig.h"
 
 #include "camera_pins.h"
 #include "blob_detect.h"
+#include "tc_pipeline.h"
 #include "link.h"
 #include "settings.h"
 
@@ -53,6 +56,12 @@ static const char *TAG = "target";
 #define FRAME_SIZE      FRAMESIZE_QQVGA     /* 160x120 */
 #define FRAME_W         160
 #define FRAME_H         120
+
+/* The CSV row format. Bumped whenever a column is added, removed or changes
+   meaning; it goes out as the last column of every row and in #!CFG, so a
+   reader can refuse a format it does not know instead of misreading it.
+   v1 (no version column) had 25 columns; v2 appends 10, see print_banner(). */
+#define CSV_VERSION     2
 
 /* Seconds of reflash window before GPIO0 becomes XCLK. See
    escape_hatch_delay(). */
@@ -75,7 +84,7 @@ static const char *TAG = "target";
 #endif
 
 /* Runtime-adjustable state. Single-threaded, so no locking. */
-static int   s_period_ms  = CONFIG_TARGETCAM_FRAME_PERIOD_MS;
+static int   s_every_n    = 1;      /* use every n-th sensor frame ('f') */
 static float s_hfov_deg   = (float)CONFIG_TARGETCAM_HFOV_DEG;
 static float s_target_mm  = (float)CONFIG_TARGETCAM_TARGET_MM;
 static bool  s_streaming  = true;
@@ -85,6 +94,22 @@ static bool  s_awb        = true;
 static bool  s_image;               /* 'v1': send every frame to the PC viewer */
 static bool  s_grab;                /* 'g': send the next frame only */
 static int   s_pending_baud;        /* 'B': switched once its ACK is out */
+static int   s_stage_req;           /* '!stage': the level asked for, 0..3 */
+static int   s_cnn_k      = 2;      /* blobs stage 3 checks (Phase C)      */
+
+/* The learned models, each validated once at boot; NULL = absent or rejected,
+   and the pipeline falls back past it. None exist before Phase A2. The state
+   strings are what #!CFG reports: none (not built in), ok, or bad (built in
+   but failed its checks). */
+static tc_models_t s_models;
+static const char *s_lut_state = "none";
+static const char *s_clf_state = "none";
+static const char *s_cnn_state = "none";
+
+/* Busy time of the previous loop iteration, from waking up to the end of its
+   CSV row. The row cannot carry its own (the print is part of it), so each row
+   reports the one before. Against the 80 ms period, this is the margin. */
+static int64_t s_loop_us;
 
 static void *s_work;                /* blob_detect workspace, allocated once */
 
@@ -126,12 +151,40 @@ static blob_cfg_t s_cfg = {
 
 /* ------------------------------------------------------------------ */
 
-/* The pace is kept as a period because that is what the loop waits on, and
-   because 12.5 FPS - the sensor's rate - is not an integer. FPS is only how it
-   is shown. */
+/* The OV2640 spends a fixed number of XCLK cycles on a QQVGA frame, so XCLK
+   alone sets its period: 1 599 360 cycles, measured 2026-10-14 as driver frame
+   timestamps 79 968 us apart at 20 MHz (optflow_cam's 159.9 ms at 10 MHz
+   agrees). The loop keeps no time of its own (see app_main()), so a row period
+   is always a whole number of these. */
+#define SENSOR_FRAME_US     (1599360.0 / CONFIG_TARGETCAM_XCLK_MHZ)
+
+/* What the driver's timestamps say the period really is; shown in #!CFG, so a
+   board whose sensor differs shows it. The pacing does not depend on it. */
+static double s_sensor_us = SENSOR_FRAME_US;
+
+/* Sensor frames per row for a requested period: at least 1, since the sensor
+   is never faster than itself, and at most what fits in 1 s. */
+static int every_n_for_ms(double ms)
+{
+    long n = lround(ms * 1000.0 / SENSOR_FRAME_US);
+    long n_max = (long)(1000000.0 / SENSOR_FRAME_US);
+    if (n_max < 1) {
+        n_max = 1;
+    }
+    return (int)(n < 1 ? 1 : n > n_max ? n_max : n);
+}
+
+/* The row period. Kept as a period because 12.5 FPS is not an integer; FPS is
+   only how it is shown. Nominal, not measured, so a saved record compares
+   equal to the live settings however the measurement wobbles. */
+static double period_ms(void)
+{
+    return s_every_n * SENSOR_FRAME_US / 1000.0;
+}
+
 static float frame_fps(void)
 {
-    return 1000.0f / (float)s_period_ms;
+    return (float)(1000.0 / period_ms());
 }
 
 /* Focal length in pixels, from the pinhole model. Bearing and range both go
@@ -262,12 +315,14 @@ static void set_awb(bool on)
 
 static void live_defaults(void)
 {
-    s_period_ms      = CONFIG_TARGETCAM_FRAME_PERIOD_MS;
+    s_every_n        = every_n_for_ms(CONFIG_TARGETCAM_FRAME_PERIOD_MS);
     s_hfov_deg       = (float)CONFIG_TARGETCAM_HFOV_DEG;
     s_target_mm      = (float)CONFIG_TARGETCAM_TARGET_MM;
     s_cfg.min_area   = CONFIG_TARGETCAM_MIN_AREA;
     s_cfg.big_endian = 1;
     s_preset         = DEFAULT_PRESET;
+    s_stage_req      = 0;
+    s_cnn_k          = 2;
     blob_preset_apply(&s_cfg, s_preset);
     /* Before the camera starts there is no sensor yet; set_awb() then only
        records the wish, and app_main() applies it once the sensor is up. */
@@ -287,10 +342,12 @@ static tc_settings_t live_capture(void)
     t.min_area   = s_cfg.min_area;
     t.target_mm  = (int32_t)s_target_mm;
     t.hfov_deg   = s_hfov_deg;
-    t.period_ms  = (int16_t)s_period_ms;
+    t.period_ms  = (int16_t)lround(period_ms());
     t.awb        = s_awb ? 1 : 0;
     t.big_endian = (int8_t)s_cfg.big_endian;
     t.preset     = (int8_t)s_preset;
+    t.stage      = (int8_t)s_stage_req;
+    t.cnn_k      = (int8_t)s_cnn_k;
     return t;
 }
 
@@ -306,7 +363,9 @@ static bool live_apply(const tc_settings_t *t)
         !(t->hfov_deg >= 10.0f && t->hfov_deg <= 150.0f) ||
         t->period_ms < 33 || t->period_ms > 1000 ||
         (t->awb != 0 && t->awb != 1) || (t->big_endian != 0 && t->big_endian != 1) ||
-        t->preset < -1 || t->preset >= BLOB_PRESET_COUNT) {
+        t->preset < -1 || t->preset >= BLOB_PRESET_COUNT ||
+        t->stage < 0 || t->stage > TC_STAGE_MAX ||
+        t->cnn_k < 1 || t->cnn_k > BLOB_MAX_REPORT) {
         return false;
     }
     s_cfg.hue        = t->hue;
@@ -317,8 +376,10 @@ static bool live_apply(const tc_settings_t *t)
     s_cfg.big_endian = t->big_endian;
     s_target_mm      = (float)t->target_mm;
     s_hfov_deg       = t->hfov_deg;
-    s_period_ms      = t->period_ms;
+    s_every_n        = every_n_for_ms(t->period_ms);
     s_preset         = t->preset;
+    s_stage_req      = t->stage;
+    s_cnn_k          = t->cnn_k;
     /* Keep the preset's name only if its numbers still match: a firmware
        update may have retuned the preset since this record was saved. */
     if (s_preset >= 0) {
@@ -350,13 +411,17 @@ static const char *settings_state(void)
 static void print_cfg(void)
 {
     printf("#!CFG w=%d h=%d cell=%d hue=%d tol=%d sat=%d val=%d area=%d mm=%.0f "
-           "fov=%.1f fps=%.4g period_ms=%d awb=%d be=%d preset=%s baud=%d image=%d "
-           "stream=%d settings=%s\n",
+           "fov=%.1f fps=%.3g period_ms=%.1f sensor_us=%.0f awb=%d be=%d preset=%s "
+           "baud=%d image=%d stream=%d settings=%s stage=%d stage_eff=%d lut=%s clf=%s cnn=%s "
+           "cnn_k=%d csv=%d fw=%s collect=0\n",
            FRAME_W, FRAME_H, s_cfg.cell, s_cfg.hue, s_cfg.hue_tol, s_cfg.sat_min,
            s_cfg.val_min, s_cfg.min_area, s_target_mm, s_hfov_deg, frame_fps(),
-           s_period_ms, s_awb ? 1 : 0, s_cfg.big_endian,
+           period_ms(), s_sensor_us, s_awb ? 1 : 0, s_cfg.big_endian,
            s_preset >= 0 ? blob_preset_name(s_preset) : "custom",
-           link_baud(), s_image ? 1 : 0, s_streaming ? 1 : 0, settings_state());
+           link_baud(), s_image ? 1 : 0, s_streaming ? 1 : 0, settings_state(),
+           s_stage_req, tc_stage_effective(s_stage_req, &s_models),
+           s_lut_state, s_clf_state, s_cnn_state, s_cnn_k, CSV_VERSION,
+           esp_app_get_description()->version);
 }
 
 /* ------------------------------------------------------------------ */
@@ -365,10 +430,11 @@ static void print_banner(void)
 {
     float f = focal_px();
     printf("\n# ESP32-CAM forward colour target\n");
-    printf("# frame        %dx%d RGB565 (%s-endian), XCLK %d MHz, paced to %.4g FPS "
-           "(%d ms)\n",
+    printf("# frame        %dx%d RGB565 (%s-endian), XCLK %d MHz, sensor frame "
+           "%.3f ms; every %d -> %.3g FPS (%.1f ms)\n",
            FRAME_W, FRAME_H, s_cfg.big_endian ? "big" : "little",
-           CONFIG_TARGETCAM_XCLK_MHZ, frame_fps(), s_period_ms);
+           CONFIG_TARGETCAM_XCLK_MHZ, s_sensor_us / 1000.0, s_every_n, frame_fps(),
+           period_ms());
     printf("# colour       %s: hue %d +/-%d deg, sat >= %d, val >= %d, AWB %s\n",
            s_preset >= 0 ? blob_preset_name(s_preset) : "custom",
            s_cfg.hue, s_cfg.hue_tol, s_cfg.sat_min, s_cfg.val_min,
@@ -385,6 +451,9 @@ static void print_banner(void)
     } else {
         printf("# range        off (set the target size with d<mm>)\n");
     }
+    printf("# stage        %d requested, %d running (colour table %s, classifier %s, "
+           "CNN %s)\n", s_stage_req, tc_stage_effective(s_stage_req, &s_models),
+           s_lut_state, s_clf_state, s_cnn_state);
     const char *st = settings_state();
     printf("# settings     %s\n",
            strcmp(st, "saved") == 0    ? "saved (loaded from flash)" :
@@ -397,9 +466,12 @@ static void print_banner(void)
            "s stream | ? info\n");
     printf("#              k config | g grab frame | v<0|1> every frame | "
            "B<baud> link speed | !save | !load | !reset\n");
+    printf("#              !stage <0-3> detector level\n");
     printf("# columns      t_ms,ok,cx_px,cy_px,az_deg,el_deg,area_px,w_px,h_px,"
            "fill,range_mm,clipped,blobs,matched_px,b2_az,b2_el,b2_range_mm,"
-           "b3_az,b3_el,b3_range_mm,b4_az,b4_el,b4_range_mm,dt_ms,proc_us\n");
+           "b3_az,b3_el,b3_range_mm,b4_az,b4_el,b4_range_mm,dt_ms,proc_us,"
+           "stage,conf,b2_conf,b3_conf,b4_conf,t_px_us,t_b_us,t_c_us,loop_us,"
+           "csv_v (v%d)\n", CSV_VERSION);
     fflush(stdout);
 }
 
@@ -475,15 +547,50 @@ static cmd_res_t run_store_command(const char *line)
         printf("# saved settings erased; running the Kconfig defaults\n");
         return CMD_OK;
     }
-    snprintf(s_why, sizeof s_why, "unknown command (!save, !load, !reset)");
+    snprintf(s_why, sizeof s_why, "unknown command (!save, !load, !reset, !stage)");
     return CMD_NAK;
+}
+
+/* '!stage N'. A whole word even though it writes no flash: one corrupted
+   byte must not be able to change the detector level in flight. It needs no
+   NVS either, so it is handled before the store commands. Persisting it is
+   !save's job, as for every other setting. */
+static cmd_res_t run_stage_command(const char *line)
+{
+    int v;
+    if (line[6] != ' ' || !arg_in(line + 7, 0, TC_STAGE_MAX, &v)) {
+        snprintf(s_why, sizeof s_why, "usage: !stage <0-%d>", TC_STAGE_MAX);
+        return CMD_NAK;
+    }
+    s_stage_req = v;
+    int eff = tc_stage_effective(v, &s_models);
+    if (eff == v) {
+        printf("# stage %d\n", v);
+    } else {
+        printf("# stage %d requested, running %d: the model for stage %d is %s\n",
+               v, eff, eff + 1,
+               eff == 0 ? s_lut_state : eff == 1 ? s_clf_state : s_cnn_state);
+    }
+    return CMD_OK;
 }
 
 static cmd_res_t run_command(const char *line)
 {
     int v;
+    /* The letters that take no argument must arrive alone. On the bench the
+       PC's tty echoed fragments of the camera's own output back to it as the
+       port opened (2026-10-14: "^K", "...is mapped"); with the rest of the
+       line ignored, a fragment starting at "cell=2 ..." would recalibrate the
+       colour and one at "stream=1 ..." would stop the rows. */
+    if (strchr("comskg?", line[0]) != NULL && line[1] != '\0') {
+        snprintf(s_why, sizeof s_why, "'%c' takes no argument", line[0]);
+        return CMD_NAK;
+    }
     switch (line[0]) {
     case '!':
+        if (strncmp(line, "!stage", 6) == 0 && (line[6] == ' ' || line[6] == '\0')) {
+            return run_stage_command(line);
+        }
         return run_store_command(line);
     case 'c':
         s_calibrate = true;
@@ -544,9 +651,10 @@ static cmd_res_t run_command(const char *line)
         return CMD_OK;
     }
     case 'f': {
-        /* Fractional, because the sensor's own rate is 12.5. The loop paces
-           in whole milliseconds, so the rate is rounded to a period and the
-           reply says what was really set: f15 is 67 ms, 14.93 FPS. */
+        /* Fractional, because the sensor's own rate is 12.5. The sensor is the
+           clock, so the rate is rounded to a whole number of its frames and
+           the reply says what was really set: f15 and f12.5 both give every
+           frame (80 ms), f6.25 every second one, f10 rounds back to 12.5. */
         char *end;
         float f = strtof(line + 1, &end);
         while (*end == ' ') end++;
@@ -554,8 +662,9 @@ static cmd_res_t run_command(const char *line)
             snprintf(s_why, sizeof s_why, "out of range (1..30)");
             return CMD_NAK;
         }
-        s_period_ms = (int)lroundf(1000.0f / f);
-        printf("# frame period %d ms (%.4g FPS)\n", s_period_ms, frame_fps());
+        s_every_n = every_n_for_ms(1000.0 / f);
+        printf("# frame period %.1f ms (%.3g FPS): every %d sensor frame%s\n",
+               period_ms(), frame_fps(), s_every_n, s_every_n == 1 ? "" : "s");
         return CMD_OK;
     }
     case 'w':
@@ -653,6 +762,19 @@ static void poll_commands(void)
             s_pending_baud = 0;
         }
     }
+}
+
+/* Commands are served after the frame has been handed back and its row is
+   out. A reply is ~400 B (ACK + #!CFG), ~24 ms of blocking print; served
+   before the grab it pushed one capture late and the next early (dt 92 then
+   68 on the bench), and served while the frame was held it starved the
+   driver of a buffer. */
+static void serve_commands(void)
+{
+    poll_commands();
+    /* After poll_commands(), so a confirming command that queued up while
+       a slow frame was going out counts before the revert deadline. */
+    link_poll();
 }
 
 /*
@@ -831,7 +953,7 @@ void app_main(void)
                 printf("# settings      loaded from flash\n");
                 if (migrated) {
                     printf("# settings      v1 record: frame rate set to the build "
-                           "default %d ms; !save to rewrite it\n", s_period_ms);
+                           "default %.1f ms; !save to rewrite it\n", period_ms());
                 }
             } else {
                 printf("# settings      saved record out of range, IGNORED: "
@@ -894,33 +1016,71 @@ void app_main(void)
     fflush(stdout);
 
     int64_t prev_capture_us = 0;
-    TickType_t next_wake = xTaskGetTickCount();
+    int64_t prev_fb_us = 0, prev_used_fb_us = 0;
+    int     skipped = 0;
 
     while (1) {
-        /* Pace first, work second. The idle time is the thermal budget. */
-        TickType_t period_ticks = pdMS_TO_TICKS(s_period_ms);
-        if (period_ticks == 0) {
-            period_ticks = 1;
-        }
-        xTaskDelayUntil(&next_wake, period_ticks);
-
-        poll_commands();
-        /* After poll_commands(), so a confirming command that queued up while
-           a slow frame was going out counts before the revert deadline. */
-        link_poll();
-
+        /* The sensor is the clock. fb_get() blocks until the OV2640 completes
+           its next frame, and the task is idle meanwhile: the idle time is
+           still the thermal budget, the sensor just measures it out now.
+           Pacing on the FreeRTOS tick instead (80.000 ms against the sensor's
+           79.968) made the two beat, measured 2026-10-14: the frame taken fell
+           32 us further behind each period, its age wandered 80-160 ms, about
+           every 200 s one frame was missed (dt 99 ms), and fb_get() then
+           waited up to 19 ms a frame while the phase walked back. The tick
+           itself also stepped 140 us against esp_timer every ~17 s. Locked
+           to the sensor, rows are whole sensor periods apart and every frame
+           is taken as it completes. */
         camera_fb_t *fb = esp_camera_fb_get();
+        int64_t capture_us = esp_timer_get_time();
         if (fb == NULL) {
             ESP_LOGW(TAG, "frame grab failed");
+            serve_commands();
             continue;
         }
-        int64_t capture_us = esp_timer_get_time();
+
+        /* The driver stamps each frame (esp_timer, at DMA start, in its ISR);
+           consecutive stamps measure the sensor's real period. */
+        int64_t fb_us = (int64_t)fb->timestamp.tv_sec * 1000000 + fb->timestamp.tv_usec;
+        if (prev_fb_us) {
+            double d = (double)(fb_us - prev_fb_us);
+            long n = lround(d / s_sensor_us);
+            if (n >= 1 && n <= 16) {
+                s_sensor_us += (d / (double)n - s_sensor_us) / 32.0;
+            }
+        }
+        prev_fb_us = fb_us;
+
+        /* 'f' slower than the sensor: use every n-th frame. The others go
+           straight back, and commands are still answered on them. */
+        if (++skipped < s_every_n) {
+            esp_camera_fb_return(fb);
+            serve_commands();
+            continue;
+        }
+        skipped = 0;
+
+        /* A capture off the sensor's own period is explained in a comment
+           line, which CSV readers skip: how far apart the captures were, how
+           far apart the frames were, and how old this one is. Expected after
+           'g', 'v1', '?' or anything else that keeps the loop past a frame. */
+        if (prev_capture_us) {
+            int64_t dcap = capture_us - prev_capture_us;
+            double expect = s_every_n * s_sensor_us;
+            if (fabs((double)dcap - expect) >= 50.0) {
+                printf("# late capture dt_us=%lld expected_us=%.0f fb_dt_us=%lld "
+                       "fb_age_us=%lld\n", dcap, expect, fb_us - prev_used_fb_us,
+                       capture_us - fb_us);
+            }
+        }
+        prev_used_fb_us = fb_us;
 
         if (fb->format != PIXFORMAT_RGB565 ||
             fb->width != FRAME_W || fb->height != FRAME_H) {
             ESP_LOGE(TAG, "unexpected frame: %dx%d format %d",
                      fb->width, fb->height, fb->format);
             esp_camera_fb_return(fb);
+            serve_commands();
             continue;
         }
 
@@ -932,9 +1092,11 @@ void app_main(void)
         }
 
         int64_t t0 = esp_timer_get_time();
-        blob_result_t r;
-        int ok = blob_detect(&s_cfg, fb->buf, s_work, &r);
+        tc_result_t tr;
+        int ok = tc_pipeline_run(&s_cfg, s_stage_req, &s_models, fb->buf, s_work,
+                                 esp_timer_get_time, &tr);
         int64_t proc_us = esp_timer_get_time() - t0;
+        const blob_result_t r = tr.r;
 
         if (s_dump_mask) {
             s_dump_mask = false;
@@ -978,8 +1140,17 @@ void app_main(void)
                 }
                 printf(",%.2f,%.2f,%.0f", a2, e2, r2);
             }
-            printf(",%.1f,%lld\n", dt_ms, proc_us);
+            printf(",%.1f,%lld", dt_ms, proc_us);
+            /* v2. %.3g keeps an absent confidence at two bytes ("-1"). */
+            printf(",%d,%.3g,%.3g,%.3g,%.3g,%ld,%ld,%ld,%lld,%d\n", tr.stage,
+                   tr.conf[0], tr.conf[1], tr.conf[2], tr.conf[3],
+                   (long)tr.t_px_us, (long)tr.t_b_us, (long)tr.t_c_us,
+                   s_loop_us, CSV_VERSION);
             fflush(stdout);
         }
+        serve_commands();
+        /* Busy time from the frame's arrival to here - detection, the row,
+           any command reply - reported in the next row. */
+        s_loop_us = esp_timer_get_time() - capture_us;
     }
 }

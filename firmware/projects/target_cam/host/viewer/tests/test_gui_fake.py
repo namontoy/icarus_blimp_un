@@ -43,11 +43,20 @@ def test_bench_session(app, rig):
     assert wait(app, lambda: flight.last_row is not None)
     assert cal.cfg["fps"] == 12.5 and cal.cfg["period_ms"] == 80
 
-    # A fractional rate is rounded to a whole-ms period, and #!CFG says so.
+    # The sensor is the clock: a rate is rounded to whole sensor frames, and
+    # #!CFG says what was really set. Nothing is faster than every frame.
+    assert cal.cfg["sensor_us"] == 79968
     win.send("f15")
-    assert wait(app, lambda: cal.cfg.get("period_ms") == 67)
+    assert wait(app, lambda: win.link.pending() == 0)
+    assert cal.cfg["period_ms"] == 80
+    win.send("f6.25")
+    assert wait(app, lambda: cal.cfg.get("period_ms") == 159.9)
     win.send("f12.5")
     assert wait(app, lambda: cal.cfg.get("period_ms") == 80 and win.link.pending() == 0)
+    # A letter that takes no argument, with one, is refused, not obeyed.
+    win.send("s=1")
+    assert wait(app, lambda: win.link.counters.naks >= 1)
+    assert cam.stream
 
     # Grab one frame: it arrives, its row pairs with it by t_ms.
     win.send("g")
@@ -64,7 +73,7 @@ def test_bench_session(app, rig):
     # Out of range is refused, and the control goes back to the camera's value.
     cal.p["tol"].set_local(12)
     win.send("T95")
-    assert wait(app, lambda: win.link.counters.naks >= 1)
+    assert wait(app, lambda: win.link.counters.naks >= 2)
 
     # Use a region as the target: same rule as 'c'.
     cal.pane.roi.setPos((60, 40))
@@ -75,8 +84,10 @@ def test_bench_session(app, rig):
 
     # Faster link, live frames, with every 4th frame corrupted: dropped, not shown.
     win.send("B921600")
-    assert wait(app, lambda: win.link.baud == 921600 and win.link.pending() == 0)
-    assert cal.cfg.get("baud") == 921600
+    # pending() clears on the ACK of the confirming 'k'; the #!CFG it prints
+    # comes on the next line, so wait for that too rather than racing it.
+    assert wait(app, lambda: win.link.baud == 921600 and win.link.pending() == 0
+                and cal.cfg.get("baud") == 921600)
     win.send("v1")
     n0 = win.link.counters.frames_ok
     assert wait(app, lambda: win.link.counters.frames_ok >= n0 + 5, timeout=20)
@@ -91,6 +102,18 @@ def test_bench_session(app, rig):
     assert wait(app, lambda: flight.banner.text().startswith("FLIGHT-IDENTICAL"), timeout=6)
     flight.tick()
     assert "rows/s" in flight.health.text()
+
+    # A stage with no model is accepted, and falls back visibly: #!CFG and
+    # every v2 row say what really runs.
+    win.send("!stage 3")
+    assert wait(app, lambda: cal.cfg.get("stage") == 3)
+    assert cal.cfg["stage_eff"] == 0 and cal.cfg["csv"] == P.CSV_VERSION
+    assert wait(app, lambda: flight.last_row.v["csv_v"] == 2)
+    assert flight.last_row.v["stage"] == 0
+    win.send("!stage 9")
+    assert wait(app, lambda: win.link.counters.naks >= 3)
+    flight.tick()
+    assert "dt != 80" in flight.health.text() and "stage      0 running" in flight.health.text()
 
 
 def test_camera_revert_when_pc_never_confirms(app):

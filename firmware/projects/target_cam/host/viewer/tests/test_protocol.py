@@ -117,6 +117,39 @@ def test_rows_with_wrong_column_count_are_not_rows():
     assert not isinstance(P.parse_line(ROW[:-5]), P.Row)
 
 
+ROW_V2 = ROW + ",2,0.873,-1,-1,-1,4512,0,0,21340,2"
+
+
+def test_v2_row_parses_with_its_new_columns():
+    r = P.parse_row(ROW_V2)
+    assert r is not None and len(P.COLUMNS_V2) == 35
+    assert r["csv_v"] == 2 and r["stage"] == 2 and r["conf"] == 0.873
+    assert r["b2_conf"] == -1 and r["t_px_us"] == 4512 and r["loop_us"] == 21340
+    # The v1 columns keep their indices, so the old fields read the same.
+    v1 = P.parse_row(ROW)
+    assert all(r[k] == v1[k] for k in P.COLUMNS_V1)
+
+
+def test_v1_row_is_filled_honestly():
+    import math
+    r = P.parse_row(ROW)
+    assert r["csv_v"] == 1 and r["stage"] == 0 and r["conf"] == -1
+    # Not measured by v1 firmware: NaN, never a reassuring 0.
+    assert all(math.isnan(r[k]) for k in ("t_px_us", "t_b_us", "t_c_us", "loop_us"))
+
+
+def test_v2_length_row_with_another_version_is_refused():
+    assert P.parse_row(ROW_V2[:-1] + "3") is None
+    assert P.parse_row(ROW_V2 + ",1") is None
+    assert P.parse_row(ROW_V2.rsplit(",", 1)[0]) is None      # 34 columns
+
+
+def test_v2_row_in_a_stream():
+    ev = P.StreamParser().feed(ROW_V2.encode() + b"\r\n" + ROW.encode() + b"\r\n")
+    assert kinds(ev) == ["Row", "Row"]
+    assert ev[0].v["csv_v"] == 2 and ev[1].v["csv_v"] == 1
+
+
 def test_binary_noise_without_newline_is_bounded():
     p = P.StreamParser()
     ev = p.feed(bytes(range(11, 256)) * 40)      # no 0x0A at all

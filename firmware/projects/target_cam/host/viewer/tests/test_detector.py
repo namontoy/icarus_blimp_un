@@ -95,3 +95,27 @@ def test_sample_clips_to_frame():
     D.sample(red(), frame, -10, -10, 500, 500)      # must not read out of bounds
     out = D.sample(red(), frame, 200, 200, 10, 10)
     assert out.sat == 0 and out.val == 0
+
+
+def test_pipeline_stage0_equals_detect():
+    frame, _ = frame_with_disc(70.0, 50.0, 10.0)
+    ref = D.detect(red(), frame)
+    for stage in range(D.TC_STAGE_MAX + 1):
+        t = D.pipeline(red(), frame, stage)
+        # No models exist yet, so every request runs stage 0 and says so.
+        assert t.stage == 0
+        assert bytes(t.r) == bytes(ref)
+        assert list(t.conf) == [-1.0] * D.BLOB_MAX_REPORT
+        assert t.t_px_us == 0 and t.t_total_us == 0       # no clock, no times
+
+
+def test_pipeline_timed_reports_times():
+    frame, _ = frame_with_disc(70.0, 50.0, 10.0)
+    t = D.pipeline(red(), frame, 0, timed=True)
+    assert t.r.found and t.t_total_us >= t.t_px_us >= 0 and t.t_b_us == 0
+
+
+def test_c_crc_matches_zlib():
+    import zlib
+    for data in (b"123456789", b"", bytes(range(256)) * 7):
+        assert D.crc32(data) == zlib.crc32(data)

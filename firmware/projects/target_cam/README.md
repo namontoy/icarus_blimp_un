@@ -27,8 +27,13 @@ up, the GPIO0 reflash window, and the flash LED driven low.
 >   missing rows, detection 7.3–8.2 ms. Under `f30` the loop waits on the
 >   sensor and runs at the same 12.505 FPS, so this is the sensor's own rate in
 >   RGB565 and every frame is used. The 10 FPS figure above is from the old
->   default. On the camera's clock the period averages 79.97 ms, not 80.00;
->   why the 80 ms wait and the sensor agree that closely is not established.
+>   default. On the camera's clock the period averages 79.97 ms, not 80.00.
+> - **Since 2026-10-14 (later) the sensor is the clock.** A 2-min run showed
+>   the 80.000 ms wait beating against the sensor's measured 79.968 ms frame:
+>   the frame taken fell 32 µs further behind every period, a frame was
+>   missed about every 200 s (one `dt_ms` 99.1 seen), and after it the loop
+>   waited up to 19 ms in `fb_get`. The loop now takes each frame as the
+>   sensor delivers it, so there is nothing left to beat against.
 > - **The red preset did not detect the real balloon at 1.5 m.** The centre
 >   patch read hue 304 ± 109, sat 78, val 188: a wide hue spread and low
 >   saturation, probably from the mylar mirroring the room. Loose thresholds
@@ -166,7 +171,9 @@ any settings saved with `!save` (NVS namespace `targetcam`). The banner's
 `settings` line says which. `!reset` erases them. A reflash does not erase them
 unless you erase the whole flash. A record saved by the 10 FPS firmware (record
 v1) is still loaded, calibration included, but its frame rate is replaced by the
-build default of 80 ms, and the banner says so; `!save` rewrites it as v2.
+build default of 80 ms, and the banner says so. A v2 record (before the
+learned detector) loads with stage 0 and `cnn_k` 2. `!save` writes the current
+version, v3.
 
 For a camera mounted upside down, set `TARGETCAM_VFLIP` and `TARGETCAM_HMIRROR`
 in `menuconfig`. That keeps +az as "right of the nose" and +el as "above it".
@@ -221,7 +228,7 @@ Commands are case-sensitive: `S` is saturation, `s` is the stream.
 | `V<0-255>` | Minimum brightness |
 | `a<px>` | Smallest blob reported |
 | `d<mm>` | Real target diameter for range (default 550); `d0` turns range off |
-| `f<fps>` | Frame rate, 1–30, decimals allowed (`f12.5`). Rounded to a whole-ms period, and the reply gives the real one: `f15` is 67 ms (14.93 FPS). The sensor gives 12.5 at XCLK 20 MHz, so faster gains nothing. |
+| `f<fps>` | Frame rate, 1–30, decimals allowed (`f12.5`). The sensor is the clock, so this picks every n-th sensor frame: `f12.5` and `f15` give every frame (79.968 ms at XCLK 20 MHz), `f6.25` every second one (159.9 ms), `f10` rounds back to 12.5. The reply and `#!CFG` give what was really set. |
 | `w<0\|1>` | AWB frozen / auto |
 | `F<deg>` | Horizontal FOV, 10–150 (decimals allowed), for angles and range |
 | `o` | Flip RGB565 byte order |
@@ -235,17 +242,39 @@ Commands are case-sensitive: `S` is saturation, `s` is the stream.
 | `!save` | Write the live settings to flash. The camera boots with them. |
 | `!load` | Reload the settings saved in flash |
 | `!reset` | Erase the saved settings and go back to the Kconfig defaults |
+| `!stage <0-3>` | Detector level: 0 HSV, 1 learned colour table, 2 + blob classifier, 3 + CNN. A level whose model is missing or invalid is accepted but **falls back** to the highest complete one; `#!CFG` (`stage_eff`) and every row (`stage`) say what really runs. Live only; `!save` keeps it. |
 
 Every command line is answered with `#!ACK <cmd>` or `#!NAK <cmd> -- <reason>`.
 A setting change is followed by `#!CFG`. The commands that touch flash are
 whole words, so one garbled byte (on the bench, `m` once arrived as `W`) can
-never write to flash.
+never write to flash. `!stage` is a whole word for the same reason, although it
+writes nothing: one corrupted byte must not change the detector level in flight.
+
+The letters that take no argument (`c o m s k g ?`) must arrive alone on their
+line; `s=1` or `k foo` is NAKed, not obeyed. On the bench, opening the port
+made the tty echo camera output back, and a fragment of a `#!CFG` line could
+otherwise have recalibrated the colour or stopped the stream.
+
+`period_ms` in `#!CFG` has one decimal, like `dt_ms`, and `sensor_us` is the
+sensor's frame period as the driver's timestamps measure it. `#!CFG` ends with
+the learned-detector state: `stage=` (requested) `stage_eff=`
+(running) `lut= clf= cnn=` (`ok`, `none` or `bad` for each model) `cnn_k=`
+`csv=2` (the row format) `fw=` (the app version) `collect=` (data collection,
+always 0 for now).
 
 ## Output format
 
+CSV version 2, 35 columns:
+
 ```
-t_ms,ok,cx_px,cy_px,az_deg,el_deg,area_px,w_px,h_px,fill,range_mm,clipped,blobs,matched_px,b2_az,b2_el,b2_range_mm,b3_az,b3_el,b3_range_mm,b4_az,b4_el,b4_range_mm,dt_ms,proc_us
+t_ms,ok,cx_px,cy_px,az_deg,el_deg,area_px,w_px,h_px,fill,range_mm,clipped,blobs,matched_px,b2_az,b2_el,b2_range_mm,b3_az,b3_el,b3_range_mm,b4_az,b4_el,b4_range_mm,dt_ms,proc_us,stage,conf,b2_conf,b3_conf,b4_conf,t_px_us,t_b_us,t_c_us,loop_us,csv_v
 ```
+
+The first 25 columns are version 1 unchanged, at the same indices, so a reader
+of v1 fields keeps working. A reader tells the versions apart by the last
+column (`csv_v`), never by guessing: a 35-column row whose `csv_v` is not 2 is
+refused. Readers that know both: `tcview` and `host/target_monitor.py`. The
+S3 reader is to be written against v2.
 
 | Field | Meaning |
 |---|---|
@@ -260,8 +289,19 @@ t_ms,ok,cx_px,cy_px,az_deg,el_deg,area_px,w_px,h_px,fill,range_mm,clipped,blobs,
 | `blobs` | Blobs at or above `min_area` in the frame. Can exceed 4. |
 | `matched_px` | Matching pixels in the whole frame. Rising with no blob means scattered colour clutter: tighten `S` or `T`. |
 | `bN_az`, `bN_el`, `bN_range_mm` | Blobs 2–4, in decreasing size. Absent ones read `0,0,-1`. **Choosing which one is the next waypoint is the navigator's job.** The largest is the nearest, which is not always the next in the course sequence. |
-| `dt_ms` | Measured interval between captures. |
-| `proc_us` | Detector cost. |
+| `dt_ms` | Measured interval between captures. The loop takes each frame as the sensor completes it, so this is a whole number of sensor frames: 79.968 ms, printed `80.0`, at XCLK 20 MHz. A capture off that period also prints a `# late capture` comment saying why. |
+| `proc_us` | Detector cost, all stages. Labelling time is `proc_us − t_px_us − t_b_us − t_c_us`. |
+| `stage` | The level that **ran** for this row (0–3), after any fallback. |
+| `conf`, `bN_conf` | Confidence 0–1 of blob 1 and blobs 2–4. **−1 = not computed** (stage < 2) or no blob in that slot. |
+| `t_px_us` | Pixel-classification pass (HSV at stage 0, the colour table at ≥ 1). |
+| `t_b_us`, `t_c_us` | Blob features + classifier, and crops + CNN. 0 when the stage did not run. |
+| `loop_us` | CPU busy time of the **previous** loop, from the frame's arrival to after its row was handed to the UART and any command was answered. This is the CPU figure to hold against the 80 ms period. It does **not** include the row's time on the wire: printf returns once the row is in the UART's 128 B hardware FIFO, and a 129 B row then takes another ~11 ms to go out. That is a separate budget, which `csv_report.py` reports as `wire`. |
+| `csv_v` | Row format version, 2. |
+
+`host/tools/csv_report.py` checks a recording: rows/s, every row whose `dt_ms`
+is not 80 (exit status 1 if there is one), rows lost on the wire, p50/p99/max
+of every timing column, the ok-rate and the "jumps" of blob 1. It reads a file
+or records from `--port` without resetting the camera.
 
 ## Verification
 
@@ -294,6 +334,12 @@ noise, not a blank frame. Result:
 PASSED (0 failures)
 ```
 
+`make test` then runs `test_pipeline`: the CRC-32 that model records will
+carry, against zlib's published values; the stage fallback rule over every
+combination of present models; stage 0 through the pipeline equal to
+`blob_detect()` bit for bit on 40 scenes; and the per-stage timing with an
+injected clock.
+
 Test 9 matters most for robustness. A checkerboard is the worst case for
 provisional labels. The label arrays are sized for it, so no input can overrun
 them, and ASan confirms it.
@@ -310,6 +356,7 @@ measured distances (see the checklist).
 | File | Purpose |
 |---|---|
 | `main/blob_detect.h/.c` | The detector. Portable C, no ESP-IDF and no heap; the caller provides a workspace (28 KB at 2×2 cells). |
+| `main/tc_pipeline.h/.c` | The staged detector entry point the camera and the viewer both call: stage fallback, per-stage timing, `tc_crc32()`. Portable C. |
 | `main/target_main.c` | Camera setup, pacing, calibration, mask dump, bearing/range, CSV, commands. |
 | `main/link.h/.c` | Raw frame transport (`#!FRAME`, CRC-32) and run-time baud changes with the 3 s safety revert. |
 | `main/settings.h/.c` | Versioned settings record in NVS (`!save` / `!load` / `!reset`). |
@@ -317,9 +364,11 @@ measured distances (see the checklist).
 | `main/Kconfig.projbuild` | Board, frame period, XCLK, FOV, flips, default colour, area, target size. |
 | `sdkconfig.defaults` | 240 MHz, 1 kHz tick, PSRAM optional, brownout on. |
 | `host/test_blob_detect.c` | The verification suite above. |
+| `host/test_pipeline.c` | The pipeline suite (CRC, fallback, stage 0 equality, timing). |
+| `host/tools/csv_report.py` | Pacing, timing and scene report of a CSV recording or a live port. |
 | `host/target_monitor.py` | Live viewer with an azimuth gauge, and a CSV logger (needs `pyserial`). |
 | `host/viewer/` | `tcview`: image, hand calibration and flight-data screens (PyQt6, own conda env). |
-| `host/Makefile` | `make test` runs the suite; `make lib` builds `libblob_detect.so` for the viewer. |
+| `host/Makefile` | `make test` runs both suites; `make lib` builds `libblob_detect.so` (every portable source) for the viewer. |
 
 ## Known gaps
 

@@ -157,8 +157,17 @@ static int slot_of(const uint16_t *label, const uint16_t *top, int ntop,
 int blob_detect(const blob_cfg_t *c, const uint8_t *frame, void *work,
                 blob_result_t *out)
 {
+    int32_t unused;
+    return blob_detect_timed(c, frame, work, out, NULL, &unused);
+}
+
+int blob_detect_timed(const blob_cfg_t *c, const uint8_t *frame, void *work,
+                      blob_result_t *out, blob_clock_fn now_us, int32_t *t_px_us)
+{
     blob_result_t z = {0};
     *out = z;
+    *t_px_us = 0;
+    int64_t t0 = now_us ? now_us() : 0;
 
     const int gw = grid_w(c), gh = grid_h(c), cs = c->cell;
     const size_t n = n_cells(c), l = n_labels(c);
@@ -180,6 +189,7 @@ int blob_detect(const blob_cfg_t *c, const uint8_t *frame, void *work,
         }
     }
     out->matched = matched;
+    if (now_us) *t_px_us = (int32_t)(now_us() - t0);
 
     /* A cell is foreground when at least half its pixels match. Isolated noise
        pixels never reach that with cells of 2 or 4, so speckle costs nothing

@@ -130,6 +130,17 @@ int blob_mask(const blob_cfg_t *cfg, const uint8_t *frame, uint8_t *mask);
 int blob_detect(const blob_cfg_t *cfg, const uint8_t *frame, void *work,
                 blob_result_t *out);
 
+/* A microsecond clock, supplied by the caller: esp_timer_get_time on the
+   camera, clock_gettime on a PC. Passing it in is what keeps this file free of
+   ESP-IDF while still letting the camera time the stages separately. */
+typedef int64_t (*blob_clock_fn)(void);
+
+/* blob_detect(), also timing pass 1 (the per-pixel colour test, the stage the
+   learned colour table replaces) into *t_px_us. With now_us == NULL nothing is
+   timed and *t_px_us is 0. The result is identical to blob_detect()'s. */
+int blob_detect_timed(const blob_cfg_t *cfg, const uint8_t *frame, void *work,
+                      blob_result_t *out, blob_clock_fn now_us, int32_t *t_px_us);
+
 /* Colour statistics of a rectangle, used to calibrate on a target held in front
    of the lens. Hue is a circular mean weighted by saturation, so a red patch
    straddling 0/360 averages to red rather than cyan. */
