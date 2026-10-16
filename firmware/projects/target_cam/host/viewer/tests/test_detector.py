@@ -101,12 +101,14 @@ def test_pipeline_stage0_equals_detect():
     frame, _ = frame_with_disc(70.0, 50.0, 10.0)
     ref = D.detect(red(), frame)
     for stage in range(D.TC_STAGE_MAX + 1):
-        t = D.pipeline(red(), frame, stage)
-        # No models exist yet, so every request runs stage 0 and says so.
+        t = D.pipeline(red(), frame, stage, D.NO_MODELS)
+        # Without models every request runs stage 0 and says so.
         assert t.stage == 0
         assert bytes(t.r) == bytes(ref)
         assert list(t.conf) == [-1.0] * D.BLOB_MAX_REPORT
         assert t.t_px_us == 0 and t.t_total_us == 0       # no clock, no times
+    # With the committed colour table, stages 1-3 run stage 1 (no classifier yet).
+    assert [D.pipeline(red(), frame, s).stage for s in range(4)] == [0, 1, 1, 1]
 
 
 def test_pipeline_timed_reports_times():

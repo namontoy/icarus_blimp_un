@@ -261,14 +261,16 @@ def score(name: str, lab: np.ndarray, blobs: list, mask: np.ndarray,
 
 
 def score_frame(sf: SavedFrame, lab: np.ndarray, stage: int = 0,
-                st: D.Settings | None = None) -> FrameScore:
+                st: D.Settings | None = None, m: D.TcModels | None = None) -> FrameScore:
     """Run the camera's pipeline (through the shared library) on a saved frame
-    and score it. The pixel mask is the stage 0 colour test until the learned
-    colour table exists (Phase A2)."""
+    and score it. The pixel mask is the colour test of the stage that ran:
+    the HSV window at 0, the colour table from 1 up. m: the models to offer
+    (default: the ones the firmware compiles in)."""
     st = st or sf.settings()
-    r = D.pipeline(st, sf.frame.data, stage)
+    m = m if m is not None else D.models()
+    r = D.pipeline(st, sf.frame.data, stage, m)
     blobs = [(r.r.b[k].cx, r.r.b[k].cy) for k in range(r.r.n_report)]
-    return score(sf.stem.name, lab, blobs, D.mask(st, sf.frame.data), r.stage)
+    return score(sf.stem.name, lab, blobs, D.mask(st, sf.frame.data, stage, m), r.stage)
 
 
 def ratio(a: int, b: int) -> float:

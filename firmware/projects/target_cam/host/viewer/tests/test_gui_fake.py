@@ -5,6 +5,7 @@ import time
 import pytest
 from PyQt6.QtWidgets import QApplication
 
+from tcview import detector as D
 from tcview import protocol as P
 from tcview.__main__ import MainWindow
 from tcview.fake_cam import FakeCamera
@@ -104,16 +105,18 @@ def test_bench_session(app, rig):
     assert "rows/s" in flight.health.text()
 
     # A stage with no model is accepted, and falls back visibly: #!CFG and
-    # every v2 row say what really runs.
+    # every v2 row say what really runs. The colour table exists and the
+    # classifier does not, so stage 3 runs stage 1.
     win.send("!stage 3")
     assert wait(app, lambda: cal.cfg.get("stage") == 3)
-    assert cal.cfg["stage_eff"] == 0 and cal.cfg["csv"] == P.CSV_VERSION
-    assert wait(app, lambda: flight.last_row.v["csv_v"] == 2)
-    assert flight.last_row.v["stage"] == 0
+    assert cal.cfg["stage_eff"] == 1 and cal.cfg["csv"] == P.CSV_VERSION
+    assert cal.cfg["lut"] == "ok" and cal.cfg["lut_id"] == D.models().lut_id
+    assert "requested, running 1" in cal.stage_lbl.text()
+    assert wait(app, lambda: flight.last_row.v["csv_v"] == 2 and flight.last_row.v["stage"] == 1)
     win.send("!stage 9")
     assert wait(app, lambda: win.link.counters.naks >= 3)
     flight.tick()
-    assert "dt != 80" in flight.health.text() and "stage      0 running" in flight.health.text()
+    assert "dt != 80" in flight.health.text() and "stage      1 running" in flight.health.text()
 
 
 def test_camera_revert_when_pc_never_confirms(app):

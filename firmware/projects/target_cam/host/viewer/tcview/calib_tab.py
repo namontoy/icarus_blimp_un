@@ -51,6 +51,10 @@ PARAMS = {
     "fov": ("F%.1f", "fov"),
 }
 
+# The detector levels '!stage N' selects (tc_pipeline.h). Each falls back to
+# the highest one whose models the camera has.
+STAGE_NAMES = ["0  HSV window", "1  colour table", "2  blob classifier", "3  CNN"]
+
 
 class ImagePane(pg.GraphicsLayoutWidget):
     def __init__(self, on_hover, on_region):
@@ -230,6 +234,23 @@ class CalibTab(QWidget):
 
         g = QGroupBox("Colour test (what counts as the target)")
         gl = QVBoxLayout(g)
+        # The stage decides which colour test runs. From stage 1 up it is the
+        # colour table, and the HSV controls below no longer change which
+        # pixels match: they are kept, and used again at stage 0.
+        sl = QHBoxLayout()
+        sl.addWidget(QLabel("Detector stage:"))
+        self.stage_combo = QComboBox()
+        self.stage_combo.addItems(STAGE_NAMES)
+        sl.addWidget(self.stage_combo)
+        b = QPushButton("Set")
+        b.setToolTip("!stage N. Not saved until 'Save to camera'.")
+        b.clicked.connect(lambda: self.main.send("!stage %d" % self.stage_combo.currentIndex()))
+        sl.addWidget(b)
+        sl.addStretch(1)
+        gl.addLayout(sl)
+        self.stage_lbl = QLabel()
+        self.stage_lbl.setWordWrap(True)
+        gl.addWidget(self.stage_lbl)
         pl = QHBoxLayout()
         pl.addWidget(QLabel("Preset:"))
         self.preset_combo = QComboBox()
@@ -376,8 +397,36 @@ class CalibTab(QWidget):
             s.be = int(self.frame.big_endian)
         return s
 
+    def stage(self) -> int:
+        """The stage the camera was asked for. The PC runs the same request
+        through the same fallback, so it shows what the camera computes."""
+        return int(self.cfg.get("stage", 0))
+
+    def _show_stage(self, v: dict):
+        req, eff = v.get("stage", 0), v.get("stage_eff", 0)
+        if 0 <= req < len(STAGE_NAMES):
+            self.stage_combo.setCurrentIndex(req)
+        pc = D.models()
+        cam_id = v.get("lut_id", 0)
+        if v.get("lut") == "ok" and pc.lut and cam_id != pc.lut_id:
+            chip(self.stage_lbl, "Colour table MISMATCH: camera %s, PC %d. The PC overlay "
+                 "is not what the camera computes; reflash, or retrain on the PC." % (
+                     cam_id, pc.lut_id), RED)
+        elif eff >= 1 and not pc.lut:
+            chip(self.stage_lbl, "Camera runs stage %d, but the PC has no colour table "
+                 "(main/models/lut_model.bin): the overlay falls back to HSV." % eff, RED)
+        elif eff != req:
+            chip(self.stage_lbl, "Stage %d requested, running %d (colour table %s)." % (
+                req, eff, v.get("lut", "?")), AMBER)
+        elif eff >= 1:
+            chip(self.stage_lbl, "Stage %d: colour table %s decides the pixels. Hue, tol, sat, "
+                 "val and 'c' have no effect until stage 0." % (eff, cam_id), GREEN)
+        else:
+            chip(self.stage_lbl, "Stage 0: the HSV window below decides the pixels.", GREY)
+
     def on_cfg(self, v: dict):
         self.cfg = v
+        self._show_stage(v)
         for key, (_, ck) in PARAMS.items():
             if ck in v:
                 self.p[key].set_camera(v[ck])
@@ -511,7 +560,7 @@ class CalibTab(QWidget):
         hh, s, v = (int(a) for a in D.hsv_lut()[px])
         r, g, b = (int(a) for a in P.rgb565_to_rgb888(np.array([[px]], dtype=np.uint16))[0, 0])
         st = self.settings()
-        m = D.mask(st, self.frame.data)[y, x]
+        m = D.mask(st, self.frame.data, self.stage())[y, x]
         self.hover_lbl.setText("x %3d y %3d  rgb565 %04x  RGB %3d %3d %3d  ->  H %3d  S %3d  "
                                "V %3d   %s" % (x, y, px, r, g, b, hh, s, v,
                                               "MATCH" if m else "no match"))
@@ -529,7 +578,7 @@ class CalibTab(QWidget):
         sat, val = hsv[:, 1], hsv[:, 2]
         q = lambda a: "%3d/%3d/%3d" % tuple(np.percentile(a, [10, 50, 90]).astype(int))
         st = self.settings()
-        m = D.mask(st, self.frame.data)[max(0, y):y1, max(0, x):x1]
+        m = D.mask(st, self.frame.data, self.stage())[max(0, y):y1, max(0, x):x1]
         self.region_lbl.setText(
             "%dx%d at (%d,%d): hue %d +/-%d (camera's sampler)\n"
             "sat p10/50/90 %s   val p10/50/90 %s\n"
@@ -550,7 +599,7 @@ class CalibTab(QWidget):
         if self.frame is None:
             return
         rgb = self.frame.rgb()
-        mask = D.mask(st, self.frame.data)
+        mask = D.mask(st, self.frame.data, self.stage())
         mode = self.overlay_mode.currentIndex()
         if mode == 1:
             pane.img.setImage(np.repeat(mask[..., None] * 255, 3, axis=2).astype(np.uint8),
@@ -565,7 +614,7 @@ class CalibTab(QWidget):
             else:
                 pane.overlay.clear()
 
-        r = D.detect(st, self.frame.data)
+        r = D.pipeline(st, self.frame.data, self.stage()).r
         for k in range(D.BLOB_MAX_REPORT):
             vis = self.show_boxes.isChecked() and k < r.n_report
             pane.boxes[k].setVisible(vis)

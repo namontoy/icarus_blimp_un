@@ -38,7 +38,8 @@ extern "C" {
 /* Validated models, one per learned stage; NULL = absent. Each becomes a
    concrete type in the phase that introduces its stage. */
 typedef struct {
-    const void *lut;    /* stage 1: colour table (Phase A2)                   */
+    const uint8_t *lut; /* stage 1: colour table, COLOR_LUT_BYTES of bits
+                           (color_lut.h)                                      */
     const void *clf;    /* stage 2: blob classifier (Phase B2)                */
     const void *cnn;    /* stage 3: int8 CNN (Phase C2)                       */
 } tc_models_t;
@@ -61,6 +62,17 @@ int tc_stage_available(const tc_models_t *m);
    outside 0..TC_STAGE_MAX is clamped into it. */
 int tc_stage_effective(int stage_req, const tc_models_t *m);
 
+/* The detector configuration a stage runs: cfg, with the colour table
+   switched in from stage 1 up and out below it. tc_pipeline_run() uses it,
+   and so does anything that draws the mask (the camera's 'm', the viewer's
+   overlay), so a mask always shows the pixel test of the stage that runs. */
+blob_cfg_t tc_stage_cfg(const blob_cfg_t *cfg, int stage_req, const tc_models_t *m);
+
+/* The pixel test of the stage that would run, one byte per pixel, as
+   blob_mask(). Returns the number of matching pixels. */
+int tc_pipeline_mask(const blob_cfg_t *cfg, int stage_req, const tc_models_t *m,
+                     const uint8_t *frame, uint8_t *mask);
+
 /*
  * Run the stages up to tc_stage_effective(stage_req, m) on one frame.
  * `work` is blob_detect's workspace (blob_workspace_bytes(cfg) bytes, 4-byte
@@ -77,6 +89,50 @@ int tc_pipeline_run(const blob_cfg_t *cfg, int stage_req, const tc_models_t *m,
    they get this portable one. Bitwise and slow, which is fine: it runs when a
    model is loaded, never per frame. */
 uint32_t tc_crc32(const void *buf, size_t len);
+
+/* Continue a CRC-32 over more bytes: tc_crc32_update(tc_crc32(a), b) equals
+   the CRC of a followed by b (zlib.crc32(b, crc) does the same). */
+uint32_t tc_crc32_update(uint32_t crc, const void *buf, size_t len);
+
+/*
+ * Model records. Every learned model travels in one format, whether it is
+ * compiled into the firmware (main/models/<x>_model.h is the record as a byte
+ * array) or, later, uploaded into flash: the same bytes, the same check, so a
+ * second delivery path adds transport and nothing else.
+ *
+ *   offset  size  field
+ *        0     4  magic, four ASCII characters naming the kind ("TCLU")
+ *        4     2  format version of that kind's payload
+ *        6     2  header size, TC_MODEL_HDR_BYTES
+ *        8     4  payload size in bytes
+ *       12     4  train id: when it was trained (Unix seconds), so a row of
+ *                 #!CFG ties the camera to one training run's report
+ *       16     4  CRC-32 of bytes 0..15 followed by the payload
+ *       20     -  payload
+ *
+ * Little-endian, read byte by byte, so neither alignment nor the compiler's
+ * struct packing matters. The CRC covers the header too: a flipped bit in the
+ * size or the train id is as much a corrupt model as one in the payload.
+ */
+#define TC_MODEL_HDR_BYTES  20
+
+typedef enum {
+    TC_MODEL_OK = 0,
+    TC_MODEL_SHORT,         /* fewer bytes than the header and payload need   */
+    TC_MODEL_MAGIC,         /* not a model of this kind                       */
+    TC_MODEL_VERSION,       /* a payload format this firmware does not read   */
+    TC_MODEL_SIZE,          /* the payload size is not this kind's            */
+    TC_MODEL_CRC,           /* corrupt                                        */
+} tc_model_err_t;
+
+/* Check a record of the given kind. On TC_MODEL_OK, *payload points into
+   rec and *train_id is set. `payload_len` is the size the kind requires. */
+tc_model_err_t tc_model_open(const uint8_t *rec, size_t len, const char magic[4],
+                             uint16_t version, uint32_t payload_len,
+                             const uint8_t **payload, uint32_t *train_id);
+
+/* "ok", "short", "magic", "version", "size", "crc". */
+const char *tc_model_err_str(tc_model_err_t e);
 
 #ifdef __cplusplus
 }

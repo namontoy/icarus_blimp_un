@@ -34,14 +34,15 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import QRectF, Qt
 from PyQt6.QtGui import QKeySequence, QShortcut
-from PyQt6.QtWidgets import (QButtonGroup, QCheckBox, QFileDialog, QGraphicsEllipseItem,
+from PyQt6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QFileDialog,
+                             QGraphicsEllipseItem,
                              QGraphicsRectItem, QGroupBox, QHBoxLayout, QLabel,
                              QListWidget, QPushButton, QRadioButton, QSizePolicy,
                              QSlider, QSpinBox, QVBoxLayout, QWidget)
 
 from . import detector as D
 from . import labels as L
-from .calib_tab import DATA_DIR, SCALE
+from .calib_tab import DATA_DIR, SCALE, STAGE_NAMES
 
 # Label colours over the image. Neither is red or green, so a balloon of
 # either colour stays readable under its tint.
@@ -126,6 +127,7 @@ class LabelTab(QWidget):
         self._last = None
         self._det = None                # detector result and mask for this frame
         self._mask = None
+        self._stage_eff = 0
 
         root = QHBoxLayout(self)
         left = QVBoxLayout()
@@ -245,6 +247,15 @@ class LabelTab(QWidget):
         self.show_det.setChecked(True)
         self.show_det.toggled.connect(lambda *_: self._draw_detection())
         gl.addWidget(self.show_det)
+        sl = QHBoxLayout()
+        sl.addWidget(QLabel("Detector stage:"))
+        self.stage_combo = QComboBox()
+        self.stage_combo.addItems(STAGE_NAMES[:2])
+        self.stage_combo.setToolTip("Stage 1 uses the committed colour table "
+                                    "(main/models/lut_model.bin) instead of the HSV window.")
+        self.stage_combo.currentIndexChanged.connect(lambda *_: self._draw_detection())
+        sl.addWidget(self.stage_combo, 1)
+        gl.addLayout(sl)
         right.addWidget(g)
 
         for keys, fn in (("1", lambda: self.cls_group.button(L.BALLOON).setChecked(True)),
@@ -500,8 +511,11 @@ class LabelTab(QWidget):
             self.det_lbl.setText("")
             return
         st = self.sf.settings()
-        res = D.pipeline(st, self.sf.frame.data, 0).r
-        self._det, self._mask = res, D.mask(st, self.sf.frame.data)
+        stage = self.stage_combo.currentIndex()
+        tr = D.pipeline(st, self.sf.frame.data, stage)
+        self._det, self._mask = tr.r, D.mask(st, self.sf.frame.data, stage)
+        self._stage_eff = tr.stage
+        res = tr.r
         if self.show_det.isChecked():
             for k in range(res.n_report):
                 b = res.b[k]
@@ -517,11 +531,13 @@ class LabelTab(QWidget):
         st = self.sf.settings()
         s = L.score(self.sf.stem.name, self.lab,
                     [(res.b[k].cx, res.b[k].cy) for k in range(res.n_report)], self._mask)
+        test = ("hue %d +/-%d, sat >= %d, val >= %d" % (st.hue, st.tol, st.sat, st.val)
+                if self._stage_eff == 0 else "colour table %d" % D.models().lut_id)
         self.det_lbl.setText(
-            "detector (hue %d +/-%d, sat >= %d, val >= %d): %d blob(s) reported\n"
+            "detector, stage %d (%s): %d blob(s) reported\n"
             "vs labels: TP %d  FN %d  FP %d  split %d  blob 1 = %s\n"
             "pixels: precision %s %%  recall %s %%" % (
-                st.hue, st.tol, st.sat, st.val, res.n_report, s.tp, s.fn, s.fp, s.split, s.b1,
+                self._stage_eff, test, res.n_report, s.tp, s.fn, s.fp, s.split, s.b1,
                 _pct(L.ratio(s.px_tp, s.px_tp + s.px_fp)), _pct(L.ratio(s.px_tp, s.px_tp + s.px_fn))))
 
 

@@ -24,7 +24,7 @@ records one from the port) and reports
 
 Usage:
   csv_report.py data/flight_20261014_101500.csv
-  csv_report.py --port /dev/ttyUSB0 --seconds 120 --cmd "!stage 0"
+  csv_report.py --port /dev/ttyUSB0 --seconds 120 --cmd '!stage 0'   (single quotes: bash expands ! inside double quotes)
 
 With --port the port is opened WITHOUT resetting the camera (DTR and RTS held
 low before open, as the viewer does), each --cmd is sent on its own and must be

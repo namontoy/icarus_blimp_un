@@ -121,14 +121,15 @@ class FakeCamera:
         c = self.cfg
         self._print("#!CFG w=%d h=%d cell=2 hue=%d tol=%d sat=%d val=%d area=%d mm=%d "
                     "fov=%.1f fps=%.3g period_ms=%.1f sensor_us=%.0f awb=%d be=%d preset=%s baud=%d "
-                    "image=%d stream=%d settings=%s stage=%d stage_eff=%d lut=none "
+                    "image=%d stream=%d settings=%s stage=%d stage_eff=%d lut=%s lut_id=%d "
                     "clf=none cnn=none cnn_k=%d csv=%d fw=fake collect=0\n"
                     % (W, H, c["hue"], c["tol"], c["sat"], c["val"], c["area"], c["mm"],
                        c["fov"], 1000.0 / self._period_ms(), self._period_ms(), SENSOR_US,
                        c["awb"],
                        c["be"], c["preset"], self.baud, int(self.image),
                        int(self.stream), self._settings_state(), c["stage"],
-                       self._stage_eff(), c["cnn_k"], CSV_VERSION))
+                       self._stage_eff(), "ok" if D.models().lut else "none",
+                       D.models().lut_id, c["cnn_k"], CSV_VERSION))
 
     def _period_ms(self) -> float:
         return self.cfg["every"] * SENSOR_US / 1000.0

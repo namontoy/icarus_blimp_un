@@ -92,6 +92,8 @@ void blob_rgb565_hsv(uint16_t px, int *hue, int *sat, int *val)
 
 int blob_pixel_matches(const blob_cfg_t *c, uint16_t px)
 {
+    if (c->lut) return (c->lut[px >> 3] >> (px & 7)) & 1;
+
     int r, g, b;
     unpack(px, &r, &g, &b);
     int mx = r > g ? (r > b ? r : b) : (g > b ? g : b);

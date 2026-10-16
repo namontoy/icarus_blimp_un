@@ -112,7 +112,7 @@ def test_score_frame_through_the_pipeline(tmp_path):
     stems = L.list_frames(tmp_path)
     assert [s.name for s in stems] == ["disc_and_square", "not_labelled"]
     sf = L.load_frame(stems[0])
-    s = L.score_frame(sf, L.load_labels(sf.label_path, W, H), stage=3)
+    s = L.score_frame(sf, L.load_labels(sf.label_path, W, H), stage=3, m=D.NO_MODELS)
     assert s.stage_eff == 0                                   # no models: falls back
     assert (s.tp, s.fn, s.fp, s.b1) == (1, 0, 1, "balloon")  # disc is bigger: blob 1
     assert s.px_fn == 0 and s.px_fp == 14 * 14

@@ -19,11 +19,14 @@ the hand labels (tcview's Label tab):
 
 Each frame is run with the settings the camera had when it was saved (its
 .json), unless --cfg gives one settings file for all of them, which is how
-two calibrations are compared on the same frames.
+two calibrations are compared on the same frames. From stage 1 up the pixel
+test is the colour table, not the HSV settings: the committed one
+(main/models/lut_model.bin) unless --lut names another record.
 
 Usage:
   eval_frames.py target_cam/data/frames
   eval_frames.py --stage 1 --cfg some_frame.json target_cam/host/testdata
+  eval_frames.py --stage 1 --lut /tmp/lut/lut_model.bin target_cam/host/testdata
   eval_frames.py --csv scores.csv DIR
 
 Exit status 2 if no labelled frame was found.
@@ -56,9 +59,17 @@ def main(argv=None) -> int:
                     help="detector stage to request (falls back like the camera)")
     ap.add_argument("--cfg", type=Path, help="a saved frame's .json: use its camera "
                     "settings for every frame")
+    ap.add_argument("--lut", type=Path, help="a colour table record for stage >= 1 "
+                    "(default: the committed main/models/lut_model.bin)")
     ap.add_argument("--csv", type=Path, help="also write one row per frame here")
     ap.add_argument("-q", "--quiet", action="store_true", help="totals only")
     a = ap.parse_args(argv)
+
+    try:
+        m = D.models(a.lut)
+    except (OSError, D.ModelError) as e:
+        print("cannot use %s: %s" % (a.lut, e))
+        return 2
 
     st_all = None
     if a.cfg:
@@ -75,7 +86,7 @@ def main(argv=None) -> int:
             st = None
             if st_all is not None:
                 st = D.Settings(**{**asdict(st_all), "be": sf.settings().be})
-            scores.append(L.score_frame(sf, lab, a.stage, st))
+            scores.append(L.score_frame(sf, lab, a.stage, st, m))
     if not scores:
         print("no labelled frames under %s (%d saved frames without labels)"
               % (", ".join(map(str, a.dirs)), unlabelled))
@@ -107,10 +118,12 @@ def main(argv=None) -> int:
     print("blob 1        a balloon in %d of %d frames with one; a false blob 1 in %d of "
           "%d frames without" % (b1_ok, len(with_bal),
                                  sum(1 for s in without if s.b1 == "false"), len(without)))
-    print("pixels        precision %s %%  recall %s %%   (stage 0 colour test; on "
-          "labelled pixels only)" % (
-              pct(L.ratio(tot["px_tp"], tot["px_tp"] + tot["px_fp"])),
-              pct(L.ratio(tot["px_tp"], tot["px_tp"] + tot["px_fn"]))))
+    if m.lut and max(stages) >= 1:
+        print("colour table  id %d, %s" % (m.lut_id, m.lut_path))
+    test = "/".join("HSV window" if n == 0 else "colour table" for n in stages)
+    print("pixels        precision %s %%  recall %s %%   (%s; on labelled pixels only)" % (
+        pct(L.ratio(tot["px_tp"], tot["px_tp"] + tot["px_fp"])),
+        pct(L.ratio(tot["px_tp"], tot["px_tp"] + tot["px_fn"])), test))
 
     if a.csv:
         keys = [k for k in asdict(scores[0]) if k != "notes"]

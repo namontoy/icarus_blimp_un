@@ -47,7 +47,9 @@
 
 #include "camera_pins.h"
 #include "blob_detect.h"
+#include "color_lut.h"
 #include "tc_pipeline.h"
+#include "models/lut_model.h"
 #include "link.h"
 #include "settings.h"
 
@@ -98,11 +100,19 @@ static int   s_stage_req;           /* '!stage': the level asked for, 0..3 */
 static int   s_cnn_k      = 2;      /* blobs stage 3 checks (Phase C)      */
 
 /* The learned models, each validated once at boot; NULL = absent or rejected,
-   and the pipeline falls back past it. None exist before Phase A2. The state
-   strings are what #!CFG reports: none (not built in), ok, or bad (built in
-   but failed its checks). */
+   and the pipeline falls back past it. The state strings are what #!CFG
+   reports: none (not built in), ok, or bad (built in but failed its checks). */
 static tc_models_t s_models;
 static const char *s_lut_state = "none";
+static uint32_t    s_lut_id;          /* the table's train id; #!CFG lut_id= */
+
+/* The colour table is copied out of flash into DRAM at boot rather than read
+   in place. Stage 1 looks it up at random 65 536-colour addresses for every
+   pixel, and a flash-cached table would compete with the frame for the cache
+   and add jitter to the 80 ms loop; a RAM copy costs a fixed 8 kB. The copy
+   is also what the later NVS upload (Phase D) needs, so both delivery paths
+   end in the same buffer, checked by the same color_lut_load(). */
+static uint8_t s_lut[COLOR_LUT_BYTES];
 static const char *s_clf_state = "none";
 static const char *s_cnn_state = "none";
 
@@ -412,15 +422,15 @@ static void print_cfg(void)
 {
     printf("#!CFG w=%d h=%d cell=%d hue=%d tol=%d sat=%d val=%d area=%d mm=%.0f "
            "fov=%.1f fps=%.3g period_ms=%.1f sensor_us=%.0f awb=%d be=%d preset=%s "
-           "baud=%d image=%d stream=%d settings=%s stage=%d stage_eff=%d lut=%s clf=%s cnn=%s "
-           "cnn_k=%d csv=%d fw=%s collect=0\n",
+           "baud=%d image=%d stream=%d settings=%s stage=%d stage_eff=%d lut=%s lut_id=%u "
+           "clf=%s cnn=%s cnn_k=%d csv=%d fw=%s collect=0\n",
            FRAME_W, FRAME_H, s_cfg.cell, s_cfg.hue, s_cfg.hue_tol, s_cfg.sat_min,
            s_cfg.val_min, s_cfg.min_area, s_target_mm, s_hfov_deg, frame_fps(),
            period_ms(), s_sensor_us, s_awb ? 1 : 0, s_cfg.big_endian,
            s_preset >= 0 ? blob_preset_name(s_preset) : "custom",
            link_baud(), s_image ? 1 : 0, s_streaming ? 1 : 0, settings_state(),
            s_stage_req, tc_stage_effective(s_stage_req, &s_models),
-           s_lut_state, s_clf_state, s_cnn_state, s_cnn_k, CSV_VERSION,
+           s_lut_state, (unsigned)s_lut_id, s_clf_state, s_cnn_state, s_cnn_k, CSV_VERSION,
            esp_app_get_description()->version);
 }
 
@@ -570,6 +580,10 @@ static cmd_res_t run_stage_command(const char *line)
         printf("# stage %d requested, running %d: the model for stage %d is %s\n",
                v, eff, eff + 1,
                eff == 0 ? s_lut_state : eff == 1 ? s_clf_state : s_cnn_state);
+    }
+    if (eff >= 1) {
+        printf("# stage %d: the colour table decides which pixels match; hue, tol, "
+               "sat, val and 'c' have no effect until !stage 0\n", eff);
     }
     return CMD_OK;
 }
@@ -820,7 +834,8 @@ static void calibrate(const uint8_t *frame)
            s_cfg.sat_min, s_cfg.val_min);
 }
 
-/* 'm': the mask exactly as the detector sees it, 4x4 pixels per character.
+/* 'm': the mask exactly as the detector sees it at the running stage, 4x4
+   pixels per character.
    '#' at least half the pixels match, '+' some do, '.' none; 'X' marks the
    reported centroid. The text fallback for when the PC viewer is not to hand.
    It tests pixels one by one rather than through blob_mask(), which would
@@ -829,14 +844,15 @@ static void dump_mask(const uint8_t *frame, const blob_result_t *r)
 {
     int xc = r->found ? (int)r->b[0].cx / 4 : -1;
     int yc = r->found ? (int)r->b[0].cy / 4 : -1;
-    printf("# mask (4x4 px per char)\n");
+    blob_cfg_t c = tc_stage_cfg(&s_cfg, s_stage_req, &s_models);
+    printf("# mask (4x4 px per char, %s)\n", c.lut ? "colour table" : "HSV window");
     for (int by = 0; by < FRAME_H / 4; by++) {
         char row[FRAME_W / 4 + 1];
         for (int bx = 0; bx < FRAME_W / 4; bx++) {
             int k = 0;
             for (int y = by * 4; y < by * 4 + 4; y++)
                 for (int x = bx * 4; x < bx * 4 + 4; x++)
-                    k += blob_pixel_matches(&s_cfg, blob_pixel(&s_cfg, frame, x, y));
+                    k += blob_pixel_matches(&c, blob_pixel(&c, frame, x, y));
             row[bx] = (bx == xc && by == yc) ? 'X' : k >= 8 ? '#' : k ? '+' : '.';
         }
         row[FRAME_W / 4] = '\0';
@@ -886,6 +902,27 @@ static void boot_report(void)
         printf("#     USB-serial adapter's 3.3 V pin cannot do it, and the\n");
         printf("#     camera's power-up is what pushes it over. Fix the supply\n");
         printf("#     before reading anything below as a sensor result. ***\n");
+    }
+    fflush(stdout);
+}
+
+/* Check the compiled-in models and take the ones that pass. A refused model
+   is reported and left out, so the camera runs the stages below it rather
+   than a table it cannot trust. */
+static void load_models(void)
+{
+    uint32_t id = 0;
+    tc_model_err_t e = color_lut_load(lut_model_rec, sizeof lut_model_rec, s_lut, &id);
+    if (e == TC_MODEL_OK) {
+        s_models.lut = s_lut;
+        s_lut_state = "ok";
+        s_lut_id = id;
+        printf("# models        colour table ok: id %u, %d colours accepted, %u B in DRAM\n",
+               (unsigned)id, color_lut_count(s_lut), (unsigned)sizeof s_lut);
+    } else {
+        s_lut_state = "bad";
+        printf("# models        colour table REFUSED (%s): stage 1 and above unavailable\n",
+               tc_model_err_str(e));
     }
     fflush(stdout);
 }
@@ -964,6 +1001,8 @@ void app_main(void)
         }
     }
     fflush(stdout);
+
+    load_models();
 
     if (!blob_cfg_valid(&s_cfg)) {
         ESP_LOGE(TAG, "detector configuration is invalid for a %dx%d frame",

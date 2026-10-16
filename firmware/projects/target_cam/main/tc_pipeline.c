@@ -1,10 +1,13 @@
 /*
  * tc_pipeline - see tc_pipeline.h for what and why.
  *
- * Phase 0: only stage 0 exists. The learned stages are absent from every
- * tc_models_t, so every request falls back to 0 and the rows say so.
+ * Stage 1 (Phase A2) is the colour table: the same detector with a different
+ * pixel test, switched in through cfg->lut. Stages 2 and 3 have no models yet,
+ * so requests for them fall back to 1 (or 0) and the rows say so.
  */
 #include "tc_pipeline.h"
+
+#include <string.h>
 
 int tc_stage_available(const tc_models_t *m)
 {
@@ -22,6 +25,20 @@ int tc_stage_effective(int stage_req, const tc_models_t *m)
     return stage_req < avail ? stage_req : avail;
 }
 
+blob_cfg_t tc_stage_cfg(const blob_cfg_t *cfg, int stage_req, const tc_models_t *m)
+{
+    blob_cfg_t c = *cfg;
+    c.lut = tc_stage_effective(stage_req, m) >= 1 ? m->lut : NULL;
+    return c;
+}
+
+int tc_pipeline_mask(const blob_cfg_t *cfg, int stage_req, const tc_models_t *m,
+                     const uint8_t *frame, uint8_t *mask)
+{
+    blob_cfg_t c = tc_stage_cfg(cfg, stage_req, m);
+    return blob_mask(&c, frame, mask);
+}
+
 int tc_pipeline_run(const blob_cfg_t *cfg, int stage_req, const tc_models_t *m,
                     const uint8_t *frame, void *work, blob_clock_fn now_us,
                     tc_result_t *out)
@@ -33,20 +50,73 @@ int tc_pipeline_run(const blob_cfg_t *cfg, int stage_req, const tc_models_t *m,
     out->t_c_us = 0;
     for (int k = 0; k < BLOB_MAX_REPORT; k++) out->conf[k] = -1.0f;
 
-    blob_detect_timed(cfg, frame, work, &out->r, now_us, &out->t_px_us);
+    /* Stage 1 changes only the pixel test. Labelling, the moments and the
+       area floor are stage 0's, so any difference in what is reported comes
+       from which pixels match and nothing else. */
+    blob_cfg_t c = tc_stage_cfg(cfg, stage_req, m);
+    blob_detect_timed(&c, frame, work, &out->r, now_us, &out->t_px_us);
 
     out->t_total_us = now_us ? (int32_t)(now_us() - t0) : 0;
     return out->r.found;
 }
 
-uint32_t tc_crc32(const void *buf, size_t len)
+uint32_t tc_crc32_update(uint32_t crc, const void *buf, size_t len)
 {
     const uint8_t *p = (const uint8_t *)buf;
-    uint32_t c = 0xFFFFFFFFu;
+    uint32_t c = crc ^ 0xFFFFFFFFu;
     for (size_t i = 0; i < len; i++) {
         c ^= p[i];
         for (int b = 0; b < 8; b++)
             c = (c >> 1) ^ (0xEDB88320u & (0u - (c & 1u)));
     }
     return c ^ 0xFFFFFFFFu;
+}
+
+uint32_t tc_crc32(const void *buf, size_t len)
+{
+    return tc_crc32_update(0u, buf, len);
+}
+
+static uint32_t rd32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 |
+           (uint32_t)p[3] << 24;
+}
+
+static uint16_t rd16(const uint8_t *p)
+{
+    return (uint16_t)(p[0] | p[1] << 8);
+}
+
+tc_model_err_t tc_model_open(const uint8_t *rec, size_t len, const char magic[4],
+                             uint16_t version, uint32_t payload_len,
+                             const uint8_t **payload, uint32_t *train_id)
+{
+    /* Cheapest and most telling checks first: a record of the wrong kind
+       says "magic", not "crc". */
+    if (rec == NULL || len < TC_MODEL_HDR_BYTES) return TC_MODEL_SHORT;
+    if (memcmp(rec, magic, 4) != 0) return TC_MODEL_MAGIC;
+    if (rd16(rec + 4) != version || rd16(rec + 6) != TC_MODEL_HDR_BYTES)
+        return TC_MODEL_VERSION;
+    uint32_t n = rd32(rec + 8);
+    if (n != payload_len) return TC_MODEL_SIZE;
+    if (len - TC_MODEL_HDR_BYTES < n) return TC_MODEL_SHORT;
+    uint32_t crc = tc_crc32_update(tc_crc32(rec, 16), rec + TC_MODEL_HDR_BYTES, n);
+    if (crc != rd32(rec + 16)) return TC_MODEL_CRC;
+    *payload = rec + TC_MODEL_HDR_BYTES;
+    *train_id = rd32(rec + 12);
+    return TC_MODEL_OK;
+}
+
+const char *tc_model_err_str(tc_model_err_t e)
+{
+    switch (e) {
+    case TC_MODEL_OK:      return "ok";
+    case TC_MODEL_SHORT:   return "short";
+    case TC_MODEL_MAGIC:   return "magic";
+    case TC_MODEL_VERSION: return "version";
+    case TC_MODEL_SIZE:    return "size";
+    case TC_MODEL_CRC:     return "crc";
+    }
+    return "?";
 }

@@ -1,9 +1,9 @@
 """
 The camera's own detector, called from Python.
 
-host/libblob_detect.so is the camera's portable sources (../main/blob_detect.c
-and tc_pipeline.c, the list is SRC in host/Makefile) compiled for this PC: the
-same files the firmware runs. So the viewer's mask overlay, its per-pixel
+host/libblob_detect.so is the camera's portable sources (../main/blob_detect.c,
+tc_pipeline.c and color_lut.c, the list is SRC in host/Makefile) compiled for
+this PC: the same files the firmware runs. So the viewer's mask overlay, its per-pixel
 H/S/V readout and its region statistics are the camera's arithmetic, not a
 Python re-implementation that could drift from it (the hue of a pixel, for
 example, comes from integer 5/6/5-bit maths that a float HSV would not
@@ -26,7 +26,13 @@ HOST_DIR = Path(__file__).resolve().parents[2]          # target_cam/host
 MAIN_DIR = HOST_DIR.parent / "main"
 LIB_PATH = HOST_DIR / "libblob_detect.so"
 SOURCES = [MAIN_DIR / n for n in ("blob_detect.c", "blob_detect.h",
-                                   "tc_pipeline.c", "tc_pipeline.h")]
+                                   "tc_pipeline.c", "tc_pipeline.h",
+                                   "color_lut.c", "color_lut.h")]
+# The colour table the firmware compiles in (main/models/lut_model.h holds the
+# same bytes; a host test checks they agree).
+LUT_MODEL = MAIN_DIR / "models" / "lut_model.bin"
+COLOR_LUT_BYTES = 8192
+MODEL_ERRORS = ["ok", "short", "magic", "version", "size", "crc"]
 
 BLOB_MAX_REPORT = 4
 TC_STAGE_MAX = 3
@@ -37,7 +43,7 @@ CAL_PATCH = 16          # target_main.c: the centre patch 'c' samples
 class BlobCfg(C.Structure):
     _fields_ = [(n, C.c_int) for n in
                 ("width", "height", "cell", "big_endian", "hue", "hue_tol",
-                 "sat_min", "val_min", "min_area")]
+                 "sat_min", "val_min", "min_area")] + [("lut", C.c_void_p)]
 
 
 class Blob(C.Structure):
@@ -52,9 +58,16 @@ class BlobResult(C.Structure):
 
 
 class TcModels(C.Structure):
-    """tc_models_t: validated model pointers, NULL = absent. All NULL until the
-    learned stages exist, so every request falls back to stage 0."""
+    """tc_models_t: validated model pointers, NULL = absent. The buffers
+    they point into are kept on the instance (_keep), so they live exactly as
+    long as the models do. lut_id is the table's train id, 0 when absent."""
     _fields_ = [("lut", C.c_void_p), ("clf", C.c_void_p), ("cnn", C.c_void_p)]
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self._keep = []
+        self.lut_id = 0
+        self.lut_path = None
 
 
 class TcResult(C.Structure):
@@ -106,8 +119,15 @@ def load_library() -> C.CDLL:
     lib.tc_stage_effective.argtypes = [C.c_int, P(TcModels)]
     lib.tc_pipeline_run.argtypes = [P(BlobCfg), C.c_int, P(TcModels), C.c_char_p,
                                     C.c_void_p, CLOCK_FN, P(TcResult)]
+    lib.tc_pipeline_mask.argtypes = [P(BlobCfg), C.c_int, P(TcModels), C.c_char_p,
+                                     C.c_void_p]
     lib.tc_crc32.argtypes = [C.c_char_p, C.c_size_t]
     lib.tc_crc32.restype = C.c_uint32
+    lib.color_lut_load.argtypes = [C.c_char_p, C.c_size_t, C.c_void_p,
+                                   P(C.c_uint32)]
+    lib.color_lut_from_hsv.argtypes = [P(BlobCfg), C.c_void_p]
+    lib.color_lut_from_hsv.restype = None
+    lib.color_lut_count.argtypes = [C.c_void_p]
     return lib
 
 
@@ -136,7 +156,7 @@ class Settings:
 
     def c(self) -> BlobCfg:
         return BlobCfg(self.w, self.h, self.cell, self.be, self.hue, self.tol,
-                       self.sat, self.val, self.area)
+                       self.sat, self.val, self.area, None)
 
     @classmethod
     def from_cfg(cls, v: dict) -> "Settings":
@@ -180,11 +200,16 @@ def hsv(px: int) -> tuple:
     return h.value, s.value, v.value
 
 
-def mask(st: Settings, frame: bytes) -> np.ndarray:
-    """(h, w) uint8, 1 where the pixel passes the camera's colour test."""
+def mask(st: Settings, frame: bytes, stage: int = 0,
+         m: TcModels | None = None) -> np.ndarray:
+    """(h, w) uint8, 1 where the pixel passes the colour test of the stage
+    that runs for this request (tc_pipeline_mask): the HSV window at stage 0,
+    the colour table from stage 1 up, with the camera's fallback."""
     out = np.zeros((st.h, st.w), dtype=np.uint8)
     c = st.c()
-    lib().blob_mask(C.byref(c), frame, out.ctypes.data_as(C.c_void_p))
+    m = m if m is not None else models()
+    lib().tc_pipeline_mask(C.byref(c), int(stage), C.byref(m), frame,
+                           out.ctypes.data_as(C.c_void_p))
     return out
 
 
@@ -198,9 +223,61 @@ def detect(st: Settings, frame: bytes) -> BlobResult:
     return r
 
 
-def models() -> TcModels:
-    """The models the viewer can offer the pipeline: none yet (Phase 0)."""
-    return TcModels()
+NO_MODELS = TcModels()
+
+
+class ModelError(ValueError):
+    pass
+
+
+def lut_models(record: bytes | None = None, bits: np.ndarray | bytes | None = None,
+               train_id: int = 0, path=None) -> TcModels:
+    """Models with a colour table, from a model record (checked by the C
+    color_lut_load, exactly as the camera checks it at boot) or from bare
+    table bits (training candidates, never sent anywhere)."""
+    buf = (C.c_uint8 * COLOR_LUT_BYTES)()
+    if record is not None:
+        tid = C.c_uint32()
+        e = lib().color_lut_load(record, len(record), buf, C.byref(tid))
+        if e != 0:
+            raise ModelError("colour table refused: %s" % MODEL_ERRORS[e])
+        train_id = tid.value
+    else:
+        b = bytes(np.asarray(bits, np.uint8).tobytes()) if not isinstance(bits, bytes) else bits
+        if len(b) != COLOR_LUT_BYTES:
+            raise ModelError("a colour table is %d bytes, not %d" % (COLOR_LUT_BYTES, len(b)))
+        C.memmove(buf, b, COLOR_LUT_BYTES)
+    m = TcModels()
+    m.lut = C.cast(buf, C.c_void_p)
+    m._keep.append(buf)
+    m.lut_id = train_id
+    m.lut_path = path
+    return m
+
+
+_MODELS = None
+
+
+def models(lut_path=None) -> TcModels:
+    """The models the firmware compiles in, or the table at lut_path. With no
+    table file, no models: every request then falls back to stage 0, as the
+    camera does."""
+    global _MODELS
+    if lut_path is not None:
+        p = Path(lut_path)
+        return lut_models(record=p.read_bytes(), path=p)
+    if _MODELS is None:
+        _MODELS = lut_models(record=LUT_MODEL.read_bytes(), path=LUT_MODEL) \
+            if LUT_MODEL.exists() else TcModels()
+    return _MODELS
+
+
+def hsv_table(st: Settings) -> np.ndarray:
+    """(8192,) uint8: the colour table that reproduces st's HSV test."""
+    out = np.zeros(COLOR_LUT_BYTES, np.uint8)
+    c = st.c()
+    lib().color_lut_from_hsv(C.byref(c), out.ctypes.data_as(C.c_void_p))
+    return out
 
 
 def pipeline(st: Settings, frame: bytes, stage: int = 0, m: TcModels | None = None,

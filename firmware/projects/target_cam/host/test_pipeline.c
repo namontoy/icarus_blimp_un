@@ -11,11 +11,22 @@
  *     below it), so a missing or rejected model always falls back;
  *   - the pipeline at stage 0 is blob_detect, bit for bit, so wrapping the
  *     detector changed nothing the CSV reports.
+ *
+ * Stage 1, the colour table (Phase A2):
+ *
+ *   - a table built from the HSV rule makes stage 1 report exactly what
+ *     stage 0 does, so the table path changes nothing but the pixel test;
+ *   - a model record is refused for each kind of damage, with the right
+ *     reason, and a refused table leaves the caller's copy untouched.
+ *
+ * Whether a TRAINED table is any good is a question about data, answered on
+ * the labelled frames by host/train/train_lut.py and eval_frames.py, not here.
  */
 #include <stdio.h>
 #include <string.h>
 
 #include "../main/tc_pipeline.h"
+#include "../main/color_lut.h"
 
 #define W 160
 #define H 120
@@ -174,12 +185,132 @@ static void test_timing(void)
     check(memcmp(&a, &b, sizeof a) == 0, "timing changed the detection");
 }
 
+static uint8_t lut[COLOR_LUT_BYTES];
+static uint8_t mask_a[W * H], mask_b[W * H];
+
+static void test_hsv_table_is_stage0(void)
+{
+    printf("5. stage 1 with the HSV rule as a table == stage 0, bit for bit\n");
+    blob_cfg_t cfgs[4];
+    cfgs[0] = red_cfg();                                    /* tight red    */
+    cfgs[1] = red_cfg();                                    /* loose, wraps */
+    cfgs[1].hue = 350; cfgs[1].hue_tol = 40; cfgs[1].sat_min = 60; cfgs[1].val_min = 20;
+    cfgs[2] = red_cfg();                                    /* 1x1 cells    */
+    cfgs[2].cell = 1;
+    cfgs[3] = red_cfg();                                    /* other colour */
+    cfgs[3].hue = 220; cfgs[3].hue_tol = 30; cfgs[3].sat_min = 90; cfgs[3].val_min = 40;
+    static uint32_t big_work[(W * H * 6) / 4 + 64];         /* cell 1: 113 kB */
+    int same = 0, runs = 0, found = 0;
+    for (int ci = 0; ci < 4; ci++) {
+        blob_cfg_t c = cfgs[ci];
+        color_lut_from_hsv(&c, lut);
+        tc_models_t m = { lut, NULL, NULL };
+        if (ci == 0)
+            printf("   red preset as a table: %d of 65536 colours\n", color_lut_count(lut));
+        for (int i = 0; i < 25; i++) {
+            scene(i % 6);
+            tc_result_t t0, t1;
+            tc_pipeline_run(&c, 0, &m, frame, big_work, NULL, &t0);
+            tc_pipeline_run(&c, 1, &m, frame, big_work, NULL, &t1);
+            int eq = memcmp(&t0.r, &t1.r, sizeof t0.r) == 0;
+            int na = tc_pipeline_mask(&c, 0, &m, frame, mask_a);
+            int nb = tc_pipeline_mask(&c, 1, &m, frame, mask_b);
+            eq = eq && na == nb && memcmp(mask_a, mask_b, sizeof mask_a) == 0;
+            check(eq, "HSV table differs from the HSV test");
+            check(t0.stage == 0 && t1.stage == 1, "wrong effective stage");
+            same += eq;
+            runs++;
+            found += t0.r.found;
+        }
+    }
+    printf("   %d/%d identical (results and masks), %d had a target\n", same, runs, found);
+
+    /* And the table is really what decides at stage 1: an empty one sees
+       nothing where stage 0 sees the discs. */
+    blob_cfg_t c = red_cfg();
+    memset(lut, 0, sizeof lut);
+    tc_models_t m = { lut, NULL, NULL };
+    scene(3);
+    tc_result_t t0, t1;
+    tc_pipeline_run(&c, 0, &m, frame, work_buf, NULL, &t0);
+    tc_pipeline_run(&c, 1, &m, frame, work_buf, NULL, &t1);
+    printf("   empty table: stage 0 matched %d px, stage 1 matched %d\n",
+           t0.r.matched, t1.r.matched);
+    check(t0.r.found && !t1.r.found && t1.r.matched == 0, "stage 1 ignored the table");
+}
+
+/* A record as the training script writes it (tc_pipeline.h). */
+static uint8_t rec[TC_MODEL_HDR_BYTES + COLOR_LUT_BYTES];
+
+static void wr32(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8);
+    p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
+}
+
+static void make_record(void)
+{
+    memcpy(rec, COLOR_LUT_MAGIC, 4);
+    rec[4] = COLOR_LUT_VERSION; rec[5] = 0;
+    rec[6] = TC_MODEL_HDR_BYTES; rec[7] = 0;
+    wr32(rec + 8, COLOR_LUT_BYTES);
+    wr32(rec + 12, 1792100000u);
+    for (int i = 0; i < COLOR_LUT_BYTES; i++)
+        rec[TC_MODEL_HDR_BYTES + i] = (uint8_t)rnd(256);
+    uint32_t crc = tc_crc32_update(tc_crc32(rec, 16), rec + TC_MODEL_HDR_BYTES,
+                                   COLOR_LUT_BYTES);
+    wr32(rec + 16, crc);
+}
+
+static void test_records(void)
+{
+    printf("6. model records: accepted intact, refused with the reason when damaged\n");
+    check(tc_crc32_update(tc_crc32("1234", 4), "56789", 5) == 0xCBF43926u,
+          "CRC does not continue across buffers");
+
+    make_record();
+    uint32_t id = 0;
+    memset(lut, 0, sizeof lut);
+    tc_model_err_t e = color_lut_load(rec, sizeof rec, lut, &id);
+    printf("   intact          %s, train id %u\n", tc_model_err_str(e), (unsigned)id);
+    check(e == TC_MODEL_OK && id == 1792100000u, "intact record refused");
+    check(memcmp(lut, rec + TC_MODEL_HDR_BYTES, COLOR_LUT_BYTES) == 0, "table not copied");
+
+    struct { int off; uint8_t xor_; size_t len; tc_model_err_t want; const char *what; } dmg[] = {
+        { 0,     0x01, sizeof rec,     TC_MODEL_MAGIC,   "magic"            },
+        { 4,     0x02, sizeof rec,     TC_MODEL_VERSION, "version"          },
+        { 6,     0x04, sizeof rec,     TC_MODEL_VERSION, "header size"      },
+        { 9,     0x01, sizeof rec,     TC_MODEL_SIZE,    "payload size"     },
+        { 12,    0x80, sizeof rec,     TC_MODEL_CRC,     "train id bit"     },
+        { 16,    0x01, sizeof rec,     TC_MODEL_CRC,     "stored CRC"       },
+        { 20,    0x01, sizeof rec,     TC_MODEL_CRC,     "first table bit"  },
+        { 8211,  0x80, sizeof rec,     TC_MODEL_CRC,     "last table bit"   },
+        { -1,    0,    sizeof rec - 1, TC_MODEL_SHORT,   "one byte short"   },
+        { -1,    0,    10,             TC_MODEL_SHORT,   "header cut"       },
+    };
+    for (size_t i = 0; i < sizeof dmg / sizeof dmg[0]; i++) {
+        make_record();
+        if (dmg[i].off >= 0) rec[dmg[i].off] ^= dmg[i].xor_;
+        memset(lut, 0x5A, sizeof lut);
+        id = 7;
+        e = color_lut_load(rec, dmg[i].len, lut, &id);
+        printf("   %-15s %s\n", dmg[i].what, tc_model_err_str(e));
+        check(e == dmg[i].want, "wrong reason");
+        int untouched = id == 7;
+        for (int k = 0; k < COLOR_LUT_BYTES; k++) untouched &= lut[k] == 0x5A;
+        check(untouched, "a refused record changed the caller's table");
+    }
+    check(color_lut_load(NULL, 0, lut, &id) == TC_MODEL_SHORT, "NULL record accepted");
+}
+
 int main(void)
 {
     test_crc();
     test_stage_rule();
     test_stage0_is_blob_detect();
     test_timing();
+    test_hsv_table_is_stage0();
+    test_records();
     printf("\n%s (%d failure%s)\n", failures ? "FAILED" : "PASSED",
            failures, failures == 1 ? "" : "s");
     return failures ? 1 : 0;

@@ -48,6 +48,12 @@ typedef struct {
     int sat_min;        /* reject pixels less saturated than this, 0..255     */
     int val_min;        /* reject pixels darker than this, 0..255             */
     int min_area;       /* smallest blob reported, in matching pixels         */
+    const uint8_t *lut; /* NULL: the HSV test above decides each pixel. Else a
+                           learned colour table (color_lut.h), one bit per
+                           RGB565 value, decides it instead and hue..val_min
+                           are not used for matching. Set by tc_pipeline from
+                           the stage; last, so every initialiser that names
+                           its fields leaves it NULL.                         */
 } blob_cfg_t;
 
 #define BLOB_MAX_REPORT 4
@@ -111,8 +117,10 @@ void blob_rgb565_hsv(uint16_t px, int *hue, int *sat, int *val);
 /* Read pixel (x, y) from a frame, honouring cfg->big_endian. */
 uint16_t blob_pixel(const blob_cfg_t *cfg, const uint8_t *frame, int x, int y);
 
-/* 1 if this pixel passes the colour test. Exposed so a caller can draw the mask
-   for debugging exactly as the detector sees it. */
+/* 1 if this pixel passes the colour test: the table when cfg->lut is set, the
+   HSV window otherwise. Every pass of the detector, blob_mask() and the
+   camera's 'm' dump go through this one function, so they cannot disagree
+   about a pixel. */
 int blob_pixel_matches(const blob_cfg_t *cfg, uint16_t px);
 
 /* The whole frame's colour test, one byte per pixel (1 match, 0 not), row-major
