@@ -89,13 +89,30 @@ def test_committed_header_and_bin_are_the_same_record():
 def test_trainer_reproduces_the_committed_table(tmp_path):
     """The .json records how the table was made; rerunning the trainer with
     those parameters and that id must give the same bytes. A table nobody can
-    regenerate cannot be retrained at the venue with confidence."""
+    regenerate cannot be retrained at the venue with confidence.
+
+    The sessions are looked up by name in host/testdata/, the committed copy,
+    because data/ is not in git. A table trained on a new session therefore
+    fails here until that session is copied into host/testdata/."""
     import json
     meta = json.loads(D.LUT_MODEL.with_suffix(".json").read_text())
+    dirs = []
+    for name in meta["sessions"]:
+        d = TESTDATA / name
+        if not d.is_dir():
+            pytest.fail("the committed table was trained on session %s, which is not in "
+                        "host/testdata/. Copy the labelled folder there "
+                        "(cp -r data/%s host/testdata/) so the table can be rebuilt from "
+                        "the repository." % (name, name))
+        have = sorted(stem.name for stem in L.list_frames(d)
+                      if L.load_frame(stem).label_path.exists())
+        assert have == sorted(meta["frames"][name]), (
+            "host/testdata/%s does not hold the frames the table was trained on" % name)
+        dirs.append(str(d))
     assert train_lut.main([
         "--sigma", str(meta["sigma"]), "--k", str(meta["k"]),
         "--min-evidence", str(meta["min_evidence"]), "--train-id", str(meta["train_id"]),
-        "--out", str(tmp_path), *map(str, SESSIONS)]) == 0
+        "--out", str(tmp_path), *dirs]) == 0
     assert (tmp_path / "lut_model.bin").read_bytes() == D.LUT_MODEL.read_bytes()
     assert (tmp_path / "lut_model.h").read_text() == MODEL_H.read_text()
 

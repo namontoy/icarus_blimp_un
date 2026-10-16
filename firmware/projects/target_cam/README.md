@@ -194,19 +194,90 @@ steps 2–4 with a live image.
 
 ## Retraining the colour table (stage 1)
 
-Save frames with AWB frozen (`w0`), label them in tcview's Label tab, keep each
-capture session in its own folder, then from `target_cam/`:
+Retrain after adding a labelled session, and at a new venue or under new
+light. The colour table learns the camera's raw colours, so it belongs to the
+light and white balance it was trained under. The student guide (capture and
+labelling) covers the same routine with screenshots. The method and its scores
+are in `docs/learned-detector-report.md` §8 and §9.
 
-```bash
-python host/train/train_lut.py data/venue_s1 data/venue_s2   # writes main/models/lut_model.*
-python host/tools/eval_frames.py --stage 1 data/venue_s1 data/venue_s2
-```
+**Safety net first.** Stage 0 needs no table. If a table misbehaves in a test,
+switch the camera to stage 0 (`!stage 0`, or *Detector stage* in tcview's
+Calib tab), calibrate the HSV window as before and fly that. Retraining can
+wait.
 
-and rebuild and flash. The trainer needs two or more sessions to choose its
-parameters (one is held out at a time); with one, give `--sigma` and `--k`.
-The table belongs to the white balance and exposure it was trained under, so
-fly with the same AWB setting. The method and its held-out scores are in
-`docs/learned-detector-report.md` §8.
+Run everything from `target_cam/` with `conda activate targetcam`.
+
+1. **Collect and label** each session in its own folder under `data/`
+   (`data/red_s3`, `data/venue_s1`, ...), with AWB frozen (`w0`) as in flight.
+   Leave out folders whose balloons are not targets, such as `orange_s1`.
+2. **Score the current table on the new session**, before it is trained on,
+   and keep the output. It is the only score from frames the table has never
+   seen:
+   ```bash
+   python host/tools/eval_frames.py --stage 1 data/red_s3 | tee data/red_s3/eval_before.txt
+   ```
+3. **Train a trial table.** `--out` writes it to a trial folder and leaves the
+   firmware's table alone. It takes about 10 s for 20 frames:
+   ```bash
+   python host/train/train_lut.py --out data/lut_try data/red_s1 data/red_s2 data/red_s3
+   ```
+   The trainer chooses sigma, k and min_evidence itself by leaving one session
+   out at a time. With only one session it cannot, so give it the current
+   values: `--sigma 8 --k 7`.
+4. **Judge it.** Use the trial table only if all of these hold:
+   - no `WARNING` and no `EXCLUDED` on the first (chosen) setting;
+   - under that setting, every `held out` line shows `false b1 0/…` and no
+     more `FN` than the old table had on that session (step 2 for the new
+     one; report §8.3 for `red_s1` and `red_s2`);
+   - on all sessions, every balloon is found and no empty frame has a false
+     blob 1:
+     ```bash
+     python host/tools/eval_frames.py --stage 1 --lut data/lut_try/lut_model.bin data/red_s1 data/red_s2 data/red_s3
+     ```
+     (These are its own training frames, so its pixel figures look better
+     than they will in flight. They are a check for gross failure, not a
+     score.)
+
+   If one figure improves and another gets worse, keep the old table.
+5. **Install it.** Back up the current table, copy the trial in, then rebuild
+   and flash as in [Building and flashing](#building-and-flashing):
+   ```bash
+   mkdir -p data/lut_before && cp main/models/lut_model.* data/lut_before/
+   cp data/lut_try/lut_model.* main/models/
+   ```
+6. **Confirm on the board.**
+   - The boot log reads `# models        colour table ok: id <new id>, …`,
+     and `#!CFG` shows `lut=ok lut_id=<new id>`.
+   - tcview's stage chip is green, not `MISMATCH`.
+   - `csv_report.py --cmd '!stage 1'` shows 0 rows off 80 ms and the balloon
+     found steadily.
+7. **Keep it reproducible** before committing. Copy each session it was
+   trained on into `host/testdata/` and run the viewer tests. They rebuild the
+   committed table from those frames and must get the same bytes:
+   ```bash
+   cp -r data/red_s3 host/testdata/
+   (cd host/viewer && python -m pytest -q tests)
+   ```
+
+**Undo.** Copy back the backup (`cp data/lut_before/lut_model.* main/models/`),
+or `git checkout main/models/` for the last committed table, then rebuild and
+flash.
+
+**At a venue** *(reasoned, not yet tried)*: train on the venue sessions plus
+the older ones. If the venue's `held out` line shows false blobs, train on the
+venue sessions alone and compare that line again.
+
+| Symptom | Cause | What to do |
+|---|---|---|
+| `no labelled frames in DIR` | Wrong folder, or its frames have no `.labels.png` | Check the path; label the frames in the Label tab |
+| `choosing sigma and k needs two or more sessions` | Only one folder given | Add `--sigma 8 --k 7`, or add another session |
+| `WARNING: every setting puts a false blob 1 …` | Some empty frame always gets a false target | Keep the old table. Run `eval_frames.py --stage 1 --lut …` to find the frame (`blob 1 false`), and check that its balloon really is out of view and its labels are right |
+| `eval_frames.py` prints `ran 0`, or `cannot use …` | The table file was not found or is damaged | Check the `--lut` path; rerun the trainer |
+| Boot log `colour table REFUSED`, `#!CFG` `lut=bad` | The table built into the firmware is damaged; the camera runs stage 0 instead | Rerun the trainer, copy, rebuild, flash |
+| tcview chip `Colour table MISMATCH` | The camera and `main/models/` hold different tables | Flash the current build, or copy the right table into `main/models/` |
+| `test_trainer_reproduces_the_committed_table` fails: `not in host/testdata/` | The table was trained on a session that is not committed | Step 7 |
+| The same test fails: `does not hold the frames` | Frames were added, removed or relabelled after training | Copy the session again, or retrain from `host/testdata/` |
+| Balloon found in the frames but not in the hall | Different light or white balance from training | Collect a session there, retrain; meanwhile fly stage 0 |
 
 ## First power-up checklist
 

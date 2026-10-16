@@ -1,17 +1,17 @@
 # target_cam learned detector — status report
 
-**Date:** 2026-10-15
+**Date:** 2026-10-15, updated 2026-10-16
 **Project:** `firmware/projects/target_cam` (branch `target-cam-learned-detector`)
 **Hardware:** AI-Thinker ESP32-CAM (OV2640, 160×120 RGB565) on an ESP32-CAM-MB
 programmer, ESP-IDF v5.5.5. The task statement is
 [`claude_code_prompt_learned detector.md`](claude_code_prompt_learned%20detector.md).
 
 This report covers Phase 0 (groundwork), Phase A1 (labelled frames and the
-stage 0 baseline) and Phase A2 (the learned colour table, stage 1, §8). Later
-phases append to it. Each section keeps **measured**
-(numbers from the board or from `eval_frames.py` on labelled frames) apart from
-**reasoned** (what the numbers suggest, not yet tested). §7 lists what is not
-established.
+stage 0 baseline), Phase A2 (the learned colour table, stage 1, §8) and the
+plan for the next frames (§9). Later phases append to it. Each section keeps
+**measured** (numbers from the board or from `eval_frames.py` on labelled
+frames) apart from **reasoned** (what the numbers suggest, not yet tested).
+§7 lists what is not established.
 
 **Current status in one line:** pacing is locked to the sensor at 80.0 ms on
 every row (measured, 3752 rows). On 20 hand-labelled red-balloon frames, a
@@ -406,3 +406,67 @@ stage 1.
   "Retraining the colour table").
 - **The parameter search is small-sample.** A one-frame change in either
   session can reorder settings within the flat top.
+
+---
+
+## 9. Next collection: plan (2026-10-16)
+
+Nothing in this section is measured yet. It sets out how the next frames
+will be used, written before they are taken, so the use can't be fitted to
+the results afterwards. The procedure for students is in the frame-collection
+guide.
+
+### 9.1 `red_s3`: an unbiased test first, training data second
+
+- **Score before training.** The table's sigma, k and min_evidence were
+  chosen on `red_s1` and `red_s2` (§8.3), so its scores on those sessions are
+  slightly optimistic. Run `eval_frames.py --stage 1` on `red_s3` (and
+  `--stage 0`, for the baseline) before `red_s3` is used for anything else.
+  Those are the first scores of the table on frames that had no part in
+  making it.
+- **Then retrain on all three sessions,** with the leave-one-session-out
+  search repeated over three folds.
+- **The same session rules as before** (AWB frozen with `w0`, one
+  calibration, no reset), because the table learns raw colours (§8.6).
+- **What it should add:** wood, which gives the false second blob in
+  `130cm_wood` and on the board (§8.5); frames at 4–8 m; backlit frames; and
+  about a third of the frames with no balloon. A different room or light would
+  be worth more than any of these (§7).
+
+### 9.2 `orange_s1`: orange balloons as negatives
+
+The competition rules mention only red balloons, so for this detector an
+orange balloon is never a target. It is something the detector must not
+report.
+
+- **Its own folder, with the orange balloon painted as background.** The
+  labels then say what the red detector should do. `eval_frames.py` counts a
+  blob on the orange balloon as a false positive, and a false blob 1 on a
+  frame with only the orange balloon as a false target. A frame with both
+  balloons has the red one painted as balloon.
+- **Stage B is where it should help** (reasoned). An orange balloon has the
+  shape, fill and edges of the target, so a blob classifier can only reject
+  it on colour. Without such examples, B could learn that "round and filled"
+  means balloon.
+- **The colour table does not train on it at first.** A red balloon's lit
+  side drifts toward orange (`blob_detect.c`, the hue window comment), so
+  orange-balloon pixels counted as background would also push some red
+  highlight colours out of the table. `train_lut.py` reads only the folders
+  it is given, so leaving `orange_s1` out needs no code. The plan is to
+  measure first: score the current table on `orange_s1`. Then train with it
+  only if the table accepts the orange balloon, and only if `red_s3`'s pixel
+  recall does not drop.
+- **The folder split is not a clean test** for B, because the same room and
+  light as `red_s3` leak across it. It is a separate folder so that it can be
+  left out of the table's training, not as an independent session.
+
+### 9.3 Frames for Phase B1
+
+Frames saved now are also Phase B1 data. The PC library runs the camera's
+pipeline (shown equal on a grabbed frame in §8.5), so it can rebuild each
+blob, its features and its 24 × 24 crop from a saved frame. The pixel labels
+then label the blobs: a blob whose centre is inside a painted balloon is a
+balloon, and any other is not. Saved frames also survive a retrained table,
+because the blobs can be rebuilt from the pixels. Blobs collected live with
+`!collect` cannot be. Their limit is volume: at about 3.3 s per frame they
+give tens of blobs, against hundreds from `!collect`.

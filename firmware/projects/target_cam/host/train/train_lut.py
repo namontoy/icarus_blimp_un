@@ -44,9 +44,12 @@ scores are slightly optimistic. A session kept out of all of this is the only
 unbiased test.
 
 Usage (from target_cam/):
-  python host/train/train_lut.py host/testdata/red_s1 host/testdata/red_s2
-  python host/train/train_lut.py --sigma 8 --k 3 DIR...   (no search)
-  python host/train/train_lut.py --out /tmp/lut DIR...
+  python host/train/train_lut.py --out data/lut_try data/red_s1 data/red_s2   (a trial)
+  python host/train/train_lut.py host/testdata/red_s1 host/testdata/red_s2   (writes main/models)
+  python host/train/train_lut.py --sigma 8 --k 7 DIR...   (no search; one session is enough)
+
+The step-by-step routine, how to judge a new table and what to do when
+something goes wrong are in the README, "Retraining the colour table".
 """
 from __future__ import annotations
 
@@ -289,6 +292,14 @@ def main(argv=None) -> int:
                 "  EXCLUDED: false blob 1" if r["false_b1"] else ""))
             for f in r["folds"]:
                 print("      held out %-8s %s" % (f["held_out"], describe(f)))
+    if rows and rows[0]["false_b1"]:
+        # Rows are sorted excluded-last, so an excluded first row means every
+        # setting failed the hard rule. The trainer still writes the best of
+        # them, so the person running it can look, but it must say so loudly:
+        # this table would put a false target in front of the blimp.
+        print("\nWARNING: every setting puts a false blob 1 on a held-out frame without a\n"
+              "balloon. Do not fly this table. Check those frames' labels (is the balloon\n"
+              "really out of view?) with eval_frames.py, and keep the current table.")
     best = rows[0] if rows else dict(sigma=a.sigma, k=a.k, min_evidence=a.min_evidence or 0.5)
 
     b, g = counts([f for fr in sessions.values() for f in fr])
@@ -315,6 +326,10 @@ def main(argv=None) -> int:
     (a.out / "lut_model.h").write_text(c_header(rec, meta))
     (a.out / "lut_model.json").write_text(json.dumps(meta, indent=1) + "\n")
     print("wrote %s/lut_model.{bin,h,json}" % a.out)
+    if a.out.resolve() != D.LUT_MODEL.parent.resolve():
+        print("next: eval_frames.py --stage 1 --lut %s %s\n"
+              "      and, to use it, copy lut_model.* into main/models/, rebuild and flash"
+              % (a.out / "lut_model.bin", " ".join(str(d) for d in a.sessions)))
     return 0
 
 
