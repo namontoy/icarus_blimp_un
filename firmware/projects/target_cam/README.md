@@ -366,8 +366,11 @@ measured distances (see the checklist).
 | `host/test_blob_detect.c` | The verification suite above. |
 | `host/test_pipeline.c` | The pipeline suite (CRC, fallback, stage 0 equality, timing). |
 | `host/tools/csv_report.py` | Pacing, timing and scene report of a CSV recording or a live port. |
+| `host/tools/eval_frames.py` | Scores the camera's pipeline on hand-labelled saved frames: blob TP/FN/FP/split, blob 1, pixel precision/recall. |
 | `host/target_monitor.py` | Live viewer with an azimuth gauge, and a CSV logger (needs `pyserial`). |
-| `host/viewer/` | `tcview`: image, hand calibration and flight-data screens (PyQt6, own conda env). |
+| `host/viewer/` | `tcview`: image, hand calibration, flight-data and frame-labelling screens (PyQt6, own conda env). `tcview/labels.py` holds the label format and the scoring rule that `eval_frames.py` shares. |
+| `host/testdata/` | The labelled test set: two capture sessions of the red balloon (`red_s1`, `red_s2`; 14 balloon frames, 6 clutter-only), each frame as `.rgb565` + `.json` + `.png` + `.labels.png`. Baseline numbers in `docs/learned-detector-report.md`. |
+| `data/` | Saved frames (`.rgb565` + `.json` + `.png`), their hand labels (`<stem>.labels.png`: 0 unlabelled, 1 balloon, 2 background) and CSV recordings. A working folder, untracked; the curated, committed test frames go to `host/testdata/`. |
 | `host/Makefile` | `make test` runs both suites; `make lib` builds `libblob_detect.so` (every portable source) for the viewer. |
 
 ## Known gaps

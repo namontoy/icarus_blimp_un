@@ -4,12 +4,13 @@ A PC program that shows what the ESP32-CAM sees and what it says, so the colour
 detector can be calibrated by hand. Everything goes over the same USB serial
 cable used for flashing.
 
-Two screens:
+Three screens:
 
 | Screen | Link | What it shows | Same as flight? |
 |---|---|---|---|
 | **Image & calibration** | Any baud (921600 is typical), image on | The camera's raw RGB565 pixels at ×4, a mask overlay, sliders, and pixel/region colour readouts | **No.** Sending a 38 kB frame blocks the camera's loop, so `dt_ms` and FPS are not representative. The screen says so. |
 | **Flight data** | 115200, image off | Only the CSV rows, as a dashboard: target status, the 4 blobs, a field-of-view plot, 30 s plots, link health, and the last raw line | **Yes**, when the green FLIGHT-IDENTICAL banner is shown. The banner is driven by the camera's own `#!CFG` report, not by what the viewer asked for. |
+| **Label frames** | None needed | Saved frames, painted by hand as balloon / background, with the detector's boxes and its score against the labels | Not applicable: it works on files. |
 
 The overlay and the PC-side boxes are computed by the **same C file the camera
 runs** (`main/blob_detect.c`, built as `host/libblob_detect.so` and loaded
@@ -46,6 +47,7 @@ conda activate targetcam
 cd firmware/projects/target_cam/host/viewer
 python -m tcview --port /dev/ttyACM0     # the real camera, through the ESP32-CAM-MB
 python -m tcview --fake                  # a synthetic camera; no hardware needed
+python -m tcview --label [DIR]           # label saved frames only; no camera (default DIR: target_cam/data)
 ```
 
 Opening the port does **not** reset the camera: the viewer lowers DTR and RTS
@@ -112,6 +114,46 @@ The bottom console shows every human `#` line from the camera. It accepts any
 raw command, for example `?`, `m`, `H350` or `p red`. **Show CSV rows** echoes
 the stream there.
 
+## Label frames screen
+
+Hand labels are the ground truth the learned detector is trained on and scored
+against. One labelling pass gives both: the balloon and background pixels the
+colour table (stage 1) learns from, and the balloons `host/tools/eval_frames.py`
+counts hits and misses on.
+
+Labels are written next to each frame as `<stem>.labels.png`, 8-bit greyscale
+at the frame's size: 0 unlabelled, 1 balloon, 2 background. "Unlabelled" is a
+class on purpose. A balloon's rim is a mix of balloon and wall colour, and
+forcing it into either class would teach the colour table something false. A
+balloon, for scoring, is an 8-connected component of label 1 (4 px or more)
+with its bounding box.
+
+The quick way through a frame:
+
+1. **Ellipse** tool (the default), **Balloon** class: drag a box around the
+   balloon. Fix the edge with the **Brush**. The right mouse button erases
+   with the current tool.
+2. **Rest -> background**: every unlabelled pixel becomes background, except a
+   band (2 px by default) around the balloon, which stays unlabelled.
+3. Check the result and move on with **PgDown**. Labels are saved when you
+   change frame, with **Save** (Ctrl+S), and when the window closes.
+
+A frame with no balloon in it is labelled by step 2 alone. Those frames are
+what measure false detections. Label the mylar's white highlights as balloon:
+whether that colour should match is the training's decision, made from how
+often it is balloon versus background.
+
+Keys: 1 balloon, 2 background, 0 erase, B/R/E brush/rectangle/ellipse, Ctrl+Z
+undo (50 steps), PgDown/PgUp next/previous frame. The list marks labelled
+frames `[x]`. Subfolders are searched, so keep one subfolder per capture
+session. The training uses that to split train and validation by session.
+
+Below the image, the detector's result on the frame is drawn (yellow box =
+blob 1). This uses the camera settings saved in the frame's `.json`, through
+the same library. Under it is the live score against the labels: the same
+TP / FN / FP / split rule and pixel precision/recall as `eval_frames.py`,
+because both import `tcview/labels.py`.
+
 ## Protocol (firmware ↔ viewer)
 
 The text protocol stays readable in a plain terminal and in `target_monitor.py`.
@@ -156,3 +198,7 @@ python -m pytest -q
   the camera's `#!CFG`, a NAK, "use region as target", a switch to 921600 with
   live frames and some corrupted, `!save`, and the flight screen returning to
   FLIGHT-IDENTICAL. A second test checks the fake's own 3 s baud revert.
+- **`test_labels.py`:** the label file round trip, connected components
+  (including the diagonal case and the camera's centroid convention), the
+  rest-to-background band, the scoring rules, `eval_frames.py` on a synthetic
+  set, and the Label tab: paint, save on frame change, reload, undo.

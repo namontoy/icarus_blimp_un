@@ -25,7 +25,7 @@ from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import QRectF, Qt
+from PyQt6.QtCore import QRectF, QSettings, Qt
 from PyQt6.QtGui import QColor, QImage, QPen
 from PyQt6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QGridLayout,
                              QGroupBox, QHBoxLayout, QLabel, QMessageBox,
@@ -157,18 +157,15 @@ class CalibTab(QWidget):
         disp.addStretch(1)
         left.addLayout(disp)
 
-        left.addStretch(1)
+        # ---- second column: the controls ----
+        # The image column also holds what a capture session uses (grab, baud,
+        # save) and the camera's settings state, so the bottom of the controls
+        # column is never in the way of a capture. Every control panel can be
+        # hidden with the strip of buttons at the right edge (remembered between
+        # runs), and the column scrolls if what is shown is still too tall.
+        mid = self._column(root)
+        panels = []                         # (strip label, group box)
 
-        # ---- right: controls ----
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        right_w = QWidget()
-        right = QVBoxLayout(right_w)
-        scroll.setWidget(right_w)
-        root.addWidget(scroll, 1)
-
-        # The region panel sits at the top of the scrolling column: on a
-        # laptop-height screen the image column has no room left for it.
         region = QGroupBox("Region (drag / resize the cyan box)")
         rl = QVBoxLayout(region)
         rb = QHBoxLayout()
@@ -202,11 +199,11 @@ class CalibTab(QWidget):
         self.hist.addItem(self.win_lo)
         self.hist.addItem(self.win_hi)
         rl.addWidget(self.hist)
-        right.addWidget(region)
+        mid.addWidget(region)
+        panels.append(("Region", region))
 
         self.settings_lbl = QLabel()
         self.settings_lbl.setWordWrap(True)
-        right.addWidget(self.settings_lbl)
 
         g = QGroupBox("Image link")
         gl = QGridLayout(g)
@@ -229,7 +226,7 @@ class CalibTab(QWidget):
         self.link_lbl = QLabel()
         self.link_lbl.setWordWrap(True)
         gl.addWidget(self.link_lbl, 2, 0, 1, 2)
-        right.addWidget(g)
+        left.addWidget(g)
 
         g = QGroupBox("Colour test (what counts as the target)")
         gl = QVBoxLayout(g)
@@ -262,7 +259,8 @@ class CalibTab(QWidget):
         self.cal_lbl.setWordWrap(True)
         cb.addWidget(self.cal_lbl, 1)
         gl.addLayout(cb)
-        right.addWidget(g)
+        mid.addWidget(g)
+        panels.append(("Colour", g))
 
         g = QGroupBox("Blobs and geometry")
         gl = QVBoxLayout(g)
@@ -272,7 +270,8 @@ class CalibTab(QWidget):
                                      unit=" deg")
         for k in ("area", "mm", "fov"):
             gl.addWidget(self.p[k])
-        right.addWidget(g)
+        mid.addWidget(g)
+        panels.append(("Blobs", g))
 
         g = QGroupBox("Sensor")
         gl = QHBoxLayout(g)
@@ -286,7 +285,8 @@ class CalibTab(QWidget):
                                   "speckle everywhere.")
         self.order_btn.clicked.connect(lambda: self.main.send("o"))
         gl.addWidget(self.order_btn)
-        right.addWidget(g)
+        mid.addWidget(g)
+        panels.append(("Sensor", g))
 
         g = QGroupBox("Camera flash memory")
         gl = QHBoxLayout(g)
@@ -300,7 +300,8 @@ class CalibTab(QWidget):
         b = QPushButton("Factory defaults")
         b.clicked.connect(self._factory)
         gl.addWidget(b)
-        right.addWidget(g)
+        mid.addWidget(g)
+        panels.append(("Flash", g))
 
         g = QGroupBox("Files")
         gl = QHBoxLayout(g)
@@ -312,8 +313,11 @@ class CalibTab(QWidget):
         self.file_lbl = QLabel()
         self.file_lbl.setWordWrap(True)
         gl.addWidget(self.file_lbl, 1)
-        right.addWidget(g)
-        right.addStretch(1)
+        left.addWidget(g)
+        left.addWidget(self.settings_lbl)
+        for col in (left, mid):
+            col.addStretch(1)
+        root.addLayout(self._panel_strip(panels))
 
         # The firmware defaults, until the camera's #!CFG says otherwise.
         for key, v in (("hue", 0), ("tol", 12), ("sat", 110), ("val", 50), ("area", 25),
@@ -323,6 +327,43 @@ class CalibTab(QWidget):
             ctl.changed.connect(lambda _v: self._redraw())
             ctl.commit.connect(lambda v, k=key: self._commit(k, v))
         self._redraw()
+
+    @staticmethod
+    def _column(root: QHBoxLayout) -> QVBoxLayout:
+        """A vertically scrolling control column, added to root."""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        w = QWidget()
+        col = QVBoxLayout(w)
+        scroll.setWidget(w)
+        root.addWidget(scroll, 1)
+        return col
+
+    @staticmethod
+    def _panel_strip(panels: list) -> QVBoxLayout:
+        """One toggle button per panel: checked = shown. The choice is kept
+        in QSettings, so a panel hidden once stays hidden next session."""
+        store = QSettings("icarus_blimp", "tcview")
+        strip = QVBoxLayout()
+        for name, box in panels:
+            b = QPushButton(name)
+            b.setCheckable(True)
+            b.setFixedWidth(70)
+            b.setToolTip("Show or hide the '%s' panel" % box.title())
+            key = "calib/show/" + name
+            shown = store.value(key, True, type=bool)
+            b.toggled.connect(box.setVisible)
+            # A checkable button looks almost the same both ways in most
+            # styles; grey text says "hidden" at a glance. Set on each toggle,
+            # because a :checked stylesheet rule did not repaint reliably.
+            b.toggled.connect(lambda on, b=b: b.setStyleSheet("" if on else "color: grey;"))
+            b.setChecked(not shown)         # so the setChecked below always toggles
+            b.setChecked(shown)
+            b.toggled.connect(lambda on, k=key: store.setValue(k, on))
+            strip.addWidget(b)
+        strip.addStretch(1)
+        return strip
 
     # ---- from the main window ------------------------------------------------
 
@@ -432,12 +473,19 @@ class CalibTab(QWidget):
             self.file_lbl.setText("no frame to save")
             return
         DATA_DIR.mkdir(parents=True, exist_ok=True)
+        # The dialog opens where the last frame went: a capture session is one
+        # subfolder (the training splits train/validation by session), chosen
+        # once rather than navigated to for every frame.
+        folder = getattr(self, "_save_dir", DATA_DIR)
+        if not folder.is_dir():
+            folder = DATA_DIR
         stem = time.strftime("frame_%Y%m%d_%H%M%S") + "_seq%d" % self.frame.seq
-        path, _ = QFileDialog.getSaveFileName(self, "Save frame", str(DATA_DIR / (stem + ".png")),
+        path, _ = QFileDialog.getSaveFileName(self, "Save frame", str(folder / (stem + ".png")),
                                               "PNG (*.png)")
         if not path:
             return
         base = Path(path).with_suffix("")
+        self._save_dir = base.parent
         rgb = np.ascontiguousarray(self.frame.rgb())
         QImage(rgb.data, W, H, 3 * W, QImage.Format.Format_RGB888).copy().save(str(base) + ".png")
         Path(str(base) + ".rgb565").write_bytes(self.frame.data)

@@ -3,11 +3,13 @@ target_cam viewer.
 
   python -m tcview --port /dev/ttyACM0     the real camera (ESP32-CAM-MB programmer)
   python -m tcview --fake                  a synthetic camera on a pseudo-terminal
+  python -m tcview --label [DIR]           label saved frames; no camera needed
 
-Two screens: "Image & calibration" (see the real pixels, tune the detector by
-hand, save to the camera's flash) and "Flight data" (only the CSV the ESP32-S3
-will receive). The console at the bottom shows everything else the camera
-says, and takes raw commands.
+Three screens: "Image & calibration" (see the real pixels, tune the detector
+by hand, save frames, save to the camera's flash), "Flight data" (only the CSV
+the ESP32-S3 will receive) and "Label frames" (mark balloon and background on
+saved frames, for training and scoring). The console at the bottom shows
+everything else the camera says, and takes raw commands.
 """
 from __future__ import annotations
 
@@ -25,6 +27,7 @@ from . import detector as D
 from . import protocol as P
 from .calib_tab import CalibTab
 from .flight_tab import FlightTab
+from .label_tab import LabelTab
 from .link import SerialLink
 
 
@@ -40,6 +43,8 @@ class MainWindow(QMainWindow):
         self.flight = FlightTab(self)
         self.tabs.addTab(self.calib, "Image && calibration")
         self.tabs.addTab(self.flight, "Flight data (what the ESP32-S3 gets)")
+        self.label = LabelTab()
+        self.tabs.addTab(self.label, "Label frames")
         self.tabs.currentChanged.connect(self._tab_changed)
 
         console = QWidget()
@@ -144,6 +149,8 @@ class MainWindow(QMainWindow):
     def _tab_changed(self, i):
         if self.tabs.widget(i) is self.flight:
             self.flight.entered()
+        elif self.tabs.widget(i) is self.label:
+            self.label.entered()
 
     def _tick1(self):
         self.calib.tick()
@@ -165,6 +172,21 @@ class MainWindow(QMainWindow):
             self.link.stop()
         if self.flight.rec:
             self.flight.rec_btn.setChecked(False)
+        self.label.save_if_dirty()
+        super().closeEvent(e)
+
+
+class LabelWindow(QMainWindow):
+    """--label: the Label tab alone, for labelling away from the camera."""
+
+    def __init__(self, folder):
+        super().__init__()
+        self.setWindowTitle("target_cam viewer - label frames")
+        self.label = LabelTab(folder)
+        self.setCentralWidget(self.label)
+
+    def closeEvent(self, e):
+        self.label.save_if_dirty()
         super().closeEvent(e)
 
 
@@ -175,14 +197,24 @@ def main(argv=None):
     ap.add_argument("--fake", action="store_true", help="use a synthetic camera instead")
     ap.add_argument("--fake-corrupt", type=int, default=0, metavar="N",
                     help="with --fake: inject a log line into every Nth frame")
+    ap.add_argument("--label", nargs="?", const="", metavar="DIR",
+                    help="only label saved frames (default folder target_cam/data)")
     ap.add_argument("--quit-after", type=float, metavar="S",
                     help="close after S seconds (smoke tests)")
     args = ap.parse_args(argv)
-    if not args.port and not args.fake:
-        ap.error("give --port PORT or --fake")
+    if not args.port and not args.fake and args.label is None:
+        ap.error("give --port PORT, --fake or --label")
 
     app = QApplication(sys.argv[:1])
     D.hsv_lut()             # ~0.3 s once, so the first hover does not stall
+    if args.label is not None and not args.port and not args.fake:
+        from pathlib import Path
+        win = LabelWindow(Path(args.label) if args.label else None)
+        win.resize(1300, 800)
+        win.show()
+        if args.quit_after:
+            QTimer.singleShot(int(args.quit_after * 1000), win.close)
+        return app.exec()
     fake = None
     port = args.port
     note = ""
@@ -191,7 +223,10 @@ def main(argv=None):
         fake = FakeCamera(corrupt_every=args.fake_corrupt).start()
         port, note = fake.port, " (FAKE camera)"
     win = MainWindow(port, note)
-    win.resize(1400, 1000)
+    # 1450 x 1000 shows the Calib tab with every panel open; on a smaller
+    # screen take what there is (the controls column scrolls).
+    avail = app.primaryScreen().availableGeometry()
+    win.resize(min(1450, avail.width()), min(1000, avail.height()))
     win.show()
     win.connect_link()
     if args.quit_after:
