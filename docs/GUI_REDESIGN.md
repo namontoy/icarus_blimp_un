@@ -38,7 +38,7 @@ The visual reference is a set of mockups made in Claude (one desktop board at 14
 
 ## 3. Design tokens
 
-Put these in one module, e.g. `ui/theme.py`, and build the application stylesheet (QSS) from them. Use the Fusion style as the base (`app.setStyle("Fusion")`) plus a dark `QPalette` built from the same tokens.
+Put these in one module, `tcview/ui/theme.py` (§13), and build the application stylesheet (QSS) from them. Use the Fusion style as the base (`app.setStyle("Fusion")`) plus a dark `QPalette` built from the same tokens.
 
 ### 3.1 Colours
 
@@ -111,7 +111,7 @@ Use dynamic properties (`setProperty("role", "primary")`, `"tone": "ok" | "warn"
 
 ---
 
-## 4. Reusable widgets (build these first, in `ui/widgets/`)
+## 4. Reusable widgets (build these first, in `tcview/ui/widgets/`)
 
 ### 4.1 `CollapsibleSection(title, summary="")`
 - Header: full-width flat `QToolButton` with a chevron (▸ rotates to ▾ when open), bold title on the left and a **summary** label on the right (muted, mono, elided). The summary shows the current values so a collapsed section still tells you its state (e.g. `red · H 0° ±12° · S≥110 · V≥50`).
@@ -176,7 +176,7 @@ Used by Image & calibration and Label frames. The camera frames are **160×120**
 
 ### 5.1 Connection bar (top, `QToolBar` or `QWidget` in the main window, not in a tab)
 - `target_cam` wordmark (mono, 14 px).
-- Port `QComboBox` (editable; refreshed from `serial.tools.list_ports` when opened if pyserial is used).
+- Port `QComboBox` (editable; refreshed from `serial.tools.list_ports` when opened). This control and Connect/Disconnect are new: the old viewer only took the port on the command line. Full requirements in §13.1.
 - Baud `QComboBox` showing the frame time, e.g. `115200 · frame 3.3 s`, `460800 · frame 0.83 s` (the existing values/behaviour of the old "Baud … Set" control on tab 1), and **Set baud** — moved here from tab 1's "Image link" group.
 - **Connect / Disconnect** (primary when disconnected).
 - `StatusPill`: err `Port not found: /dev/ttyACM0` · ok `Connected · <port> · <baud> baud` · warn while connecting. The full error text also goes to the console (it is currently truncated in the status bar).
@@ -235,8 +235,9 @@ Collapsed summary example: `x 157 y 94 · H 160 S 109 V 28 · TARGET 3 blobs, PC
 **Inspector sections** (`CollapsibleSection`s in a scroll area; replace the old right-edge Region/Colour/Blobs/Sensor/Flash toggle buttons):
 - **Region** — `Use region as target` + hint "drag / resize the cyan box". A copyable **camera sampler** block: box `16×16 at (72, 52)`, hue `341 ± 27`, sat p10/50/90 `61 / 115 / 164`, val p10/50/90 `49 / 74 / 115`, matching `107 / 256 px (42%)` with a small bar. Below it the **hue histogram** (existing plot restyled: bars coloured by their hue, dashed markers at the PC hue window limits, axis 0–360, caption "Hue of region pixels with sat ≥ 30").
 - **Colour test** — Detector stage combo + Set; Preset combo + Apply (+ `camera: red` echo). When the stage is not 0, show an **info banner**: "Colour table 1792216162 decides the pixels. Hue, tolerance, sat, value and c have no effect until stage 0." and render the HSV controls at reduced emphasis (still editable). A hue spectrum strip with the current window drawn as a white outlined band (handle wrap-around at 0/360). Four rows — Hue, Tolerance, Min sat, Min value — each: label, slider, spin box with unit, and a **camera** column chip: `✓ applied` (ok), the camera's differing value (warn), or `—` with tooltip "no camera". `Calibrate on centre (c)`.
+- **Blobs & geometry** — the old "Blobs and geometry" group, which this spec originally left out: `Min area` (slider, px), `Target size` (spin only, mm), `h-FOV` (spin only, deg, 1 decimal), with the same camera column as Colour test. Header summary `area ≥ 25 px · 550 mm · FOV 54.0°`.
 - **Sensor** — ☐ Auto white balance; `Byte order: big-endian` button.
-- **Camera flash memory** — header summary `● saved` / `● unsaved`; buttons Save to camera, Reload saved, Factory defaults… (danger style; add a confirm dialog only if the user agrees).
+- **Camera flash memory** — header summary `● saved` / `● unsaved`; buttons Save to camera, Reload saved, Factory defaults… (danger style; it already asks for confirmation — keep that dialog).
 
 Removed: the "Image link" and "Files" groups (baud moved to the connection bar, link stats into the Frame & link card, Save frame into the toolbar).
 
@@ -329,7 +330,7 @@ Priority on this tab: **the biggest possible image**, because labelling needs zo
 - **Dataset toolbar:** `ToggleSwitch` "Collect from camera" + state text (`camera: collecting` ok / `camera: not collecting` muted) — same behaviour as the current "Collect from camera" / "camera: …" pair; Add from labelled frames…; Load dataset…; **Save dataset… (primary)**; Clear… (danger). Right side: `N blobs`, `b balloon · n not · u ?`, a stacked bar (balloon `label_balloon`, not `label_not`, rest grey), and an `unsaved` warn chip when there are unsaved changes.
 - **Check line:** chip `board = PC: not checked` (neutral) / `board = PC ✓` (ok) / mismatch (warn), followed by the hint text.
 - **Labelling toolbar:** filter segmented `All / Balloon / Not / ?` with live counts; `N selected`; **Balloon B**, **Not a balloon N**, **Unlabel U** buttons acting on the selection (same as the existing B/N/U keys); thumbnail **Size** slider (48–128 px, default 72).
-- **Grid:** `QListView` in `IconMode`, `ExtendedSelection`, uniform item sizes, `Adjust` resize mode, with a custom `QStyledItemDelegate` that draws the 32×32 crop scaled with nearest-neighbour, a 1 px border (2 px `accent` outline when selected), and a **label badge** under it: `balloon` (accent fill), `not` (`label_not` fill), `?` (muted text). Double-click cycles `? → balloon → not → ?`. Keep the existing model/data; only the view and delegate change.
+- **Grid:** `QListView` in `IconMode`, `ExtendedSelection`, uniform item sizes, `Adjust` resize mode, with a custom `QStyledItemDelegate` that draws the 24×24 crop (`BLOB_CROP`; fixed by what the ESP32-CAM can send — do not change it) scaled with nearest-neighbour, a 1 px border (2 px `accent` outline when selected), and a **label badge** under it: `balloon` (accent fill), `not` (`label_not` fill), `?` (muted text). Double-click cycles `? → balloon → not → ?`. Keep the existing model/data; only the view and delegate change.
 - **Selected blob inspector** (scroll area):
   - Title `Blob k of N` + Copy all. If several are selected: info banner "N blobs selected — the label buttons apply to all of them. Showing the last one clicked."
   - 144×144 nearest-neighbour **crop preview** + **Record** key/value block (source `live t26622234`, blob, stage · conf, fw, fv, centroid, area, box, crop) with copy.
@@ -374,7 +375,7 @@ Copy buttons must produce plain text that is useful when pasted into notes, a sp
 | `Ctrl+L` | anywhere | focus the command line |
 | `1` / `2` / `0` | Label frames | Balloon / Background / Erase |
 | `B` / `R` / `E` | Label frames | Brush / Rectangle / Ellipse |
-| `←` / `→` | Label frames | previous / next frame |
+| `←` / `→`, `PgUp` / `PgDn` | Label frames | previous / next frame (PgUp/PgDn are the existing keys; keep them) |
 | `Ctrl+Z`, `Ctrl+S` | Label frames | undo, save |
 | `B` / `N` / `U` | Blobs | label selection balloon / not / unlabelled (existing) |
 
@@ -384,7 +385,7 @@ Register them with `QShortcut` on the tab widget using `Qt.WidgetWithChildrenSho
 
 ## 9. Persistence
 
-Use `QSettings("target_cam", "viewer")` to remember: window geometry/state, current tab, every splitter's sizes, each collapsible section's open state, readout strips open/closed, console open/closed and height, zoom level per image view, Label frames folder, label opacity, Blobs thumbnail size. Restore on start; fall back to sensible defaults if values are missing or invalid (e.g. a saved geometry larger than the current screen).
+Use the store the viewer already has, `QSettings("icarus_blimp", "tcview")` (§13), to remember: the last port and baud (§13.1), window geometry/state, current tab, every splitter's sizes, each collapsible section's open state, readout strips open/closed, console open/closed and height, zoom level per image view, Label frames folder, label opacity, Blobs thumbnail size. Restore on start; fall back to sensible defaults if values are missing or invalid (e.g. a saved geometry larger than the current screen).
 
 ---
 
@@ -394,10 +395,10 @@ Use `QSettings("target_cam", "viewer")` to remember: window geometry/state, curr
 Read the code and report: Qt binding and version, plotting library, file/module layout, where each tab is built, the widgets that show each piece of text listed in §6/§7, where serial I/O and the CSV/record parsing live, and any fixed sizes. Produce a mapping table *old widget → new widget/location*. Confirm with the user.
 
 **Phase 1 — Theme and shared widgets.**
-`ui/theme.py` (tokens, palette, QSS, font picking) and `ui/widgets/` (§4). Apply the theme to the existing UI without moving anything. A tiny demo script that shows each widget is welcome. Screenshots → confirm.
+`tcview/ui/theme.py` (tokens, palette, QSS, font picking) and `tcview/ui/widgets/` (§4). Apply the theme to the existing UI without moving anything. A tiny demo script that shows each widget is welcome. Screenshots → confirm.
 
 **Phase 2 — Application shell.**
-Connection bar (move port/baud/connect controls here), `QTabWidget` with the new names/tooltips, console as bottom dock with an always-visible command line, new status bar. Old tab contents are placed in the tabs unchanged. Verify at 1280×720 that the command line and status bar are visible on all four tabs. Screenshots → confirm.
+Connection bar (move port/baud/connect controls here) with the connection management of §13.1, `QTabWidget` with the new names/tooltips, console as bottom dock with an always-visible command line, new status bar. Old tab contents are placed in the tabs unchanged. Verify at 1280×720 that the command line and status bar are visible on all four tabs. Screenshots → confirm.
 
 **Phase 3 — Image & calibration** (§6.1): `PixelImageView` with zoom, toolbar, Camera readouts strip, collapsible inspector, remove the right-edge toggle buttons and old Image link/Files groups. Check hover readout and region drag at every zoom. Screenshots → confirm.
 
@@ -439,3 +440,56 @@ For each tab, capture at **1920×1080, 1440×900, 1280×720** (and 1024×600 for
 - Any change to the firmware, the serial protocol, the commands, the CSV columns, the dataset/label file formats, or the detection/feature maths.
 - Training the neural network (this UI only collects and labels the 12-feature dataset).
 - New features beyond what is described here (ask the user first).
+
+---
+
+## 13. Phase 0 findings and decisions (2026-10-17)
+
+Reconnaissance was done on branch `target-cam-learned-detector` at `71fd665`. Where this section and the sections above disagree, this section wins.
+
+### 13.0 What the code is (measured)
+
+- PyQt6 6.11.0 (Qt 6.11.0) and pyqtgraph 0.14.0 in the `targetcam` conda env. IBM Plex Sans and IBM Plex Mono are installed on the dev machine. The env has numpy 2.2.6 although `requirements.txt` pins 1.26.4.
+- Package `firmware/projects/target_cam/host/viewer/tcview/`: `__main__.py` (MainWindow, console, status bar, `LabelWindow` for `--label`), one file per tab (`calib_tab.py`, `flight_tab.py`, `label_tab.py`, `blobs_tab.py`), `widgets.py` (`ParamControl`, `HueBar`, `chip()` and the GREEN/AMBER/RED/GREY colours). Serial I/O is `link.py` (`SerialLink`, a QThread); stream parsing is `protocol.py` (`StreamParser`). `MainWindow._event` dispatches events to the tabs.
+- Baseline: `python -m pytest -q` → 99 passed.
+- Why the window clips: a `QTabWidget`'s minimum size is the largest of its pages' minimums. The fixed 644×484 image views, the 150 px flight table, the 330 px plot minimum and the 380×300 FOV plot hold the whole window at ≈ 980 px tall (1012 px on Flight data) on **every** tab, so at 1280×720 the bottom is cut off.
+- The tests read widget text: `flight.banner` (starts with `FLIGHT-IDENTICAL`), `flight.health` (`rows/s`, `dt != 80`, `stage      1 running`), `calib.stage_lbl` (`requested, running 1`), `label.det_lbl` (`TP 1  FN 0  FP 0`), and Label list items starting with `[x]`. They also use the attributes `win.send`, `win.link`, `win.connect_link`, `win.tabs`, `win.calib/flight/blobs`, and many `LabelTab` members (`lab`, `step`, `sf`, `dab`, `fill_shape`, `fill_rest`, `do_undo`, `radius`, `listw`, `dirty`, `clear`, `stems`). When the visible text changes, the tests switch to the widget's copy text (§7 keeps the old wording there), and the attribute names stay.
+
+### 13.1 Connection management (new — requested by the user)
+
+The viewer took its port only from `--port`. That works for one developer and not for the other people who will use it, so the port is chosen in the GUI. Everything below is needed for this to work properly, and is part of Phase 2.
+
+- **Port list.** `serial.tools.list_ports.comports()`, shown as `<device> — <description>` (the device path is the item data). USB ports first; legacy `ttyS*` ports without a USB descriptor are hidden. The list is refreshed whenever the combo opens and whenever the link drops. The combo is editable, so a path that isn't listed (`/dev/serial/by-id/…`, a pty) can be typed.
+- **Which port is selected at start.** `--port` if given; otherwise the last port that connected successfully (QSettings), if it is present; otherwise the first USB port. With `--fake`, the fake camera's pty is added as `FAKE camera (<pty>)` and selected.
+- **Auto-connect** only when `--port` or `--fake` is given, which keeps today's behaviour. With no arguments the window now opens **disconnected** instead of exiting with a usage error. `--label` is unchanged (§13.3).
+- **Connect.** It creates and starts a `SerialLink` for the chosen port. The pill shows warn `Connecting…` until the port is open, then ok `Connected · <port> · <baud> baud`, and `k` is sent as today. The port and baud combos are disabled while connected (you have to disconnect to change port).
+- **SerialLink reports structured state.** Add signals for opened / closed(reason) next to the existing human-readable `state` text, so the GUI never has to parse strings.
+- **Open errors.** The pill shows a short err message and the console gets the full exception. Known causes get a hint: permission denied → "add your user to the `dialout` group, then log out and in"; busy/locked → "the port is in use by another program (another viewer, `idf.py monitor`, a serial terminal)"; not found → "unplugged, or a different port name".
+- **One viewer per port.** Open the port with pyserial's `exclusive=True`, so a second viewer, or a second person on a shared machine, gets the "in use" error instead of silently splitting the byte stream with the first one.
+- **Disconnect.** If the link is not at 115200, first ask the camera back down (`B115200`, wait for the handshake, bounded to about 5 s), then stop the link and close the port. Closing the window does the same. Otherwise a camera left at 460800 sits there after the viewer has gone, and the next connection (always at 115200) hears only junk. This problem already exists today when the viewer is closed at a fast baud, and the camera's own revert does not cover it. Nothing else about the camera's state is changed on disconnect.
+- **Link lost** (unplugged, brownout, `link lost: …`). The GUI goes to the disconnected state with an err pill `Link lost · <port>`, re-enables Connect and refreshes the port list. It does **not** reconnect by itself: a silent reconnect could take a port someone else has just opened.
+- **While disconnected.**
+  - The command line stays enabled. A command typed while disconnected is not sent, and the console says `# [viewer] not connected: '<cmd>' not sent`.
+  - Each tab gets an `on_disconnected()` that forgets the camera state: `cfg = {}`, every `ParamControl` goes back to "no camera", the flight banner reads "no #!CFG", and Blobs shows `camera: unknown`.
+  - A Flight recording in progress is stopped and its file closed (and logged), so a file never spans two connections.
+  - Frames, labels and the blob dataset already on screen stay.
+- **Counters** belong to a link. A new connection starts them at zero, and the status bar shows `—` while disconnected.
+- The window title follows the connected port. The port that connected last is saved in QSettings.
+- **Tests** (extend `test_gui_fake.py`): connect to the fake through the GUI controls; disconnect and reconnect to the same fake; disconnect at 460800 leaves the fake at 115200; a nonexistent port gives the err pill and the console line; a second link on an open port gets "in use".
+
+### 13.2 `PixelImageView` keeps the scroll bars
+
+§4.5 stands as written. Above Fit, the view sits in a `QScrollArea` with real scroll bars, because small laptop screens need them. Drag/Space-panning is in addition to the scroll bars, not instead of them. Whether it is built on a pyqtgraph `ViewBox` sized to the zoom inside the scroll area, or on a hand-painted `QWidget`, is an implementation choice for Phase 3. Either way, one transform serves hover, region drag and painting.
+
+### 13.3 Other decisions
+
+- Blob crops stay **24×24** (`BLOB_CROP`). That is a limit of what the ESP32-CAM sends. Thumbnails are 48–128 px (default 72 = ×3), and the inspector preview is 144 px (×6).
+- Image & calibration gets a fifth inspector section, **Blobs & geometry** (§6.1), so Min area, Target size and h-FOV are not lost.
+- `--label` keeps the standalone `LabelWindow` (it does not use the full shell running disconnected). It gets the theme and the new Label frames layout.
+- Label frames: ←/→ added, PgUp/PgDn kept (§8).
+- QSettings stays `("icarus_blimp", "tcview")`. The old `calib/show/*` keys become unused when the panel toggle strip goes.
+- New modules go in `tcview/ui/theme.py` and `tcview/ui/widgets/`. `tcview/widgets.py` stays (`ParamControl`, `HueBar`), and its `chip()` colours map onto the theme tones.
+- The Flight "Window 10/30/60 s" combo is omitted, because 60 s would need a longer history buffer.
+- `ParamControl`'s camera column keeps all four states: `no camera`, `sending`, `✓ applied`, and the camera's differing value (was "not sent").
+- The stage line keeps all five of its states. The mismatch states ("colour table MISMATCH", "PC has no colour table") use err tone, "requested N, running M" uses warn, stage ≥ 1 uses info, and stage 0 is neutral.
+- The Save frame result (`file_lbl`, "saved X.{png,rgb565,json}") goes to the console.
