@@ -63,7 +63,7 @@ Put these in one module, `tcview/ui/theme.py` (§13), and build the application 
 | `err_text` / `err_bg` / `err_border` / `err_dot` | `#f4b3a8` / `#3a2220` / `#6b3a33` / `#f07a6a` | port not found, errors, destructive buttons |
 | `info_text` / `info_bg` / `info_border` | `#bfe9f0` / `#17303a` / `#285866` | info banners (e.g. "stage 1 decides the pixels") |
 | `label_balloon` | `#4fc3d6` | balloon class (label paint, blob badges, bars) |
-| `label_not` | `#8f7cf0` | background / not-a-balloon class |
+| `label_not` | `#ffa000` | background / not-a-balloon class (the old tab's orange, kept for contrast with the balloon cyan) |
 | `series_az` / `series_el` / `series_range` | `#f2c14e` / `#4fc3d6` / `#7ad67a` | Flight data time series |
 | `grid_minor` / `grid_major` / `axis_zero` | `#1d2126` / `#2a2f36` / `#454c55` | plot grids |
 | `verdict_target` | `#2f7a45` | TARGET tile background (white text) |

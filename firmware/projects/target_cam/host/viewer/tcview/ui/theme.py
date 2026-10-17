@@ -56,7 +56,9 @@ TOKENS = {
     "info_text": "#bfe9f0", "info_bg": "#17303a", "info_border": "#285866", "info_dot": "#4fc3d6",
     # data
     "label_balloon": "#4fc3d6",
-    "label_not": "#8f7cf0",
+    # The old tab's orange (255, 160, 0): opposite the balloon cyan, so
+    # background paint stands out from balloon paint at a glance.
+    "label_not": "#ffa000",
     "series_az": "#f2c14e",
     "series_el": "#4fc3d6",
     "series_range": "#7ad67a",
