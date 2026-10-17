@@ -8,6 +8,12 @@ and `origin`, maps widget to image coordinates for all three, and for the
 painting, so they cannot drift apart. A ViewBox inside a scroll area would
 have two transforms (the ViewBox's and the scroll offset) to keep in step.
 
+In paint mode (Label frames) the left and right buttons paint instead of
+moving the region: paintStroke reports a click, or a drag's start, moves and
+end, in image coordinates through that same transform. As with pyqtgraph's
+mouse events the old Label tab used, a press only becomes a drag once the
+mouse has moved the platform's drag distance; less than that is a click.
+
 Scaling is nearest-neighbour (no smooth-pixmap hint), so a pixel stays a
 square block. Above Fit the canvas is larger than the viewport and the
 QScrollArea's real scroll bars move it, as small laptop screens need (§13.2);
@@ -21,7 +27,7 @@ from typing import Optional, Sequence
 import numpy as np
 from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFontMetrics, QImage, QPainter, QPen, QPolygonF
-from PyQt6.QtWidgets import QFrame, QScrollArea, QWidget
+from PyQt6.QtWidgets import QApplication, QFrame, QScrollArea, QWidget
 
 from .. import theme
 
@@ -89,6 +95,9 @@ class PixelImageView(QScrollArea):
     left = pyqtSignal()
     regionChanged = pyqtSignal(object)      # (x, y, w, h) in image pixels
     zoomChanged = pyqtSignal(str)
+    # "click" | "start" | "move" | "end", image coordinates (QPointF), erase
+    # (the right button). Only in paint mode.
+    paintStroke = pyqtSignal(str, object, bool)
 
     def __init__(self, w: int = 160, h: int = 120, parent=None):
         super().__init__(parent)
@@ -104,9 +113,11 @@ class PixelImageView(QScrollArea):
         self._overlay: Optional[QImage] = None
         self._overlay_opacity = 1.0
         self.guides: list = []          # dashed (x, y, w, h)
-        self.boxes: list = []           # (x, y, w, h, colour, text)
+        self.boxes: list = []           # (x, y, w, h, colour, text[, "dot"])
         self.marks: list = []           # (x, y) crosses, image coordinates (float)
         self.tool_text = ""             # appended to the bottom-left chip
+        self.paint_mode = False         # left/right buttons paint (paintStroke)
+        self._preview = None            # ("rect" | "ellipse", x, y, w, h) while dragging a shape
         self._region: Optional[list] = None     # [x, y, w, h], ints; None = no region
         self._zoom = "fit"
         self.scale = 1.0
@@ -154,6 +165,12 @@ class PixelImageView(QScrollArea):
 
     def set_tool_text(self, text: str):
         self.tool_text = text
+        self.canvas.update()
+
+    def set_preview(self, shape: Optional[str], x=0.0, y=0.0, w=0.0, h=0.0):
+        """A dashed rectangle or ellipse in image coordinates (the shape
+        being dragged), or None to remove it."""
+        self._preview = None if shape is None else (shape, x, y, w, h)
         self.canvas.update()
 
     # ---- region ------------------------------------------------------------------
@@ -271,12 +288,22 @@ class PixelImageView(QScrollArea):
 
         fm = QFontMetrics(theme.mono_font())
         p.setFont(theme.mono_font())
-        for x, y, w, h, colour, text in self.boxes:
+        for x, y, w, h, colour, text, *style in self.boxes:
             r = self.rect_to_widget(x, y, w, h)
-            p.setPen(QPen(QColor(colour), 2))
+            if style and style[0] == "dot":
+                p.setPen(QPen(QColor(colour), 1, Qt.PenStyle.DotLine))
+            else:
+                p.setPen(QPen(QColor(colour), 2))
             p.drawRect(r)
             if text:
                 p.drawText(QPointF(r.left(), r.top() - fm.descent() - 2), text)
+
+        if self._preview is not None:
+            shape, x, y, w, h = self._preview
+            p.setPen(QPen(Qt.GlobalColor.white, 1, Qt.PenStyle.DashLine))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            r = self.rect_to_widget(x, y, w, h)
+            p.drawEllipse(r) if shape == "ellipse" else p.drawRect(r)
 
         p.setPen(QPen(Qt.GlobalColor.white, 2))
         for x, y in self.marks:
@@ -338,6 +365,9 @@ class PixelImageView(QScrollArea):
             self._drag = ("pan", e.globalPosition().toPoint())
             self.canvas.setCursor(Qt.CursorShape.ClosedHandCursor)
             return
+        if self.paint_mode and b in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
+            self._drag = ("press", pos, b == Qt.MouseButton.RightButton, b)
+            return
         if b != Qt.MouseButton.LeftButton:
             return
         what = self._handle_at(pos)
@@ -357,7 +387,14 @@ class PixelImageView(QScrollArea):
             self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
             self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
             return
-        if d:
+        if d and d[0] == "press":
+            if (pos - d[1]).manhattanLength() >= QApplication.startDragDistance():
+                self._drag = ("paint", d[2], d[3])
+                self.paintStroke.emit("start", self.to_image(d[1]), d[2])
+                self.paintStroke.emit("move", self.to_image(pos), d[2])
+        elif d and d[0] == "paint":
+            self.paintStroke.emit("move", self.to_image(pos), d[1])
+        elif d:
             q = self.to_image(pos)
             x, y, w, h = self._region
             if d[0] == "move":
@@ -383,10 +420,17 @@ class PixelImageView(QScrollArea):
         self._set_hover(self.pixel_at(pos))
 
     def _release(self, e):
-        if self._drag and self._drag[0] == "pan":
+        d = self._drag
+        if d and d[0] in ("press", "paint") and e.button() != d[-1]:
+            return                      # another button let go mid-stroke
+        if d and d[0] == "pan":
             self.canvas.setCursor(Qt.CursorShape.OpenHandCursor if self._space
                                   else Qt.CursorShape.CrossCursor)
         self._drag = None
+        if d and d[0] == "press":
+            self.paintStroke.emit("click", self.to_image(d[1]), d[2])
+        elif d and d[0] == "paint":
+            self.paintStroke.emit("end", self.to_image(e.position()), d[1])
 
     def _leave(self):
         if self._drag is None:

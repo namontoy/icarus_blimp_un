@@ -16,11 +16,13 @@ from .. import theme
 
 class Segment(QAbstractButton):
     PAD = 10
+    SWATCH = 10                         # a colour square before the text (label classes)
 
-    def __init__(self, text: str, hint: str = "", parent=None):
+    def __init__(self, text: str, hint: str = "", swatch: str = "", parent=None):
         super().__init__(parent)
         self.setText(text)
         self.hint = hint
+        self.swatch = swatch            # a theme token, or ""
         self.pos_in_group = "only"      # first | middle | last | only
         self.setCheckable(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -34,6 +36,8 @@ class Segment(QAbstractButton):
         w = QFontMetrics(self.font()).horizontalAdvance(self.text()) + 2 * self.PAD
         if self.hint:
             w += QFontMetrics(self._hint_font).horizontalAdvance(self.hint) + 6
+        if self.swatch:
+            w += self.SWATCH + 6
         return QSize(w, 28)
 
     def minimumSizeHint(self) -> QSize:
@@ -73,7 +77,14 @@ class Segment(QAbstractButton):
         fm = QFontMetrics(self.font())
         tw = fm.horizontalAdvance(self.text())
         hw = QFontMetrics(self._hint_font).horizontalAdvance(self.hint) + 6 if self.hint else 0
-        x = (self.width() - tw - hw) / 2
+        sw = self.SWATCH + 6 if self.swatch else 0
+        x = (self.width() - sw - tw - hw) / 2
+        if self.swatch:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(theme.qcolor(self.swatch))
+            p.drawRoundedRect(QRectF(x, (self.height() - self.SWATCH) / 2,
+                                     self.SWATCH, self.SWATCH), 2, 2)
+            x += sw
         p.setPen(theme.qcolor(fg))
         p.setFont(self.font())
         p.drawText(QRectF(x, 0, tw + 1, self.height()), Qt.AlignmentFlag.AlignVCenter, self.text())
@@ -87,7 +98,7 @@ class Segment(QAbstractButton):
 
 class SegmentedButtons(QWidget):
     """One exclusive choice drawn as a single control. `options` are strings
-    or (key, label) or (key, label, hint) tuples; value() is the key."""
+    or (key, label[, hint[, swatch]]) tuples; value() is the key."""
     changed = pyqtSignal(object)
 
     def __init__(self, options: Sequence, value=None, parent=None):
@@ -98,9 +109,10 @@ class SegmentedButtons(QWidget):
         self.group = QButtonGroup(self)
         self.group.setExclusive(True)
         self.buttons: dict = {}
-        opts = [(o, o, "") if isinstance(o, str) else (tuple(o) + ("",))[:3] for o in options]
-        for i, (key, label, hint) in enumerate(opts):
-            b = Segment(str(label), hint)
+        opts = [(o, o, "", "") if isinstance(o, str) else (tuple(o) + ("", ""))[:4]
+                for o in options]
+        for i, (key, label, hint, swatch) in enumerate(opts):
+            b = Segment(str(label), hint, swatch)
             n = len(opts)
             b.pos_in_group = ("only" if n == 1 else "first" if i == 0
                               else "last" if i == n - 1 else "middle")

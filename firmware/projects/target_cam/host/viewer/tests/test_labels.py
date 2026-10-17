@@ -147,7 +147,8 @@ def test_label_tab_paint_save_reload(tmp_path):
     painted = tab.lab.copy()
     tab.step(-1)
     assert Path(str(tmp_path / "not_labelled") + L.LABEL_SUFFIX).exists()
-    assert tab.listw.item(1).text().startswith("[x]")
+    from tcview.label_tab import DONE_ROLE
+    assert tab.listw.item(1).data(DONE_ROLE) is True             # the green tick
     tab.step(1)
     assert np.array_equal(tab.lab, painted)
     # Undo takes back the last action only.
@@ -155,7 +156,7 @@ def test_label_tab_paint_save_reload(tmp_path):
     tab.do_undo()
     assert np.array_equal(tab.lab, painted)
     # The live score agrees with eval: the disc is found.
-    assert "TP 1  FN 0  FP 0" in tab.det_lbl.text()
+    assert "TP 1  FN 0  FP 0" in tab.det_card.copy_text()
     # The brush: a radius-1 dab is the full 3x3.
     tab.radius.setValue(1)
     tab.clear()

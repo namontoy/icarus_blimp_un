@@ -42,12 +42,11 @@ from . import protocol as P
 from .ui import theme
 from .ui.widgets import (Banner, CollapsibleSection, FlowLayout, GripSplitter,
                          PixelImageView, ReadoutCard, ReadoutStrip, SegmentedButtons,
-                         ToggleSwitch, value_label)
+                         StripSplitter, ToggleSwitch, value_label)
 from .widgets import AMBER, GREEN, GREY, RED, HueBar, ParamControl, chip
 
 DATA_DIR = Path(__file__).resolve().parents[3] / "data"      # target_cam/data
 W, H = 160, 120
-SCALE = 4               # Label frames sizes its canvas with it until it moves to PixelImageView
 
 # Control key -> (command format, #!CFG key)
 PARAMS = {
@@ -125,7 +124,6 @@ class CalibTab(QWidget):
         self.pending_cmds: dict = {}        # command text -> ParamControl
         self._hover = None
         self._region_stats = None           # (hue, spread, matched fraction) for the summary
-        self._strip_h = 0                   # the height the user dragged the strip to, if any
         self.compare_text = ""
         self.region_text = ""
 
@@ -200,22 +198,8 @@ class CalibTab(QWidget):
         self.view.zoomChanged.connect(lambda k: self.zoom_seg.set_value(k, emit=False))
 
         self.strip = self._build_readouts()
-        self.strip_scroll = QScrollArea()
-        self.strip_scroll.setWidgetResizable(True)
-        self.strip_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.strip_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.strip_scroll.setWidget(self.strip)
-        self.strip_scroll.setMinimumHeight(self.strip.header.sizeHint().height() + 8)
-        self.strip.header.toggled.connect(self._strip_toggled)
-
-        self.vsplit = GripSplitter(Qt.Orientation.Vertical)
-        self.vsplit.addWidget(self.view)
-        self.vsplit.addWidget(self.strip_scroll)
-        self.vsplit.setStretchFactor(0, 1)
-        self.vsplit.setStretchFactor(1, 0)
-        self.vsplit.setCollapsible(0, False)
-        self.vsplit.setCollapsible(1, False)
-        self.vsplit.splitterMoved.connect(self._strip_dragged)
+        self.vsplit = StripSplitter(self.view, self.strip)
+        self.strip_scroll = self.vsplit.strip_scroll
         v.addWidget(self.vsplit, 1)
         return pane
 
@@ -482,37 +466,6 @@ class CalibTab(QWidget):
         w.setLayout(lay)
         s.add_widget(w)
         return s
-
-    def resizeEvent(self, e):
-        super().resizeEvent(e)
-        QTimer.singleShot(0, self._size_strip)      # once the splitter has its new size
-
-    def _strip_dragged(self, *_):
-        if self.strip.is_expanded():
-            self._strip_h = self.vsplit.sizes()[1]
-
-    def _size_strip(self):
-        """The strip's height: what its cards need, but never more than two
-        fifths of the pane, so the image keeps most of a small screen. Once
-        the user drags the handle, their height is kept instead."""
-        total = sum(self.vsplit.sizes())
-        if total <= 0:
-            return
-        lo = self.strip_scroll.minimumHeight()
-        if not self.strip.is_expanded():
-            h = lo
-        elif self._strip_h:
-            h = max(lo, min(self._strip_h, total - self.view.minimumHeight()))
-        else:
-            need = self.strip.heightForWidth(self.strip_scroll.viewport().width()) + 4
-            h = max(lo, min(need, int(total * 0.4)))
-        if self.vsplit.sizes()[1] != h:
-            self.vsplit.setSizes([total - h, h])
-
-    def _strip_toggled(self, on: bool):
-        # Collapsed, the strip is its header alone and the image takes the rest.
-        self.strip_scroll.setMaximumHeight(16777215 if on else self.strip_scroll.minimumHeight())
-        self._size_strip()
 
     # ---- from the main window ------------------------------------------------
 

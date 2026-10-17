@@ -3,11 +3,13 @@ from .controls import Segment, SegmentedButtons, ToggleSwitch
 from .copy_button import CopyButton
 from .pills import Banner, StatusPill
 from .pixel_view import ZOOMS, PixelImageView
-from .readout import Bar, FlowLayout, ReadoutCard, ReadoutStrip, ReadoutTable, value_label
+from .readout import (Bar, FlowLayout, ReadoutCard, ReadoutStrip, ReadoutTable,
+                      StackedBar, value_label)
 from .section import CollapsibleSection, ElidedLabel, HeaderButton
 from .splitter import GripSplitter
+from .strip_split import StripSplitter
 
 __all__ = ["Banner", "Bar", "CollapsibleSection", "CopyButton", "ElidedLabel",
            "FlowLayout", "GripSplitter", "HeaderButton", "PixelImageView", "ReadoutCard",
            "ReadoutStrip", "ReadoutTable", "Segment", "SegmentedButtons", "StatusPill",
-           "ToggleSwitch", "value_label", "ZOOMS"]
+           "StackedBar", "StripSplitter", "ToggleSwitch", "value_label", "ZOOMS"]

@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from typing import Callable, Optional, Sequence
 
-from PyQt6.QtCore import QPoint, QRect, QSize, Qt
-from PyQt6.QtGui import QFont, QPainter
+from PyQt6.QtCore import QPoint, QRect, QRectF, QSize, Qt
+from PyQt6.QtGui import QFont, QPainter, QPainterPath
 from PyQt6.QtWidgets import (QAbstractItemView, QFrame, QGridLayout, QHBoxLayout,
                              QHeaderView, QLabel, QLayout,
                              QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
@@ -176,6 +176,44 @@ class Bar(QWidget):
             r.setWidth(max(6, int(r.width() * self.fraction)))
             p.setBrush(theme.qcolor(self.colour))
             p.drawRoundedRect(r, 3, 3)
+        p.end()
+
+
+class StackedBar(QWidget):
+    """Shares of one whole side by side (balloon / background / unlabelled),
+    each in its own token colour. Parts are (amount, token); a zero amount
+    takes no width."""
+
+    def __init__(self, parts: Sequence = (), height: int = 8, parent=None):
+        super().__init__(parent)
+        self.parts = list(parts)
+        self.setMinimumHeight(height)
+        self.setMaximumHeight(height)
+        self.setMinimumWidth(60)
+
+    def set_parts(self, parts: Sequence):
+        self.parts = list(parts)
+        self.update()
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        r = QRectF(self.rect())
+        path = QPainterPath()
+        path.addRoundedRect(r, r.height() / 2, r.height() / 2)
+        p.setClipPath(path)                     # round the two ends only
+        p.fillRect(r, theme.qcolor("border_strong"))
+        total = sum(a for a, _ in self.parts)
+        x = r.left()
+        for k, (a, token) in enumerate(self.parts):
+            if a <= 0 or total <= 0:
+                continue
+            w = r.width() * a / total
+            # 1 px gaps between neighbours, so two close colours still read as two.
+            gap = 1 if k < len(self.parts) - 1 and x + w < r.right() - 0.5 else 0
+            p.fillRect(QRectF(x, r.top(), max(0.0, w - gap), r.height()), theme.qcolor(token))
+            x += w
         p.end()
 
 
