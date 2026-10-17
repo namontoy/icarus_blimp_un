@@ -28,6 +28,40 @@ def chip(label: QLabel, text: str, colour: str):
         label.setStyleSheet(css)
 
 
+class _Slider(QSlider):
+    """A slider the mouse wheel does not move. A session's frames must all be
+    taken with one calibration, and a wheel turned to scroll the panel would
+    otherwise change it without a click. The ignored event goes on to the
+    scroll area, so the wheel still scrolls the panel."""
+
+    def __init__(self, *a):
+        super().__init__(*a)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)     # no focus by wheel
+
+    def wheelEvent(self, e):
+        e.ignore()
+
+
+class _SpinBox(QSpinBox):
+    """The spin box beside it, for the same reason as _Slider."""
+
+    def __init__(self, *a):
+        super().__init__(*a)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def wheelEvent(self, e):
+        e.ignore()
+
+
+class _DoubleSpinBox(QDoubleSpinBox):
+    def __init__(self, *a):
+        super().__init__(*a)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def wheelEvent(self, e):
+        e.ignore()
+
+
 class ParamControl(QWidget):
     """One camera setting: slider + spin box + "is this what the camera uses"
     indicator.
@@ -36,7 +70,8 @@ class ParamControl(QWidget):
     Moving the slider changes `local` at once (the PC overlay follows it), and
     the value is committed - sent to the camera - on release, or 400 ms after a
     keyboard / spin-box change. The indicator turns green only when the
-    camera's own #!CFG reports the same value.
+    camera's own #!CFG reports the same value. The mouse wheel changes
+    nothing here (see _Slider).
     """
     changed = pyqtSignal(object)        # local value, live
     commit = pyqtSignal(object)         # send this to the camera
@@ -54,16 +89,16 @@ class ParamControl(QWidget):
         lay.addWidget(self.label)
         self.slider = None
         if slider:
-            self.slider = QSlider(Qt.Orientation.Horizontal)
+            self.slider = _Slider(Qt.Orientation.Horizontal)
             self.slider.setRange(int(lo * self.scale), int(hi * self.scale))
             self.slider.setSingleStep(int(step * self.scale))
             lay.addWidget(self.slider, 1)
         if decimals:
-            self.spin = QDoubleSpinBox()
+            self.spin = _DoubleSpinBox()
             self.spin.setDecimals(decimals)
             self.spin.setSingleStep(step)
         else:
-            self.spin = QSpinBox()
+            self.spin = _SpinBox()
         self.spin.setRange(lo, hi)
         self.spin.setSuffix(unit)
         self.spin.setKeyboardTracking(False)

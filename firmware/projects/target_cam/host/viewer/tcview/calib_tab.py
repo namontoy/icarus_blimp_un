@@ -67,6 +67,7 @@ STAGE_NAMES = ["0  HSV window", "1  colour table", "2  blob classifier", "3  CNN
 BOX_COLOURS = ("#ffe600", "#ff9600")        # largest blob, the others
 TINT = (0, 255, 255, 150)                   # matching pixels, "tinted" overlay
 NO_HOVER = "hover over the image for a pixel's colour"
+GRAB_HOLD_MS = 200                          # Grab frame stays pressed this long
 NOT_FLIGHT = "While frames are sent, the camera's dt_ms / FPS are not flight timing."
 
 
@@ -164,7 +165,7 @@ class CalibTab(QWidget):
         flow.setContentsMargins(0, 0, 0, 0)
         self.grab_btn = QPushButton("Grab frame")
         theme.set_role(self.grab_btn, "primary")
-        self.grab_btn.clicked.connect(lambda: self.main.send("g"))
+        self.grab_btn.clicked.connect(self._grab)
         self.live_chk = ToggleSwitch("Live")
         self.live_chk.setToolTip("A frame every loop (v1 / v0)")
         self.live_chk.clicked.connect(lambda on: self.main.send("v1" if on else "v0"))
@@ -624,6 +625,14 @@ class CalibTab(QWidget):
         self.strip.refresh_summary()
 
     # ---- actions ---------------------------------------------------------------
+
+    def _grab(self):
+        # A mouse click is over in about 100 ms, too quick to see the pressed
+        # colour, and the frame takes seconds to arrive at 115200 baud. Hold
+        # the pressed look a little longer so the click visibly registered.
+        self.grab_btn.setDown(True)
+        QTimer.singleShot(GRAB_HOLD_MS, lambda: self.grab_btn.setDown(False))
+        self.main.send("g")
 
     def _commit(self, key, v):
         fmt, _ = PARAMS[key]

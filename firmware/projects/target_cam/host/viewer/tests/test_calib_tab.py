@@ -5,6 +5,7 @@ import time
 
 import numpy as np
 import pytest
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication
 
 from tcview import detector as D
@@ -167,3 +168,43 @@ def test_image_keeps_most_of_a_small_screen(app, win):
     cal = win.calib
     assert cal.view.height() > cal.strip_scroll.height()
     assert cal.view.width() >= 400 and cal.view.scale >= 1
+
+
+def _wheel(w, steps=3):
+    from PyQt6.QtCore import QPoint, QPointF
+    from PyQt6.QtGui import QWheelEvent
+    p = QPointF(w.width() / 2, w.height() / 2)
+    e = QWheelEvent(p, QPointF(w.mapToGlobal(p.toPoint())), QPoint(), QPoint(0, 120 * steps),
+                    Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+                    Qt.ScrollPhase.NoScrollPhase, False)
+    QApplication.sendEvent(w, e)
+    return e
+
+
+def test_the_wheel_does_not_change_a_setting(app, win):
+    """A wheel turned over the colour test must not move the calibration:
+    the event is left for the scroll area, and nothing is sent."""
+    cal = win.calib
+    sent = []
+    win.send = lambda cmd: sent.append(cmd) or True
+    for key in ("hue", "tol", "sat", "val", "area", "mm", "fov"):
+        pc = cal.p[key]
+        before = pc.local
+        for w in filter(None, (pc.slider, pc.spin)):
+            assert not _wheel(w).isAccepted()
+            assert w.focusPolicy() == Qt.FocusPolicy.StrongFocus
+        pump(app, 0.05)
+        assert pc.local == before and not pc.dragging()
+    pump(app, 0.5)                          # past the 400 ms commit debounce
+    assert sent == []
+
+
+def test_grab_frame_sends_g_and_stays_pressed_briefly(app, win):
+    from tcview import calib_tab
+    cal = win.calib
+    sent = []
+    win.send = lambda cmd: sent.append(cmd) or True
+    cal.grab_btn.click()
+    assert sent == ["g"] and cal.grab_btn.isDown()
+    pump(app, calib_tab.GRAB_HOLD_MS / 1000 + 0.15)
+    assert not cal.grab_btn.isDown()

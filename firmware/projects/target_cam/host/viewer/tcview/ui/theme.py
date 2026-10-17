@@ -191,9 +191,11 @@ QPushButton:focus, QToolButton:focus {{ border-color: {accent}; }}
 QPushButton:disabled, QToolButton:disabled {{ background: {panel}; color: {text_faint}; border-color: {border}; }}
 QPushButton[role="primary"] {{ background: {accent}; border-color: {accent}; color: {on_accent}; font-weight: 600; }}
 QPushButton[role="primary"]:hover {{ background: #6fd0e0; }}
+QPushButton[role="primary"]:pressed {{ background: #2f8fa0; border-color: #2f8fa0; }}
 QPushButton[role="primary"]:disabled {{ background: {selection}; border-color: {selection}; color: {text_faint}; }}
 QPushButton[role="danger"] {{ background: transparent; border-color: {err_border}; color: {err_text}; }}
 QPushButton[role="danger"]:hover {{ background: {err_bg}; }}
+QPushButton[role="danger"]:pressed {{ background: {err_border}; }}
 /* min/max-height size the content rect: 24 + the 1 px border = 26 px */
 QPushButton[small="true"], QToolButton[small="true"] {{ min-height: 24px; max-height: 24px; padding: 0 8px; }}
 QToolButton[iconOnly="true"] {{ min-height: 24px; max-height: 24px; min-width: 24px; max-width: 24px; padding: 0; }}
