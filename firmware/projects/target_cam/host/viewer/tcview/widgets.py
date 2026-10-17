@@ -6,16 +6,26 @@ from PyQt6.QtGui import QColor, QPainter, QPen
 from PyQt6.QtWidgets import (QDoubleSpinBox, QHBoxLayout, QLabel, QSlider,
                              QSpinBox, QWidget)
 
-GREEN = "#2e7d32"
-AMBER = "#b26a00"
-RED = "#c62828"
-GREY = "#777777"
+from .ui import theme
+
+# The four state colours the tabs pass to chip(). They are the theme's tone
+# dots, so the same names still work where a tab draws with them directly
+# (blob crop borders, the clipped-box pen on the Flight FOV plot).
+GREEN = theme.TOKENS["ok_dot"]
+AMBER = theme.TOKENS["warn_dot"]
+RED = theme.TOKENS["err_dot"]
+GREY = theme.TOKENS["text_faint"]
+TONE = {GREEN: "ok", AMBER: "warn", RED: "err", GREY: "neutral"}
 
 
 def chip(label: QLabel, text: str, colour: str):
+    """A state chip in the theme's tone for `colour`. The stylesheet is set
+    only when the tone changes: re-polishing on every row would be wasted
+    work at the Flight tab's 10 Hz refresh."""
     label.setText(text)
-    label.setStyleSheet("QLabel { color: white; background: %s; border-radius: 3px;"
-                        " padding: 1px 5px; }" % colour)
+    css = theme.chip_css(TONE.get(colour, "neutral"))
+    if label.styleSheet() != css:
+        label.setStyleSheet(css)
 
 
 class ParamControl(QWidget):

@@ -31,6 +31,7 @@ from PyQt6.QtWidgets import (QGridLayout, QGroupBox, QHBoxLayout, QLabel,
 
 from . import protocol as P
 from .calib_tab import DATA_DIR
+from .ui import theme
 from .widgets import AMBER, GREEN, GREY, RED, chip
 
 W, H = 160, 120
@@ -80,13 +81,13 @@ class FlightTab(QWidget):
         col.addWidget(self.table)
 
         self.detail = QLabel()
-        self.detail.setStyleSheet("font-family: monospace;")
+        theme.mono(self.detail)
         col.addWidget(self.detail)
 
         g = QGroupBox("Link health (from the rows themselves)")
         gl = QVBoxLayout(g)
         self.health = QLabel()
-        self.health.setStyleSheet("font-family: monospace;")
+        theme.mono(self.health)
         gl.addWidget(self.health)
         col.addWidget(g)
 
@@ -132,14 +133,14 @@ class FlightTab(QWidget):
         self.p_el.setXLink(self.p_az)
         self.p_rg.setXLink(self.p_az)
         self.p_rg.setLabel("bottom", "seconds (camera clock)")
-        self.c_az = self.p_az.plot(pen=pg.mkPen((255, 200, 0), width=2), connect="finite")
-        self.c_el = self.p_el.plot(pen=pg.mkPen((0, 200, 255), width=2), connect="finite")
-        self.c_rg = self.p_rg.plot(pen=pg.mkPen((120, 255, 120), width=2), connect="finite")
+        self.c_az = self.p_az.plot(pen=pg.mkPen(theme.TOKENS["series_az"], width=2), connect="finite")
+        self.c_el = self.p_el.plot(pen=pg.mkPen(theme.TOKENS["series_el"], width=2), connect="finite")
+        self.c_rg = self.p_rg.plot(pen=pg.mkPen(theme.TOKENS["series_range"], width=2), connect="finite")
         plots.setMinimumHeight(330)
         root.addWidget(plots, 1)
 
         self.raw = QLabel("last raw line: -")
-        self.raw.setStyleSheet("font-family: monospace;")
+        theme.mono(self.raw)
         self.raw.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.raw.setWordWrap(True)
         root.addWidget(self.raw)

@@ -34,6 +34,7 @@ from PyQt6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QGridLayout,
 
 from . import detector as D
 from . import protocol as P
+from .ui import theme
 from .widgets import AMBER, GREEN, GREY, RED, HueBar, ParamControl, chip
 
 DATA_DIR = Path(__file__).resolve().parents[3] / "data"      # target_cam/data
@@ -138,14 +139,14 @@ class CalibTab(QWidget):
         left.addWidget(self.pane)
 
         self.hover_lbl = QLabel("hover over the image for a pixel's colour")
-        self.hover_lbl.setStyleSheet("font-family: monospace;")
+        theme.mono(self.hover_lbl)
         left.addWidget(self.hover_lbl)
         self.frame_lbl = QLabel("no frame yet: press Grab frame")
         self.frame_lbl.setWordWrap(True)
         left.addWidget(self.frame_lbl)
         self.compare_lbl = QLabel("")
         self.compare_lbl.setWordWrap(True)
-        self.compare_lbl.setStyleSheet("font-family: monospace;")
+        theme.mono(self.compare_lbl)
         left.addWidget(self.compare_lbl)
 
         disp = QHBoxLayout()
@@ -183,7 +184,7 @@ class CalibTab(QWidget):
         rb.addWidget(self.use_warn, 1)
         rl.addLayout(rb)
         self.region_lbl = QLabel("-")
-        self.region_lbl.setStyleSheet("font-family: monospace;")
+        theme.mono(self.region_lbl)
         self.region_lbl.setWordWrap(True)
         rl.addWidget(self.region_lbl)
         self.hist = pg.PlotWidget()

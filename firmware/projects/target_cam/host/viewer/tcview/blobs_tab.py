@@ -26,12 +26,14 @@ from PyQt6.QtGui import (QColor, QIcon, QImage, QKeySequence, QPainter, QPen, QP
                          QShortcut)
 from PyQt6.QtWidgets import (QAbstractItemView, QFileDialog, QHBoxLayout, QLabel,
                              QListView, QListWidget, QListWidgetItem, QMessageBox,
-                             QPlainTextEdit, QPushButton, QSplitter, QVBoxLayout, QWidget)
+                             QPlainTextEdit, QPushButton, QVBoxLayout, QWidget)
 
 from . import blobset as B
 from . import detector as D
 from . import protocol as P
 from .calib_tab import DATA_DIR
+from .ui import theme
+from .ui.widgets import GripSplitter
 from .widgets import AMBER, GREEN, GREY, RED, chip
 
 ICON = 3 * P.CROP           # crops shown at x3: a 24 px balloon edge is visible
@@ -105,7 +107,7 @@ class BlobsTab(QWidget):
         ag.addWidget(self.agree_lbl, 1)
         lay.addLayout(ag)
 
-        split = QSplitter(Qt.Orientation.Horizontal)
+        split = GripSplitter(Qt.Orientation.Horizontal)
         self.grid = QListWidget()
         self.grid.setViewMode(QListView.ViewMode.IconMode)
         self.grid.setIconSize(QSize(ICON, ICON))
@@ -125,7 +127,7 @@ class BlobsTab(QWidget):
         sl.addWidget(self.big)
         self.info = QPlainTextEdit()
         self.info.setReadOnly(True)
-        self.info.setStyleSheet("font-family: monospace;")
+        theme.mono(self.info)
         sl.addWidget(self.info, 1)
         split.addWidget(side)
         split.setStretchFactor(0, 3)

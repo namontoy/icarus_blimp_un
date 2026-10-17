@@ -21,7 +21,7 @@ import time
 from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QLineEdit,
                              QMainWindow, QPlainTextEdit, QPushButton,
-                             QSplitter, QTabWidget, QVBoxLayout, QWidget)
+                             QTabWidget, QVBoxLayout, QWidget)
 from PyQt6.QtCore import Qt
 
 from . import detector as D
@@ -31,6 +31,8 @@ from .calib_tab import CalibTab
 from .flight_tab import FlightTab
 from .label_tab import LabelTab
 from .link import SerialLink
+from .ui import theme
+from .ui.widgets import GripSplitter
 
 
 class MainWindow(QMainWindow):
@@ -57,7 +59,8 @@ class MainWindow(QMainWindow):
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(3000)
-        self.log.setStyleSheet("font-family: monospace;")
+        self.log.setObjectName("Console")
+        theme.mono(self.log)
         cl.addWidget(self.log)
         ent = QHBoxLayout()
         ent.addWidget(QLabel("Command:"))
@@ -71,7 +74,7 @@ class MainWindow(QMainWindow):
         ent.addWidget(self.show_rows)
         cl.addLayout(ent)
 
-        split = QSplitter(Qt.Orientation.Vertical)
+        split = GripSplitter(Qt.Orientation.Vertical)
         split.addWidget(self.tabs)
         split.addWidget(console)
         split.setStretchFactor(0, 5)
@@ -218,6 +221,7 @@ def main(argv=None):
         ap.error("give --port PORT, --fake or --label")
 
     app = QApplication(sys.argv[:1])
+    theme.apply(app)        # before any window: pyqtgraph reads its colours at creation
     D.hsv_lut()             # ~0.3 s once, so the first hover does not stall
     if args.label is not None and not args.port and not args.fake:
         from pathlib import Path

@@ -43,6 +43,7 @@ from PyQt6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QFileDialog,
 from . import detector as D
 from . import labels as L
 from .calib_tab import DATA_DIR, SCALE, STAGE_NAMES
+from .ui import theme
 
 # Label colours over the image. Neither is red or green, so a balloon of
 # either colour stays readable under its tint.
@@ -135,14 +136,14 @@ class LabelTab(QWidget):
         self.canvas = LabelCanvas(self, 160, 120)
         left.addWidget(self.canvas)
         self.hover_lbl = QLabel("hover over the image")
-        self.hover_lbl.setStyleSheet("font-family: monospace;")
+        theme.mono(self.hover_lbl)
         left.addWidget(self.hover_lbl)
         self.sum_lbl = QLabel("")
-        self.sum_lbl.setStyleSheet("font-family: monospace;")
+        theme.mono(self.sum_lbl)
         self.sum_lbl.setWordWrap(True)
         left.addWidget(self.sum_lbl)
         self.det_lbl = QLabel("")
-        self.det_lbl.setStyleSheet("font-family: monospace;")
+        theme.mono(self.det_lbl)
         self.det_lbl.setWordWrap(True)
         left.addWidget(self.det_lbl)
         left.addStretch(1)
