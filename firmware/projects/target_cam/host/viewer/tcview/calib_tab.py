@@ -15,6 +15,11 @@ worth knowing.
 While frames are being sent the camera's loop is slowed by the transfer, so
 dt_ms and FPS on this screen are NOT what flight will see. The Flight data
 screen is the one to trust for timing.
+
+Layout (docs/GUI_REDESIGN.md §6.1): the image pane on the left (toolbar,
+PixelImageView, the Camera readouts strip under it) and the Calibration
+inspector on the right, a column of collapsible sections that scrolls on a
+small screen. A collapsed section still shows its values in its header.
 """
 from __future__ import annotations
 
@@ -25,21 +30,24 @@ from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import QRectF, QSettings, Qt
-from PyQt6.QtGui import QColor, QImage, QPen
-from PyQt6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QGridLayout,
-                             QGroupBox, QHBoxLayout, QLabel, QMessageBox,
-                             QPushButton, QScrollArea, QSizePolicy, QVBoxLayout,
-                             QWidget, QGraphicsRectItem)
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QColor, QFont, QImage
+from PyQt6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QFrame,
+                             QGraphicsOpacityEffect, QGridLayout, QHBoxLayout,
+                             QLabel, QMessageBox, QPushButton, QScrollArea,
+                             QSizePolicy, QVBoxLayout, QWidget)
 
 from . import detector as D
 from . import protocol as P
 from .ui import theme
+from .ui.widgets import (Banner, CollapsibleSection, FlowLayout, GripSplitter,
+                         PixelImageView, ReadoutCard, ReadoutStrip, SegmentedButtons,
+                         ToggleSwitch, value_label)
 from .widgets import AMBER, GREEN, GREY, RED, HueBar, ParamControl, chip
 
 DATA_DIR = Path(__file__).resolve().parents[3] / "data"      # target_cam/data
 W, H = 160, 120
-SCALE = 4
+SCALE = 4               # Label frames sizes its canvas with it until it moves to PixelImageView
 
 # Control key -> (command format, #!CFG key)
 PARAMS = {
@@ -56,69 +64,53 @@ PARAMS = {
 # the highest one whose models the camera has.
 STAGE_NAMES = ["0  HSV window", "1  colour table", "2  blob classifier", "3  CNN"]
 
+BOX_COLOURS = ("#ffe600", "#ff9600")        # largest blob, the others
+TINT = (0, 255, 255, 150)                   # matching pixels, "tinted" overlay
+NO_HOVER = "hover over the image for a pixel's colour"
+NOT_FLIGHT = "While frames are sent, the camera's dt_ms / FPS are not flight timing."
 
-class ImagePane(pg.GraphicsLayoutWidget):
-    def __init__(self, on_hover, on_region):
-        super().__init__()
-        self.setMinimumSize(W * SCALE + 4, H * SCALE + 4)
-        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self.ci.setContentsMargins(0, 0, 0, 0)
-        self.vb = self.addViewBox(lockAspect=True, invertY=True, enableMouse=False)
-        self.vb.setMenuEnabled(False)
-        self.vb.setRange(QRectF(0, 0, W, H), padding=0)
-        self.img = pg.ImageItem(axisOrder="row-major")
-        self.overlay = pg.ImageItem(axisOrder="row-major")
-        self.vb.addItem(self.img)
-        self.vb.addItem(self.overlay)
-        blank = np.zeros((H, W, 3), dtype=np.uint8)
-        blank[:] = 40
-        self.img.setImage(blank, levels=(0, 255))
 
-        # Where the camera's 'c' samples: the 16x16 centre patch.
-        c = QGraphicsRectItem((W - D.CAL_PATCH) / 2, (H - D.CAL_PATCH) / 2,
-                              D.CAL_PATCH, D.CAL_PATCH)
-        c.setPen(pg.mkPen((255, 255, 255, 120), width=1, style=Qt.PenStyle.DashLine,
-                          cosmetic=True))
-        self.vb.addItem(c)
+def _row(*items, stretch: bool = True, spacing: int = 8) -> QHBoxLayout:
+    lay = QHBoxLayout()
+    lay.setSpacing(spacing)
+    for it in items:
+        if isinstance(it, QWidget):
+            lay.addWidget(it)
+        else:
+            lay.addLayout(it)
+    if stretch:
+        lay.addStretch(1)
+    return lay
 
-        # PC rerun of the detector: a box per reported blob.
-        self.boxes = []
-        self.labels = []
-        for k in range(D.BLOB_MAX_REPORT):
-            r = QGraphicsRectItem(0, 0, 1, 1)
-            r.setPen(pg.mkPen((255, 230, 0) if k == 0 else (255, 150, 0), width=2,
-                              cosmetic=True))
-            r.setVisible(False)
-            self.vb.addItem(r)
-            t = pg.TextItem(str(k + 1), color=(255, 230, 0), anchor=(0, 1))
-            t.setVisible(False)
-            self.vb.addItem(t)
-            self.boxes.append(r)
-            self.labels.append(t)
-        # The camera's own answer for this frame, from its CSV row.
-        self.cam_marks = pg.ScatterPlotItem(symbol="+", size=16, pen=pg.mkPen("w", width=2),
-                                            brush=None)
-        self.vb.addItem(self.cam_marks)
 
-        self.roi = pg.RectROI([(W - D.CAL_PATCH) / 2, (H - D.CAL_PATCH) / 2],
-                              [D.CAL_PATCH, D.CAL_PATCH], pen=pg.mkPen((0, 220, 255), width=2),
-                              snapSize=1.0, translateSnap=True, scaleSnap=True,
-                              maxBounds=QRectF(0, 0, W, H))
-        self.roi.addScaleHandle([0, 0], [1, 1])
-        self.vb.addItem(self.roi)
-        self.roi.sigRegionChanged.connect(lambda *_: on_region())
-        self.scene().sigMouseMoved.connect(self._moved)
-        self._on_hover = on_hover
+def _group(*widgets) -> QWidget:
+    """Widgets that stay on one line when the toolbar wraps. The flow layout
+    hands a line's spare width to its last item: the stretch soaks it up."""
+    w = QWidget()
+    lay = QHBoxLayout(w)
+    lay.setContentsMargins(0, 0, 0, 0)
+    lay.setSpacing(8)
+    for x in widgets:
+        lay.addWidget(x)
+    lay.addStretch(1)
+    return w
 
-    def _moved(self, pos):
-        p = self.vb.mapSceneToView(pos)
-        x, y = int(math.floor(p.x())), int(math.floor(p.y()))
-        self._on_hover(x, y if 0 <= x < W and 0 <= y < H else None)
 
-    def region(self):
-        x, y = self.roi.pos()
-        w, h = self.roi.size()
-        return int(round(x)), int(round(y)), max(1, int(round(w))), max(1, int(round(h)))
+def _chip_label(wrap: bool = False) -> QLabel:
+    """A label for chip(): as tall as its text, not as tall as its row."""
+    lbl = QLabel()
+    lbl.setWordWrap(wrap)
+    lbl.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+    return lbl
+
+
+def _key(text: str, tip: str = "") -> QLabel:
+    k = QLabel(text)
+    k.setFont(theme.ui_font(12))
+    theme.set_prop(k, "muted", True)
+    if tip:
+        k.setToolTip(tip)
+    return k
 
 
 class CalibTab(QWidget):
@@ -131,206 +123,22 @@ class CalibTab(QWidget):
         self.cfg: dict = {}
         self.pending_cmds: dict = {}        # command text -> ParamControl
         self._hover = None
+        self._region_stats = None           # (hue, spread, matched fraction) for the summary
+        self._strip_h = 0                   # the height the user dragged the strip to, if any
+        self.compare_text = ""
+        self.region_text = ""
 
         root = QHBoxLayout(self)
-        left = QVBoxLayout()
-        root.addLayout(left)
-        self.pane = ImagePane(self._hover_at, self._update_region)
-        left.addWidget(self.pane)
-
-        self.hover_lbl = QLabel("hover over the image for a pixel's colour")
-        theme.mono(self.hover_lbl)
-        left.addWidget(self.hover_lbl)
-        self.frame_lbl = QLabel("no frame yet: press Grab frame")
-        self.frame_lbl.setWordWrap(True)
-        left.addWidget(self.frame_lbl)
-        self.compare_lbl = QLabel("")
-        self.compare_lbl.setWordWrap(True)
-        theme.mono(self.compare_lbl)
-        left.addWidget(self.compare_lbl)
-
-        disp = QHBoxLayout()
-        disp.addWidget(QLabel("Overlay:"))
-        self.overlay_mode = QComboBox()
-        self.overlay_mode.addItems(["matching pixels tinted", "mask only (white = match)", "off"])
-        self.overlay_mode.currentIndexChanged.connect(lambda *_: self._redraw())
-        disp.addWidget(self.overlay_mode)
-        self.show_boxes = QCheckBox("PC detection boxes")
-        self.show_boxes.setChecked(True)
-        self.show_boxes.toggled.connect(lambda *_: self._redraw())
-        disp.addWidget(self.show_boxes)
-        disp.addStretch(1)
-        left.addLayout(disp)
-
-        # ---- second column: the controls ----
-        # The image column also holds what a capture session uses (grab, baud,
-        # save) and the camera's settings state, so the bottom of the controls
-        # column is never in the way of a capture. Every control panel can be
-        # hidden with the strip of buttons at the right edge (remembered between
-        # runs), and the column scrolls if what is shown is still too tall.
-        mid = self._column(root)
-        panels = []                         # (strip label, group box)
-
-        region = QGroupBox("Region (drag / resize the cyan box)")
-        rl = QVBoxLayout(region)
-        rb = QHBoxLayout()
-        self.use_btn = QPushButton("Use region as target")
-        self.use_btn.setToolTip("Sets hue/tolerance/sat/val from the region with the same "
-                                "rule as the camera's 'c', and sends them.")
-        self.use_btn.clicked.connect(self._use_region)
-        rb.addWidget(self.use_btn)
-        self.use_warn = QLabel("")
-        self.use_warn.setWordWrap(True)
-        rb.addWidget(self.use_warn, 1)
-        rl.addLayout(rb)
-        self.region_lbl = QLabel("-")
-        theme.mono(self.region_lbl)
-        self.region_lbl.setWordWrap(True)
-        rl.addWidget(self.region_lbl)
-        self.hist = pg.PlotWidget()
-        self.hist.setFixedHeight(110)
-        self.hist.setMouseEnabled(False, False)
-        self.hist.setMenuEnabled(False)
-        self.hist.hideButtons()
-        self.hist.setXRange(0, 360, padding=0)
-        self.hist.getAxis("left").setWidth(30)
-        self.hist.setLabel("bottom", "hue of region pixels with sat >= 30")
-        self.bars = pg.BarGraphItem(x=np.arange(5, 360, 10), height=np.zeros(36), width=9,
-                                    brushes=[pg.mkBrush(QColor.fromHsv(h, 255, 230))
-                                             for h in range(5, 360, 10)])
-        self.hist.addItem(self.bars)
-        self.win_lo = pg.InfiniteLine(angle=90, pen=pg.mkPen("w", style=Qt.PenStyle.DashLine))
-        self.win_hi = pg.InfiniteLine(angle=90, pen=pg.mkPen("w", style=Qt.PenStyle.DashLine))
-        self.hist.addItem(self.win_lo)
-        self.hist.addItem(self.win_hi)
-        rl.addWidget(self.hist)
-        mid.addWidget(region)
-        panels.append(("Region", region))
-
-        self.settings_lbl = QLabel()
-        self.settings_lbl.setWordWrap(True)
-
-        g = QGroupBox("Image link")
-        gl = QGridLayout(g)
-        self.grab_btn = QPushButton("Grab frame")
-        self.grab_btn.clicked.connect(lambda: self.main.send("g"))
-        gl.addWidget(self.grab_btn, 0, 0)
-        self.live_chk = QCheckBox("Live (a frame every loop)")
-        self.live_chk.clicked.connect(lambda on: self.main.send("v1" if on else "v0"))
-        gl.addWidget(self.live_chk, 0, 1)
-        # The baud choice is in the connection bar (Set baud).
-        self.link_lbl = QLabel()
-        self.link_lbl.setWordWrap(True)
-        gl.addWidget(self.link_lbl, 1, 0, 1, 2)
-        left.addWidget(g)
-
-        g = QGroupBox("Colour test (what counts as the target)")
-        gl = QVBoxLayout(g)
-        # The stage decides which colour test runs. From stage 1 up it is the
-        # colour table, and the HSV controls below no longer change which
-        # pixels match: they are kept, and used again at stage 0.
-        sl = QHBoxLayout()
-        sl.addWidget(QLabel("Detector stage:"))
-        self.stage_combo = QComboBox()
-        self.stage_combo.addItems(STAGE_NAMES)
-        sl.addWidget(self.stage_combo)
-        b = QPushButton("Set")
-        b.setToolTip("!stage N. Not saved until 'Save to camera'.")
-        b.clicked.connect(lambda: self.main.send("!stage %d" % self.stage_combo.currentIndex()))
-        sl.addWidget(b)
-        sl.addStretch(1)
-        gl.addLayout(sl)
-        self.stage_lbl = QLabel()
-        self.stage_lbl.setWordWrap(True)
-        gl.addWidget(self.stage_lbl)
-        pl = QHBoxLayout()
-        pl.addWidget(QLabel("Preset:"))
-        self.preset_combo = QComboBox()
-        self.preset_combo.addItems(D.PRESETS)
-        pl.addWidget(self.preset_combo)
-        pb = QPushButton("Apply preset")
-        pb.clicked.connect(lambda: self.main.send("p " + self.preset_combo.currentText()))
-        pl.addWidget(pb)
-        self.preset_lbl = QLabel()
-        pl.addWidget(self.preset_lbl, 1)
-        gl.addLayout(pl)
-        self.huebar = HueBar()
-        gl.addWidget(self.huebar)
-        self.p = {}
-        self.p["hue"] = ParamControl("Hue", 0, 359, unit=" deg")
-        self.p["tol"] = ParamControl("Tolerance", 1, 90, unit=" deg")
-        self.p["sat"] = ParamControl("Min sat", 0, 255)
-        self.p["val"] = ParamControl("Min value", 0, 255)
-        for k in ("hue", "tol", "sat", "val"):
-            gl.addWidget(self.p[k])
-        cb = QHBoxLayout()
-        cal = QPushButton("Calibrate on centre (camera 'c')")
-        cal.setToolTip("The camera samples the dashed 16x16 centre patch of its NEXT frame.")
-        cal.clicked.connect(lambda: self.main.send("c"))
-        cb.addWidget(cal)
-        self.cal_lbl = QLabel()
-        self.cal_lbl.setWordWrap(True)
-        cb.addWidget(self.cal_lbl, 1)
-        gl.addLayout(cb)
-        mid.addWidget(g)
-        panels.append(("Colour", g))
-
-        g = QGroupBox("Blobs and geometry")
-        gl = QVBoxLayout(g)
-        self.p["area"] = ParamControl("Min area", 1, 2000, unit=" px")
-        self.p["mm"] = ParamControl("Target size", 0, 5000, slider=False, unit=" mm")
-        self.p["fov"] = ParamControl("h-FOV", 10, 150, step=0.1, decimals=1, slider=False,
-                                     unit=" deg")
-        for k in ("area", "mm", "fov"):
-            gl.addWidget(self.p[k])
-        mid.addWidget(g)
-        panels.append(("Blobs", g))
-
-        g = QGroupBox("Sensor")
-        gl = QHBoxLayout(g)
-        self.awb_chk = QCheckBox("Auto white balance")
-        self.awb_chk.clicked.connect(lambda on: self.main.send("w1" if on else "w0"))
-        self.awb_chk.setToolTip("Unticked = white balance frozen at the gains it has now.")
-        gl.addWidget(self.awb_chk)
-        self.order_btn = QPushButton("Byte order: ?")
-        self.order_btn.setToolTip("Flips how the camera reads RGB565 ('o'). Big-endian was "
-                                  "confirmed correct on 2026-10-13; the wrong one looks like "
-                                  "speckle everywhere.")
-        self.order_btn.clicked.connect(lambda: self.main.send("o"))
-        gl.addWidget(self.order_btn)
-        mid.addWidget(g)
-        panels.append(("Sensor", g))
-
-        g = QGroupBox("Camera flash memory")
-        gl = QHBoxLayout(g)
-        b = QPushButton("Save to camera")
-        b.setToolTip("!save: the camera boots with these settings from now on.")
-        b.clicked.connect(lambda: self.main.send("!save"))
-        gl.addWidget(b)
-        b = QPushButton("Reload saved")
-        b.clicked.connect(lambda: self.main.send("!load"))
-        gl.addWidget(b)
-        b = QPushButton("Factory defaults")
-        b.clicked.connect(self._factory)
-        gl.addWidget(b)
-        mid.addWidget(g)
-        panels.append(("Flash", g))
-
-        g = QGroupBox("Files")
-        gl = QHBoxLayout(g)
-        b = QPushButton("Save frame...")
-        b.setToolTip("PNG for viewing, the raw .rgb565 bytes and the settings as .json "
-                     "(enough to replay this frame through the host tests).")
-        b.clicked.connect(self._save_frame)
-        gl.addWidget(b)
-        self.file_lbl = QLabel()
-        self.file_lbl.setWordWrap(True)
-        gl.addWidget(self.file_lbl, 1)
-        left.addWidget(g)
-        left.addWidget(self.settings_lbl)
-        for col in (left, mid):
-            col.addStretch(1)
-        root.addLayout(self._panel_strip(panels))
+        root.setContentsMargins(0, 0, 0, 0)
+        self.split = GripSplitter(Qt.Orientation.Horizontal)
+        root.addWidget(self.split)
+        self.split.addWidget(self._build_image_pane())
+        self.split.addWidget(self._build_inspector())
+        self.split.setStretchFactor(0, 1)
+        self.split.setStretchFactor(1, 0)
+        self.split.setCollapsible(0, False)
+        self.split.setCollapsible(1, False)
+        self.split.setSizes([900, 400])
 
         # The firmware defaults, until the camera's #!CFG says otherwise.
         for key, v in (("hue", 0), ("tol", 12), ("sat", 110), ("val", 50), ("area", 25),
@@ -339,44 +147,371 @@ class CalibTab(QWidget):
         for key, ctl in self.p.items():
             ctl.changed.connect(lambda _v: self._redraw())
             ctl.commit.connect(lambda v, k=key: self._commit(k, v))
+        self._show_settings()
+        self._show_hover()
         self._redraw()
 
-    @staticmethod
-    def _column(root: QHBoxLayout) -> QVBoxLayout:
-        """A vertically scrolling control column, added to root."""
+    # ---- building ---------------------------------------------------------------
+
+    def _build_image_pane(self) -> QWidget:
+        pane = QWidget()
+        v = QVBoxLayout(pane)
+        v.setContentsMargins(8, 8, 4, 0)
+        v.setSpacing(6)
+
+        tb = QWidget()
+        flow = FlowLayout(tb, hspacing=16, vspacing=6)
+        flow.setContentsMargins(0, 0, 0, 0)
+        self.grab_btn = QPushButton("Grab frame")
+        theme.set_role(self.grab_btn, "primary")
+        self.grab_btn.clicked.connect(lambda: self.main.send("g"))
+        self.live_chk = ToggleSwitch("Live")
+        self.live_chk.setToolTip("A frame every loop (v1 / v0)")
+        self.live_chk.clicked.connect(lambda on: self.main.send("v1" if on else "v0"))
+        flow.addWidget(_group(self.grab_btn, self.live_chk))
+        self.overlay_mode = QComboBox()
+        self.overlay_mode.addItems(["matching pixels tinted", "mask only (white = match)", "off"])
+        self.overlay_mode.currentIndexChanged.connect(lambda *_: self._redraw())
+        self.show_boxes = QCheckBox("PC detection boxes")
+        self.show_boxes.setChecked(True)
+        self.show_boxes.toggled.connect(lambda *_: self._redraw())
+        flow.addWidget(_group(_key("Overlay"), self.overlay_mode, self.show_boxes))
+        self.zoom_seg = SegmentedButtons([("fit", "Fit"), ("2", "2×"), ("3", "3×"), ("4", "4×")])
+        self.zoom_seg.setToolTip("Zoom (also Ctrl+wheel). Pan with the scroll bars, "
+                                 "middle-drag or Space+drag.")
+        self.save_btn = QPushButton("Save frame…")
+        self.save_btn.setToolTip("PNG for viewing, the raw .rgb565 bytes and the settings as "
+                                 ".json (enough to replay this frame through the host tests).")
+        self.save_btn.clicked.connect(self._save_frame)
+        flow.addWidget(_group(self.zoom_seg, self.save_btn))
+        v.addWidget(tb)
+
+        self.view = PixelImageView(W, H)
+        # Where the camera's 'c' samples: the 16x16 centre patch.
+        c0x, c0y = (W - D.CAL_PATCH) // 2, (H - D.CAL_PATCH) // 2
+        self.view.set_guides([(c0x, c0y, D.CAL_PATCH, D.CAL_PATCH)])
+        self.view.set_region(c0x, c0y, D.CAL_PATCH, D.CAL_PATCH, emit=False)
+        self.view.set_tool_text("no frame yet: Grab frame")
+        self.view.hovered.connect(self._hover_at)
+        self.view.left.connect(self._hover_left)
+        self.view.regionChanged.connect(lambda _r: self._update_region())
+        self.zoom_seg.changed.connect(self.view.set_zoom)
+        self.view.zoomChanged.connect(lambda k: self.zoom_seg.set_value(k, emit=False))
+
+        self.strip = self._build_readouts()
+        self.strip_scroll = QScrollArea()
+        self.strip_scroll.setWidgetResizable(True)
+        self.strip_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.strip_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.strip_scroll.setWidget(self.strip)
+        self.strip_scroll.setMinimumHeight(self.strip.header.sizeHint().height() + 8)
+        self.strip.header.toggled.connect(self._strip_toggled)
+
+        self.vsplit = GripSplitter(Qt.Orientation.Vertical)
+        self.vsplit.addWidget(self.view)
+        self.vsplit.addWidget(self.strip_scroll)
+        self.vsplit.setStretchFactor(0, 1)
+        self.vsplit.setStretchFactor(1, 0)
+        self.vsplit.setCollapsible(0, False)
+        self.vsplit.setCollapsible(1, False)
+        self.vsplit.splitterMoved.connect(self._strip_dragged)
+        v.addWidget(self.vsplit, 1)
+        return pane
+
+    def _build_readouts(self) -> ReadoutStrip:
+        strip = ReadoutStrip("Camera readouts")
+
+        c = ReadoutCard("Pixel under cursor")
+        self.swatch = QLabel()
+        self.swatch.setFixedSize(18, 18)        # a colour sample, not a panel: §2 allows it
+        self.px_xy = value_label()
+        self.px_match = _chip_label()
+        c.body.addLayout(_row(self.swatch, self.px_xy, self.px_match))
+        self.px_565 = c.add_kv("rgb565")
+        self.px_rgb = c.add_kv("RGB")
+        self.px_hsv = c.add_kv("HSV")
+        c.set_copy_source(self._pixel_text)
+        strip.add_card(c)
+
+        c = ReadoutCard("Detection", "PC vs camera")
+        self.det_badge = _chip_label()
+        c.add_header_widget(self.det_badge)
+        # The subtitle gives way to anything in its row; here it should not.
+        c.subtitle_lbl.setMinimumWidth(c.subtitle_lbl.sizeHint().width())
+        g = QGridLayout()
+        g.setHorizontalSpacing(12)
+        g.setVerticalSpacing(4)
+        for col, h in enumerate(("", "verdict", "blobs", "area", "matched")):
+            if h:
+                lbl = QLabel(h)
+                lbl.setFont(theme.ui_font(11))
+                theme.set_prop(lbl, "faint", True)
+                g.addWidget(lbl, 0, col)
+        self.det_cells = {}
+        for r, (k, name, tip) in enumerate((("pc", "PC", "PC (controls)"),
+                                            ("cam", "Camera", "camera (its row)")), 1):
+            g.addWidget(_key(name, tip), r, 0)
+            cells = [_chip_label()] + [value_label() for _ in range(3)]
+            for col, w in enumerate(cells, 1):
+                g.addWidget(w, r, col)
+            self.det_cells[k] = cells
+        g.setColumnStretch(5, 1)
+        c.body.addLayout(g)
+        self.det_note = value_label(wrap=True, mono=False)
+        theme.set_prop(self.det_note, "faint", True)
+        c.add_widget(self.det_note)
+        c.set_copy_source(lambda: self.compare_text)
+        strip.add_card(c)
+
+        c = ReadoutCard("Frame & link")
+        g = QGridLayout()
+        g.setHorizontalSpacing(12)
+        g.setVerticalSpacing(3)
+        self.fl = {}
+        for r, row in enumerate((("seq", "camera t"), ("format", "received"),
+                                 ("on the wire",), ("frames",))):
+            for k, key in enumerate(row):
+                g.addWidget(_key(key), r, 2 * k, Qt.AlignmentFlag.AlignTop)
+                self.fl[key] = value_label()
+                g.addWidget(self.fl[key], r, 2 * k + 1, 1, 1 if len(row) > 1 else 3,
+                            Qt.AlignmentFlag.AlignTop)
+        g.setColumnStretch(1, 1)
+        g.setColumnStretch(3, 1)
+        c.body.addLayout(g)
+        note = QLabel(NOT_FLIGHT)
+        note.setWordWrap(True)
+        note.setFont(theme.ui_font(12))
+        note.setStyleSheet("color: %s;" % theme.TOKENS["warn_text"])
+        c.add_widget(note)
+        c.set_copy_source(self._frame_link_text)
+        strip.add_card(c)
+
+        c = ReadoutCard("Camera settings")
+        self.settings_lbl = _chip_label(wrap=True)
+        c.add_widget(self.settings_lbl)
+        self.set_stage_v = c.add_kv("detector")
+        self.set_preset_v = c.add_kv("preset")
+        self.set_order_v = c.add_kv("byte order")
+        c.set_copy_source(self._settings_text)
+        strip.add_card(c)
+
+        strip.set_summary_source(self._strip_summary)
+        return strip
+
+    def _build_inspector(self) -> QWidget:
+        insp = QWidget()
+        insp.setObjectName("Panel")
+        insp.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+        v = QVBoxLayout(insp)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+        title = QLabel("Calibration")
+        title.setFont(theme.ui_font(13, QFont.Weight.DemiBold))
+        exp = QPushButton("Expand all")
+        col = QPushButton("Collapse all")
+        for b in (exp, col):
+            theme.set_prop(b, "small", True)
+        head = _row(title, stretch=False)
+        head.addStretch(1)
+        head.addWidget(exp)
+        head.addWidget(col)
+        head.setContentsMargins(12, 8, 8, 8)
+        v.addLayout(head)
+
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        w = QWidget()
-        col = QVBoxLayout(w)
-        scroll.setWidget(w)
-        root.addWidget(scroll, 1)
-        return col
+        body = QWidget()
+        bl = QVBoxLayout(body)
+        bl.setContentsMargins(4, 0, 4, 8)
+        bl.setSpacing(2)
+        scroll.setWidget(body)
+        v.addWidget(scroll, 1)
 
-    @staticmethod
-    def _panel_strip(panels: list) -> QVBoxLayout:
-        """One toggle button per panel: checked = shown. The choice is kept
-        in QSettings, so a panel hidden once stays hidden next session."""
-        store = QSettings("icarus_blimp", "tcview")
-        strip = QVBoxLayout()
-        for name, box in panels:
-            b = QPushButton(name)
-            b.setCheckable(True)
-            b.setFixedWidth(70)
-            b.setToolTip("Show or hide the '%s' panel" % box.title())
-            key = "calib/show/" + name
-            shown = store.value(key, True, type=bool)
-            b.toggled.connect(box.setVisible)
-            # A checkable button looks almost the same both ways in most
-            # styles; grey text says "hidden" at a glance. Set on each toggle,
-            # because a :checked stylesheet rule did not repaint reliably.
-            b.toggled.connect(lambda on, b=b: b.setStyleSheet("" if on else "color: grey;"))
-            b.setChecked(not shown)         # so the setChecked below always toggles
-            b.setChecked(shown)
-            b.toggled.connect(lambda on, k=key: store.setValue(k, on))
-            strip.addWidget(b)
-        strip.addStretch(1)
-        return strip
+        self.sections = {
+            "region": self._build_region(),
+            "colour": self._build_colour(),
+            "blobs": self._build_blobs(),
+            "sensor": self._build_sensor(),
+            "flash": self._build_flash(),
+        }
+        for s in self.sections.values():
+            bl.addWidget(s)
+        bl.addStretch(1)
+        exp.clicked.connect(lambda: [s.set_expanded(True) for s in self.sections.values()])
+        col.clicked.connect(lambda: [s.set_expanded(False) for s in self.sections.values()])
+        return insp
+
+    def _build_region(self) -> CollapsibleSection:
+        s = CollapsibleSection("Region")
+        self.use_btn = QPushButton("Use region as target")
+        self.use_btn.setToolTip("Sets hue/tolerance/sat/val from the region with the same "
+                                "rule as the camera's 'c', and sends them.")
+        self.use_btn.clicked.connect(self._use_region)
+        hint = QLabel("drag / resize the cyan box")
+        theme.set_prop(hint, "faint", True)
+        s.add_layout(_row(self.use_btn, hint))
+        self.use_warn = _chip_label(wrap=True)
+        self.use_warn.hide()
+        s.add_widget(self.use_warn)
+
+        c = ReadoutCard("Camera sampler")
+        self.reg_box = c.add_kv("box", "-")
+        self.reg_hue = c.add_kv("hue", "-")
+        self.reg_sat = c.add_kv("sat p10/50/90", "-")
+        self.reg_val = c.add_kv("val p10/50/90", "-")
+        self.reg_match = c.add_kv("matching", "-")
+        self.reg_bar = c.add_bar(0.0)
+        c.set_copy_source(lambda: self.region_text)
+        s.add_widget(c)
+
+        self.hist = pg.PlotWidget()
+        self.hist.setMinimumHeight(100)
+        self.hist.setMaximumHeight(150)
+        self.hist.setMouseEnabled(False, False)
+        self.hist.setMenuEnabled(False)
+        self.hist.hideButtons()
+        self.hist.setXRange(0, 360, padding=0)
+        self.hist.getViewBox().setLimits(yMin=0)        # counts: never a negative axis
+        self.hist.getAxis("left").setWidth(30)
+        self.hist.getAxis("bottom").setTicks([[(h, str(h)) for h in range(0, 361, 60)]])
+        self.hist.setLabel("bottom", "Hue of region pixels with sat ≥ 30")
+        self.bars = pg.BarGraphItem(x=np.arange(5, 360, 10), height=np.zeros(36), width=9,
+                                    brushes=[pg.mkBrush(QColor.fromHsv(h, 255, 230))
+                                             for h in range(5, 360, 10)])
+        self.hist.addItem(self.bars)
+        pen = pg.mkPen(theme.TOKENS["text"], style=Qt.PenStyle.DashLine)
+        self.win_lo = pg.InfiniteLine(angle=90, pen=pen)
+        self.win_hi = pg.InfiniteLine(angle=90, pen=pen)
+        self.hist.addItem(self.win_lo)
+        self.hist.addItem(self.win_hi)
+        s.add_widget(self.hist)
+        return s
+
+    def _build_colour(self) -> CollapsibleSection:
+        s = CollapsibleSection("Colour test")
+        # The stage decides which colour test runs. From stage 1 up it is the
+        # colour table, and the HSV controls below no longer change which
+        # pixels match: they are kept, and used again at stage 0.
+        self.stage_combo = QComboBox()
+        self.stage_combo.addItems(STAGE_NAMES)
+        b = QPushButton("Set")
+        b.setToolTip("!stage N. Not saved until 'Save to camera'.")
+        b.clicked.connect(lambda: self.main.send("!stage %d" % self.stage_combo.currentIndex()))
+        s.add_layout(_row(_key("Detector stage"), self.stage_combo, b))
+        self.stage_lbl = Banner("neutral", "")
+        self.stage_lbl.hide()
+        s.add_widget(self.stage_lbl)
+        self.preset_combo = QComboBox()
+        self.preset_combo.addItems(D.PRESETS)
+        pb = QPushButton("Apply")
+        pb.setToolTip("p <name>: the preset's hue window")
+        pb.clicked.connect(lambda: self.main.send("p " + self.preset_combo.currentText()))
+        self.preset_lbl = value_label()
+        theme.set_prop(self.preset_lbl, "muted", True)
+        s.add_layout(_row(_key("Preset"), self.preset_combo, pb, self.preset_lbl))
+
+        self.hsv_box = QWidget()
+        hl = QVBoxLayout(self.hsv_box)
+        hl.setContentsMargins(0, 4, 0, 0)
+        hl.setSpacing(4)
+        self.huebar = HueBar()
+        hl.addWidget(self.huebar)
+        self.p = {}
+        self.p["hue"] = ParamControl("Hue", 0, 359, unit="°")
+        self.p["tol"] = ParamControl("Tolerance", 1, 90, unit="°")
+        self.p["sat"] = ParamControl("Min sat", 0, 255)
+        self.p["val"] = ParamControl("Min value", 0, 255)
+        for k in ("hue", "tol", "sat", "val"):
+            hl.addWidget(self.p[k])
+        s.add_widget(self.hsv_box)
+        self._dim = QGraphicsOpacityEffect(self.hsv_box)
+        self._dim.setOpacity(0.5)
+        self._dim.setEnabled(False)
+        self.hsv_box.setGraphicsEffect(self._dim)
+
+        cal = QPushButton("Calibrate on centre (c)")
+        cal.setToolTip("The camera samples the dashed 16x16 centre patch of its NEXT frame.")
+        cal.clicked.connect(lambda: self.main.send("c"))
+        s.add_layout(_row(cal))
+        self.cal_lbl = _chip_label(wrap=True)
+        self.cal_lbl.hide()
+        s.add_widget(self.cal_lbl)
+        return s
+
+    def _build_blobs(self) -> CollapsibleSection:
+        s = CollapsibleSection("Blobs & geometry")
+        self.p["area"] = ParamControl("Min area", 1, 2000, unit=" px")
+        self.p["mm"] = ParamControl("Target size", 0, 5000, slider=False, unit=" mm")
+        self.p["fov"] = ParamControl("h-FOV", 10, 150, step=0.1, decimals=1, slider=False,
+                                     unit="°")
+        for k in ("area", "mm", "fov"):
+            s.add_widget(self.p[k])
+        return s
+
+    def _build_sensor(self) -> CollapsibleSection:
+        s = CollapsibleSection("Sensor")
+        self.awb_chk = QCheckBox("Auto white balance")
+        self.awb_chk.clicked.connect(lambda on: self.main.send("w1" if on else "w0"))
+        self.awb_chk.setToolTip("Unticked = white balance frozen at the gains it has now.")
+        self.order_btn = QPushButton("Byte order: ?")
+        self.order_btn.setToolTip("Flips how the camera reads RGB565 ('o'). Big-endian was "
+                                  "confirmed correct on 2026-10-13; the wrong one looks like "
+                                  "speckle everywhere.")
+        self.order_btn.clicked.connect(lambda: self.main.send("o"))
+        s.add_layout(_row(self.awb_chk, self.order_btn))
+        return s
+
+    def _build_flash(self) -> CollapsibleSection:
+        s = CollapsibleSection("Camera flash memory")
+        b1 = QPushButton("Save to camera")
+        b1.setToolTip("!save: the camera boots with these settings from now on.")
+        b1.clicked.connect(lambda: self.main.send("!save"))
+        b2 = QPushButton("Reload saved")
+        b2.setToolTip("!load: back to what the camera has saved.")
+        b2.clicked.connect(lambda: self.main.send("!load"))
+        b3 = QPushButton("Factory defaults…")
+        theme.set_role(b3, "danger")
+        b3.clicked.connect(self._factory)
+        lay = FlowLayout(hspacing=8, vspacing=6)
+        for b in (b1, b2, b3):
+            lay.addWidget(b)
+        w = QWidget()
+        w.setLayout(lay)
+        s.add_widget(w)
+        return s
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        QTimer.singleShot(0, self._size_strip)      # once the splitter has its new size
+
+    def _strip_dragged(self, *_):
+        if self.strip.is_expanded():
+            self._strip_h = self.vsplit.sizes()[1]
+
+    def _size_strip(self):
+        """The strip's height: what its cards need, but never more than two
+        fifths of the pane, so the image keeps most of a small screen. Once
+        the user drags the handle, their height is kept instead."""
+        total = sum(self.vsplit.sizes())
+        if total <= 0:
+            return
+        lo = self.strip_scroll.minimumHeight()
+        if not self.strip.is_expanded():
+            h = lo
+        elif self._strip_h:
+            h = max(lo, min(self._strip_h, total - self.view.minimumHeight()))
+        else:
+            need = self.strip.heightForWidth(self.strip_scroll.viewport().width()) + 4
+            h = max(lo, min(need, int(total * 0.4)))
+        if self.vsplit.sizes()[1] != h:
+            self.vsplit.setSizes([total - h, h])
+
+    def _strip_toggled(self, on: bool):
+        # Collapsed, the strip is its header alone and the image takes the rest.
+        self.strip_scroll.setMaximumHeight(16777215 if on else self.strip_scroll.minimumHeight())
+        self._size_strip()
 
     # ---- from the main window ------------------------------------------------
 
@@ -401,20 +536,26 @@ class CalibTab(QWidget):
         pc = D.models()
         cam_id = v.get("lut_id", 0)
         if v.get("lut") == "ok" and pc.lut and cam_id != pc.lut_id:
-            chip(self.stage_lbl, "Colour table MISMATCH: camera %s, PC %d. The PC overlay "
-                 "is not what the camera computes; reflash, or retrain on the PC." % (
-                     cam_id, pc.lut_id), RED)
+            self.stage_lbl.set("err", "Colour table MISMATCH: camera %s, PC %d. The PC overlay "
+                               "is not what the camera computes; reflash, or retrain on the PC."
+                               % (cam_id, pc.lut_id))
         elif eff >= 1 and not pc.lut:
-            chip(self.stage_lbl, "Camera runs stage %d, but the PC has no colour table "
-                 "(main/models/lut_model.bin): the overlay falls back to HSV." % eff, RED)
+            self.stage_lbl.set("err", "Camera runs stage %d, but the PC has no colour table "
+                               "(main/models/lut_model.bin): the overlay falls back to HSV." % eff)
         elif eff != req:
-            chip(self.stage_lbl, "Stage %d requested, running %d (colour table %s)." % (
-                req, eff, v.get("lut", "?")), AMBER)
+            self.stage_lbl.set("warn", "Stage %d requested, running %d (colour table %s)." % (
+                req, eff, v.get("lut", "?")))
         elif eff >= 1:
-            chip(self.stage_lbl, "Stage %d: colour table %s decides the pixels. Hue, tol, sat, "
-                 "val and 'c' have no effect until stage 0." % (eff, cam_id), GREEN)
+            self.stage_lbl.set("info", "Stage %d: colour table %s decides the pixels. Hue, "
+                               "tolerance, sat, value and c have no effect until stage 0."
+                               % (eff, cam_id))
         else:
-            chip(self.stage_lbl, "Stage 0: the HSV window below decides the pixels.", GREY)
+            self.stage_lbl.set("neutral", "")
+        # At stage 0 the HSV window decides, as the controls say: nothing to flag.
+        self.stage_lbl.setVisible(bool(self.stage_lbl.text()))
+        # The HSV controls stay editable at stage >= 1 (they are what stage 0
+        # will use), but drawn faded, since they decide nothing now.
+        self._dim.setEnabled(eff >= 1)
 
     def on_cfg(self, v: dict):
         self.cfg = v
@@ -429,15 +570,7 @@ class CalibTab(QWidget):
         self.preset_lbl.setText("camera: %s" % preset)
         if preset in D.PRESETS:
             self.preset_combo.setCurrentText(preset)
-        st = v.get("settings")
-        if st == "saved":
-            chip(self.settings_lbl, "Camera settings: SAVED in flash - a power cycle keeps them",
-                 GREEN)
-        elif st == "defaults":
-            chip(self.settings_lbl, "Camera settings: factory defaults (nothing saved)", GREY)
-        else:
-            chip(self.settings_lbl, "Camera settings: MODIFIED, NOT SAVED - a power cycle loses "
-                 "them. Press 'Save to camera' when done.", AMBER)
+        self._show_settings()
         self._redraw()
 
     def on_disconnected(self):
@@ -447,16 +580,18 @@ class CalibTab(QWidget):
         self.pending_cmds.clear()
         for ctl in self.p.values():
             ctl.forget_camera()
-        for lbl in (self.stage_lbl, self.settings_lbl):
-            lbl.setText("")
-            lbl.setStyleSheet("")
+        self.stage_lbl.set("neutral", "")
+        self.stage_lbl.hide()
+        self._dim.setEnabled(False)
         self.preset_lbl.setText("")
         self.live_chk.setChecked(False)
         self.order_btn.setText("Byte order: ?")
+        self._show_settings()
         self._redraw()
 
     def on_frame(self, frame: P.Frame):
         self.frame = frame
+        self.view.set_tool_text("")
         self.frame_row = None
         self.frame_time = time.monotonic()
         self._redraw()
@@ -481,20 +616,12 @@ class CalibTab(QWidget):
             chip(self.cal_lbl, txt + ": applied", GREEN)
         else:
             chip(self.cal_lbl, txt + ": REFUSED (too grey)", RED)
+        self.cal_lbl.show()
 
     def tick(self):
         """1 Hz from the main window: link figures."""
-        link = self.main.link
-        if link is None:
-            self.link_lbl.setText("not connected")
-            return
-        c = link.counters
-        age = time.monotonic() - self.frame_time if self.frame else None
-        self.link_lbl.setText(
-            "now at %d baud, %.1f kB/s on the wire.  frames ok %d, bad %d (CRC/truncated)%s.\n"
-            "While frames are sent the camera's dt_ms/FPS are NOT flight timing."
-            % (link.baud, c.rate() / 1000, c.frames_ok, c.frames_bad,
-               "" if age is None else ", last %.1f s ago" % age))
+        self._show_frame_link()
+        self.strip.refresh_summary()
 
     # ---- actions ---------------------------------------------------------------
 
@@ -509,7 +636,7 @@ class CalibTab(QWidget):
     def _use_region(self):
         if self.frame is None:
             return
-        x, y, w, h = self.pane.region()
+        x, y, w, h = self.view.region()
         col = D.sample(self.settings(), self.frame.data, x, y, w, h)
         cal = D.calibrate_from(col)
         if cal.warning:
@@ -517,6 +644,7 @@ class CalibTab(QWidget):
         else:
             chip(self.use_warn, "hue %d +/-%d, sat >= %d, val >= %d sent" % (
                 cal.hue, cal.tol, cal.sat, cal.val), GREEN)
+        self.use_warn.show()
         for k, v in (("hue", cal.hue), ("tol", cal.tol), ("sat", cal.sat), ("val", cal.val)):
             self.p[k].set_local(v, send=True)
 
@@ -528,7 +656,7 @@ class CalibTab(QWidget):
 
     def _save_frame(self):
         if self.frame is None:
-            self.file_lbl.setText("no frame to save")
+            self.main._say("# [viewer] no frame to save: press Grab frame first", "err")
             return
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         # The dialog opens where the last frame went: a capture session is one
@@ -553,31 +681,181 @@ class CalibTab(QWidget):
                 "viewer_controls": {k: c.local for k, c in self.p.items()},
                 "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
         Path(str(base) + ".json").write_text(json.dumps(meta, indent=2))
-        self.file_lbl.setText("saved %s.{png,rgb565,json}" % base.name)
+        self.main._say("# [viewer] saved %s.{png,rgb565,json}" % base)
 
-    # ---- drawing ---------------------------------------------------------------
+    # ---- readouts --------------------------------------------------------------
 
     def _hover_at(self, x, y):
-        self._hover = None if y is None else (x, y)
+        self._hover = (x, y)
         self._show_hover()
 
-    def _show_hover(self):
+    def _hover_left(self):
+        self._hover = None
+        self._show_hover()
+
+    def _pixel(self):
+        """(x, y, rgb565, (r, g, b), (h, s, v), match) under the cursor, or None."""
         if self._hover is None or self.frame is None:
-            return
+            return None
         x, y = self._hover
         px = int(self.frame.pixels()[y, x])
-        hh, s, v = (int(a) for a in D.hsv_lut()[px])
-        r, g, b = (int(a) for a in P.rgb565_to_rgb888(np.array([[px]], dtype=np.uint16))[0, 0])
-        st = self.settings()
-        m = D.mask(st, self.frame.data, self.stage())[y, x]
-        self.hover_lbl.setText("x %3d y %3d  rgb565 %04x  RGB %3d %3d %3d  ->  H %3d  S %3d  "
-                               "V %3d   %s" % (x, y, px, r, g, b, hh, s, v,
-                                              "MATCH" if m else "no match"))
+        hsv = tuple(int(a) for a in D.hsv_lut()[px])
+        rgb = tuple(int(a) for a in P.rgb565_to_rgb888(np.array([[px]], dtype=np.uint16))[0, 0])
+        m = bool(D.mask(self.settings(), self.frame.data, self.stage())[y, x])
+        return x, y, px, rgb, hsv, m
+
+    def _pixel_text(self) -> str:
+        p = self._pixel()
+        if p is None:
+            return NO_HOVER
+        x, y, px, (r, g, b), (hh, s, v), m = p
+        return "x %d  y %d  rgb565 %04x  RGB %d %d %d -> H %d S %d V %d  %s" % (
+            x, y, px, r, g, b, hh, s, v, "MATCH" if m else "no match")
+
+    def _show_hover(self):
+        p = self._pixel()
+        if p is None:
+            self.px_xy.setText(NO_HOVER)
+            self.px_xy.setFont(theme.ui_font(12))
+            self.swatch.hide()
+            self.px_match.hide()
+            for lbl in (self.px_565, self.px_rgb, self.px_hsv):
+                lbl.setText("-")
+        else:
+            x, y, px, (r, g, b), (hh, s, v), m = p
+            self.px_xy.setFont(theme.mono_font())
+            self.px_xy.setText("x %d · y %d" % (x, y))
+            self.swatch.setStyleSheet("background: rgb(%d,%d,%d); border: 1px solid %s;"
+                                      " border-radius: 3px;" % (r, g, b,
+                                                                theme.TOKENS["border_strong"]))
+            self.swatch.show()
+            chip(self.px_match, "match" if m else "no match", GREEN if m else GREY)
+            self.px_match.show()
+            self.px_565.setText("%04x" % px)
+            self.px_rgb.setText("%d %d %d" % (r, g, b))
+            self.px_hsv.setText("H %d  S %d  V %d" % (hh, s, v))
+        self.strip.refresh_summary()
+
+    def _frame_link_text(self) -> str:
+        f = self.frame
+        if f is None:
+            first = "no frame yet: press Grab frame"
+        else:
+            first = "frame seq %d, camera t %.1f s, %s; received %.1f s ago" % (
+                f.seq, f.t_ms / 1000, f.fmt, time.monotonic() - self.frame_time)
+        link = self.main.link
+        if link is None:
+            return first + "\nnot connected"
+        c = link.counters
+        last = "" if f is None else ", last %.1f s ago" % (time.monotonic() - self.frame_time)
+        return first + "\n%d baud, %.1f kB/s on the wire. frames ok %d, bad %d (CRC/truncated)%s" % (
+            link.baud, c.rate() / 1000, c.frames_ok, c.frames_bad, last)
+
+    def _show_frame_link(self):
+        f = self.frame
+        if f is None:
+            for k in ("seq", "camera t", "format"):
+                self.fl[k].setText("-")
+            self.fl["received"].setText("no frame yet")
+        else:
+            self.fl["seq"].setText(str(f.seq))
+            self.fl["camera t"].setText("%.1f s" % (f.t_ms / 1000))
+            self.fl["format"].setText(f.fmt)
+            self.fl["received"].setText("%.1f s ago" % (time.monotonic() - self.frame_time))
+        link = self.main.link
+        if link is None:
+            self.fl["on the wire"].setText("not connected")
+            self.fl["frames"].setText("-")
+        else:
+            c = link.counters
+            self.fl["on the wire"].setText("%d baud · %.1f kB/s" % (link.baud, c.rate() / 1000))
+            self.fl["frames"].setText("ok %d · bad %d (CRC/trunc.)" % (c.frames_ok, c.frames_bad))
+
+    def _settings_state(self):
+        """(tone colour, shown line, copied line) for the camera's settings state."""
+        st = self.cfg.get("settings")
+        if not self.cfg:
+            return GREY, "no camera", "Camera settings: no camera"
+        if st == "saved":
+            return GREEN, "Saved in flash — a power cycle keeps them", \
+                "Camera settings: SAVED in flash"
+        if st == "defaults":
+            return GREY, "Factory defaults (nothing saved)", \
+                "Camera settings: factory defaults (nothing saved)"
+        return AMBER, "Modified, NOT saved — a power cycle loses them. Press Save to camera " \
+                      "when done.", "Camera settings: MODIFIED, NOT SAVED"
+
+    def _show_settings(self):
+        colour, shown, _ = self._settings_state()
+        chip(self.settings_lbl, shown, colour)
+        v = self.cfg
+        if v:
+            st = int(v.get("stage", 0))
+            self.set_stage_v.setText(STAGE_NAMES[st] if 0 <= st < len(STAGE_NAMES) else str(st))
+            self.set_preset_v.setText(str(v.get("preset", "?")))
+            self.set_order_v.setText("big-endian" if v.get("be") == 1 else "LITTLE-endian")
+        else:
+            for lbl in (self.set_stage_v, self.set_preset_v, self.set_order_v):
+                lbl.setText("-")
+
+    def _settings_text(self) -> str:
+        _, _, first = self._settings_state()
+        if not self.cfg:
+            return first
+        return first + "\ndetector stage %s; preset %s; byte order %s" % (
+            " · ".join(self.set_stage_v.text().split(None, 1)), self.set_preset_v.text(),
+            self.set_order_v.text())
+
+    def _strip_summary(self) -> str:
+        parts = []
+        p = self._pixel()
+        if p is not None:
+            x, y, _, _, (hh, s, v), _ = p
+            parts.append("x %d y %d · H %d S %d V %d" % (x, y, hh, s, v))
+        if self.frame is not None:
+            parts.append(self._det_summary)
+            parts.append("seq %d" % self.frame.seq)
+        link = self.main.link
+        if link is not None:
+            parts.append("%.1f kB/s" % (link.counters.rate() / 1000))
+        st = self.cfg.get("settings")
+        if self.cfg:
+            parts.append({"saved": "saved in flash", "defaults": "factory defaults"}.get(
+                st, "NOT saved"))
+        return " · ".join(parts) or "no frame yet"
+
+    def _refresh_summaries(self):
+        sec = self.sections
+        if self._region_stats is not None:
+            hue, spread, frac = self._region_stats
+            sec["region"].set_summary("hue %d ±%d · %.0f %%" % (hue, spread, 100 * frac))
+        else:
+            sec["region"].set_summary("")
+        v = self.cfg
+        if v and int(v.get("stage_eff", 0)) >= 1:
+            sec["colour"].set_summary("stage %d · colour table %s" % (
+                int(v.get("stage_eff", 0)), v.get("lut_id", "?")))
+        else:
+            hsv = "H %d° ±%d° · S≥%d · V≥%d" % tuple(self.p[k].local
+                                                    for k in ("hue", "tol", "sat", "val"))
+            sec["colour"].set_summary(("%s · " % v["preset"] if v.get("preset") else "") + hsv)
+        sec["blobs"].set_summary("area ≥ %d px · %d mm · FOV %.1f°" % (
+            self.p["area"].local, self.p["mm"].local, self.p["fov"].local))
+        if v:
+            sec["sensor"].set_summary("AWB %s · %s-endian" % (
+                "on" if v.get("awb") == 1 else "off", "big" if v.get("be") == 1 else "LITTLE"))
+            sec["flash"].set_summary({"saved": "● saved", "defaults": "● defaults"}.get(
+                v.get("settings"), "● unsaved"))
+        else:
+            sec["sensor"].set_summary("")
+            sec["flash"].set_summary("")
+
+    # ---- drawing ---------------------------------------------------------------
 
     def _update_region(self):
         if self.frame is None:
             return
-        x, y, w, h = self.pane.region()
+        x, y, w, h = self.view.region()
         x1, y1 = min(W, x + w), min(H, y + h)
         px = self.frame.pixels()[max(0, y):y1, max(0, x):x1].ravel()
         if px.size == 0:
@@ -585,54 +863,65 @@ class CalibTab(QWidget):
         hsv = D.hsv_lut()[px]
         col = D.sample(self.settings(), self.frame.data, x, y, w, h)
         sat, val = hsv[:, 1], hsv[:, 2]
-        q = lambda a: "%3d/%3d/%3d" % tuple(np.percentile(a, [10, 50, 90]).astype(int))
+        q = lambda a: "%d/%d/%d" % tuple(np.percentile(a, [10, 50, 90]).astype(int))
         st = self.settings()
         m = D.mask(st, self.frame.data, self.stage())[max(0, y):y1, max(0, x):x1]
-        self.region_lbl.setText(
+        bw, bh = x1 - max(0, x), y1 - max(0, y)
+        n, frac = int(m.sum()), m.sum() / m.size
+        self.region_text = (
             "%dx%d at (%d,%d): hue %d +/-%d (camera's sampler)\n"
-            "sat p10/50/90 %s   val p10/50/90 %s\n"
+            "sat p10/50/90 %s  val p10/50/90 %s\n"
             "matching now: %d of %d px (%.0f%%)"
-            % (x1 - max(0, x), y1 - max(0, y), x, y, col.hue, col.hue_spread, q(sat), q(val),
-               int(m.sum()), m.size, 100.0 * m.sum() / m.size))
+            % (bw, bh, x, y, col.hue, col.hue_spread, q(sat), q(val), n, m.size, 100.0 * frac))
+        self.reg_box.setText("%d×%d at (%d, %d)" % (bw, bh, x, y))
+        self.reg_hue.setText("%d ± %d" % (col.hue, col.hue_spread))
+        self.reg_sat.setText(q(sat).replace("/", " / "))
+        self.reg_val.setText(q(val).replace("/", " / "))
+        self.reg_match.setText("%d / %d px (%.0f%%)" % (n, m.size, 100.0 * frac))
+        self.reg_bar.set_fraction(frac)
+        self._region_stats = (col.hue, col.hue_spread, frac)
         coloured = hsv[sat >= 30, 0]
         counts, _ = np.histogram(coloured, bins=36, range=(0, 360))
         self.bars.setOpts(height=counts)
         self.huebar.set_mark(col.hue)
+        self._refresh_summaries()
 
     def _redraw(self):
         st = self.settings()
         self.huebar.set_window(st.hue, st.tol)
         self.win_lo.setPos((st.hue - st.tol) % 360)
         self.win_hi.setPos((st.hue + st.tol) % 360)
-        pane = self.pane
+        self._refresh_summaries()
+        self._show_frame_link()
         if self.frame is None:
+            self._det_summary = ""
+            self._show_detection(None, None)
+            self.strip.refresh_summary()
             return
         rgb = self.frame.rgb()
         mask = D.mask(st, self.frame.data, self.stage())
         mode = self.overlay_mode.currentIndex()
         if mode == 1:
-            pane.img.setImage(np.repeat(mask[..., None] * 255, 3, axis=2).astype(np.uint8),
-                              levels=(0, 255))
-            pane.overlay.clear()
+            self.view.set_image(np.repeat(mask[..., None] * 255, 3, axis=2).astype(np.uint8))
+            self.view.set_overlay(None)
         else:
-            pane.img.setImage(rgb, levels=(0, 255))
+            self.view.set_image(rgb)
             if mode == 0:
                 ov = np.zeros((H, W, 4), dtype=np.uint8)
-                ov[mask == 1] = (0, 255, 255, 150)
-                pane.overlay.setImage(ov, levels=(0, 255))
+                ov[mask == 1] = TINT
+                self.view.set_overlay(ov)
             else:
-                pane.overlay.clear()
+                self.view.set_overlay(None)
 
         r = D.pipeline(st, self.frame.data, self.stage()).r
-        for k in range(D.BLOB_MAX_REPORT):
-            vis = self.show_boxes.isChecked() and k < r.n_report
-            pane.boxes[k].setVisible(vis)
-            pane.labels[k].setVisible(vis)
-            if vis:
+        boxes = []
+        if self.show_boxes.isChecked():
+            for k in range(min(r.n_report, D.BLOB_MAX_REPORT)):
                 b = r.b[k]
-                pane.boxes[k].setRect(b.x0, b.y0, b.x1 - b.x0 + 1, b.y1 - b.y0 + 1)
-                pane.labels[k].setPos(b.x0, b.y0)
-                pane.labels[k].setText("%d%s" % (k + 1, " clipped" if b.clipped else ""))
+                boxes.append((b.x0, b.y0, b.x1 - b.x0 + 1, b.y1 - b.y0 + 1,
+                              BOX_COLOURS[0 if k == 0 else 1],
+                              "%d%s" % (k + 1, " clipped" if b.clipped else "")))
+        self.view.set_boxes(boxes)
 
         cam = []
         row = self.frame_row
@@ -643,22 +932,55 @@ class CalibTab(QWidget):
                 az, el = row["b%d_az" % k], row["b%d_el" % k]
                 cam.append((W / 2 + f * math.tan(math.radians(az)),
                             H / 2 - f * math.tan(math.radians(el))))
-        if cam:
-            pane.cam_marks.setData(pos=cam)
-        else:
-            pane.cam_marks.clear()
-
-        b0 = r.b[0]
-        pc = ("PC  (controls): %s  blobs %d  area %4d  matched %5d"
-              % ("TARGET   " if r.found else "NO TARGET", r.n_blobs, b0.area, r.matched))
-        if row is None:
-            cm = "camera (its row): not received for this frame"
-        else:
-            cm = ("camera (its row): %s  blobs %d  area %4d  matched %5d"
-                  % ("TARGET   " if row["ok"] else "NO TARGET", row["blobs"], row["area_px"],
-                     row["matched_px"]))
-        self.compare_lbl.setText(pc + "\n" + cm)
-        age = time.monotonic() - self.frame_time
-        self.frame_lbl.setText("frame seq %d, camera t %.1f s, %s; received %.1f s ago" % (
-            self.frame.seq, self.frame.t_ms / 1000, self.frame.fmt, age))
+        self.view.set_marks(cam)
+        self._show_detection(r, row)
         self._show_hover()
+
+    def _show_detection(self, r, row):
+        cells = self.det_cells
+        if r is None:
+            for k in ("pc", "cam"):
+                chip(cells[k][0], "-", GREY)
+                for c in cells[k][1:]:
+                    c.setText("")
+            self.det_badge.hide()
+            self.det_note.setText("no frame yet: press Grab frame")
+            self.det_note.show()
+            self.compare_text = ""
+            return
+        b0 = r.b[0]
+        pc = (bool(r.found), int(r.n_blobs), int(b0.area), int(r.matched))
+        self.compare_text = "PC (controls): %s  blobs %d  area %d  matched %d" % (
+            "TARGET" if pc[0] else "NO TARGET", *pc[1:])
+        self._fill_det(cells["pc"], pc)
+        if row is None:
+            self.compare_text += "\ncamera (its row): not received for this frame"
+            chip(cells["cam"][0], "-", GREY)
+            for c in cells["cam"][1:]:
+                c.setText("")
+            self.det_note.setText("camera row not received for this frame")
+            self.det_note.show()
+            chip(self.det_badge, "no camera row", GREY)
+            agree = None
+        else:
+            cam = (bool(row["ok"]), int(row["blobs"]), int(row["area_px"]),
+                   int(row["matched_px"]))
+            self.compare_text += "\ncamera (its row): %s  blobs %d  area %d  matched %d" % (
+                "TARGET" if cam[0] else "NO TARGET", *cam[1:])
+            self._fill_det(cells["cam"], cam)
+            self.det_note.hide()
+            agree = cam == pc
+            chip(self.det_badge, "✓ PC = camera" if agree else "PC ≠ camera",
+                 GREEN if agree else AMBER)
+        self.det_badge.show()
+        verdict = "TARGET" if pc[0] else "NO TARGET"
+        self._det_summary = "%s %d blobs%s" % (
+            verdict, pc[1], "" if agree is None else
+            (", PC = camera" if agree else ", PC ≠ camera"))
+
+    @staticmethod
+    def _fill_det(cells, vals):
+        found, blobs, area, matched = vals
+        chip(cells[0], "TARGET" if found else "NO TARGET", GREEN if found else GREY)
+        for c, v in zip(cells[1:], (blobs, area, matched)):
+            c.setText(str(v))

@@ -1,7 +1,7 @@
 """Small widgets shared by the two tabs."""
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QRectF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPen
 from PyQt6.QtWidgets import (QDoubleSpinBox, QHBoxLayout, QLabel, QSlider,
                              QSpinBox, QWidget)
@@ -155,21 +155,35 @@ class ParamControl(QWidget):
             self.changed.emit(self.local)
         self._refresh()
 
+    def camera_text(self) -> str:
+        if self.camera is None:
+            return "-"
+        return "%.*f" % (self.decimals, self.camera) if self.decimals else "%d" % self.camera
+
     def _refresh(self):
+        # The camera column: what the camera uses, against what is shown.
+        # A differing value is named, so the user sees what a power cycle
+        # or a lost command would leave the camera at.
         if self.camera is None:
             chip(self.status, "no camera", GREY)
+            self.status.setToolTip("no camera: nothing to compare with")
         elif self.in_flight:
             chip(self.status, "sending", AMBER)
+            self.status.setToolTip("sent; waiting for the camera's #!CFG")
         elif self.local == self.camera:
-            chip(self.status, "applied", GREEN)
+            chip(self.status, "✓ applied", GREEN)
+            self.status.setToolTip("the camera uses this value")
         else:
-            chip(self.status, "not sent", AMBER)
+            chip(self.status, "cam %s" % self.camera_text(), AMBER)
+            self.status.setToolTip("the camera uses %s; the value shown is not sent yet"
+                                   % self.camera_text())
 
 
 class HueBar(QWidget):
     """The hue circle unrolled, with the accepted window [hue-tol, hue+tol]
-    left bright and everything else dimmed; an optional tick marks a sampled
-    hue. Red sits at both ends, so a red window shows as two bright pieces."""
+    left bright and outlined in white, and everything else dimmed; an
+    optional tick marks a sampled hue. Red sits at both ends, so a red window
+    shows as two bright, outlined pieces."""
 
     def __init__(self):
         super().__init__()
@@ -179,6 +193,17 @@ class HueBar(QWidget):
     def set_window(self, hue, tol):
         self.hue, self.tol = hue, tol
         self.update()
+
+    def window_spans(self):
+        """The window as [lo, hi] hue spans inside 0..360: two when it wraps."""
+        if self.tol >= 180:
+            return [(0, 360)]
+        lo, hi = self.hue - self.tol, self.hue + self.tol
+        if lo < 0:
+            return [(0, hi), (lo + 360, 360)]
+        if hi > 360:
+            return [(0, hi - 360), (lo, 360)]
+        return [(lo, hi)]
 
     def set_mark(self, hue):
         self.mark = hue
@@ -194,6 +219,10 @@ class HueBar(QWidget):
             c = QColor.fromHsv(hue, 255, 255 if inside else 70)
             p.setPen(c)
             p.drawLine(x, 0, x, h)
+        p.setPen(QPen(Qt.GlobalColor.white, 1.5))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        for lo, hi in self.window_spans():
+            p.drawRect(QRectF(lo * w / 360 + 0.75, 0.75, (hi - lo) * w / 360 - 1.5, h - 1.5))
         if self.mark is not None:
             x = int(self.mark * w / 360)
             p.setPen(QPen(Qt.GlobalColor.white, 2))

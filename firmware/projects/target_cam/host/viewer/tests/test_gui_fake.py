@@ -77,7 +77,7 @@ def test_bench_session(app, rig):
     assert wait(app, lambda: win.link.counters.naks >= 2)
 
     # Use a region as the target: same rule as 'c'.
-    cal.pane.roi.setPos((60, 40))
+    cal.view.set_region(60, 40, 16, 16)
     app.processEvents()
     cal._use_region()
     assert wait(app, lambda: cal.p["val"].camera == cal.p["val"].local

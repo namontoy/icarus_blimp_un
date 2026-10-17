@@ -191,7 +191,7 @@ class ReadoutCard(QFrame):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(12, 8, 12, 10)
         lay.setSpacing(6)
-        top = QHBoxLayout()
+        top = self.top = QHBoxLayout()
         top.setSpacing(6)
         self.title_lbl = QLabel(title)
         self.title_lbl.setFont(theme.ui_font(12, QFont.Weight.DemiBold))
@@ -207,10 +207,16 @@ class ReadoutCard(QFrame):
         self.body = QVBoxLayout()
         self.body.setSpacing(6)
         lay.addLayout(self.body)
+        lay.addStretch(1)               # a card taller than its content keeps it at the top
         self._grid: Optional[QGridLayout] = None
 
     def title(self) -> str:
         return self.title_lbl.text()
+
+    def add_header_widget(self, w: QWidget) -> QWidget:
+        """A badge or chip in the title row, just before the copy button."""
+        self.top.insertWidget(self.top.indexOf(self.copy_btn), w)
+        return w
 
     def set_subtitle(self, text: str):
         self.subtitle_lbl.setText(text)
