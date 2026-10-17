@@ -206,3 +206,172 @@ def test_collect_records_match_the_pc(app, tmp_path):
     finally:
         win.close()
         cam.stop()
+
+
+# ---- connection management (docs/GUI_REDESIGN.md §13.1) -----------------------
+
+def connected(win):
+    return win.conn == "on" and win.calib.cfg.get("hue") is not None
+
+
+def disconnected(win):
+    return win.link is None and win.conn == "off"
+
+
+def test_connect_from_the_gui_and_back(app, tmp_path, monkeypatch):
+    """Port chosen in the bar, Connect, Disconnect, Connect again: the camera
+    state is forgotten in between, the counters start again, and a recording
+    does not span the two connections."""
+    from tcview import flight_tab
+    monkeypatch.setattr(flight_tab, "DATA_DIR", tmp_path)
+    cam = FakeCamera().start()
+    win = MainWindow(cam.port, " test", fake=True)
+    win.show()
+    bar = win.bar
+    try:
+        assert disconnected(win) and bar.connect_btn.text() == "Connect"
+        assert bar.connect_btn.property("role") == "primary"
+        assert bar.port_combo.port() == cam.port
+        assert bar.port_combo.currentText() == "FAKE camera (%s)" % cam.port
+        assert win.stats.copy_text().startswith("baud — | kB/s — |")
+        win.tabs.setCurrentWidget(win.label)
+        assert not bar.offline_note.isHidden()
+        win.tabs.setCurrentWidget(win.calib)
+        assert bar.offline_note.isHidden()
+
+        # Typed while disconnected: not sent, and the console says so.
+        win.entry.setText("?")
+        win.entry.returnPressed.emit()
+        assert "# [viewer] not connected: '?' not sent" in win.console.text()
+
+        bar.connect_btn.click()
+        assert wait(app, lambda: connected(win))
+        assert bar.pill.tone() == "ok"
+        assert bar.pill.text() == "Connected · %s · 115200 baud" % cam.port
+        assert not bar.port_combo.isEnabled() and bar.set_baud_btn.isEnabled()
+        assert cam.port in win.windowTitle()
+        assert win.calib.p["hue"].camera == 0
+        assert wait(app, lambda: win.link.counters.rows > 2)
+        win._tick1()
+        assert win.stats.copy_text().startswith("baud 115200 | kB/s ")
+        first = win.link
+        win.flight.rec_btn.setChecked(True)
+        assert wait(app, lambda: win.flight.rec_n > 0)
+
+        bar.connect_btn.click()
+        assert wait(app, lambda: disconnected(win))
+        assert bar.pill.text() == "Not connected" and bar.port_combo.isEnabled()
+        assert win.calib.cfg == {} and win.calib.p["hue"].camera is None
+        assert win.calib.p["hue"].status.text() == "no camera"
+        assert win.blobs.collect_chip.text() == "camera: unknown"
+        win.flight.tick()
+        assert "no #!CFG" in win.flight.banner.text()
+        assert win.flight.rec is None and "recording stopped" in win.console.text()
+        assert len(list(tmp_path.glob("flight_*.csv"))) == 1
+        assert win.calib.frame_row is None or win.calib.frame is not None   # frames stay
+        assert win.stats.copy_text().startswith("baud — |")
+        assert win.windowTitle().endswith("not connected")
+
+        bar.connect_btn.click()
+        assert wait(app, lambda: connected(win))
+        assert win.link is not first and win.link.counters.frames_ok == 0
+    finally:
+        win.close()
+        cam.stop()
+
+
+def test_disconnect_brings_the_camera_back_to_115200(app):
+    cam = FakeCamera().start()
+    win = MainWindow(cam.port, " test")
+    win.show()
+    win.connect_link()
+    try:
+        assert wait(app, lambda: connected(win))
+        win.bar.set_baud(460800)
+        win.bar.set_baud_btn.click()
+        assert wait(app, lambda: win.link.baud == 460800 and win.link.pending() == 0
+                    and cam.baud == 460800)
+        assert win.bar.pill.text().endswith("460800 baud")
+        win.bar.connect_btn.click()
+        assert win.bar.pill.text() == "Disconnecting…"
+        assert wait(app, lambda: disconnected(win), timeout=8)
+        assert cam.baud == P.BOOT_BAUD
+        assert not cam.revert_at            # came down by the handshake, not the revert
+        assert win.bar.pill.text() == "Not connected"
+    finally:
+        win.close()
+        cam.stop()
+
+
+def test_window_close_brings_the_camera_back_to_115200(app):
+    cam = FakeCamera().start()
+    win = MainWindow(cam.port, " test")
+    win.show()
+    win.connect_link()
+    try:
+        assert wait(app, lambda: connected(win))
+        win.send("B921600")
+        assert wait(app, lambda: win.link.baud == 921600 and win.link.pending() == 0)
+        win.close()
+        assert cam.baud == P.BOOT_BAUD
+    finally:
+        cam.stop()
+
+
+def test_a_port_that_is_not_there(app):
+    win = MainWindow("/dev/ttyNOPE_tcview")
+    win.show()
+    try:
+        win.connect_link()
+        assert wait(app, lambda: disconnected(win))
+        assert win.bar.pill.tone() == "err"
+        assert win.bar.pill.text() == "Port not found: /dev/ttyNOPE_tcview"
+        log = win.console.text()
+        assert "cannot open /dev/ttyNOPE_tcview: " in log and "No such file" in log
+        assert "unplugged, or a different port name" in log
+        assert win.bar.connect_btn.isEnabled() and win.bar.connect_btn.text() == "Connect"
+    finally:
+        win.close()
+
+
+def test_one_viewer_per_port(app):
+    """The port is opened exclusively: a second viewer is told it is in use
+    instead of quietly sharing the byte stream."""
+    cam = FakeCamera().start()
+    first = MainWindow(cam.port, " test")
+    second = MainWindow(cam.port, " test")
+    first.show()
+    second.show()
+    try:
+        first.connect_link()
+        assert wait(app, lambda: connected(first))
+        second.connect_link()
+        assert wait(app, lambda: disconnected(second))
+        assert second.bar.pill.text() == "Port in use: %s" % cam.port
+        assert "in use by another program" in second.console.text()
+        assert first.conn == "on"
+    finally:
+        second.close()
+        first.close()
+        cam.stop()
+
+
+def test_link_lost(app):
+    """Unplugged: the GUI goes disconnected and says so, and does not
+    reconnect by itself."""
+    cam = FakeCamera().start()
+    win = MainWindow(cam.port, " test")
+    win.show()
+    win.connect_link()
+    try:
+        assert wait(app, lambda: connected(win))
+        cam.stop()
+        assert wait(app, lambda: disconnected(win))
+        assert win.bar.pill.tone() == "err"
+        assert win.bar.pill.text() == "Link lost · %s" % cam.port
+        assert "link lost: " in win.console.text()
+        assert win.calib.cfg == {}
+        app.processEvents()
+        assert win.link is None and win.bar.connect_btn.text() == "Connect"
+    finally:
+        win.close()

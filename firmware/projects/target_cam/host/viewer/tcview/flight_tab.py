@@ -161,6 +161,15 @@ class FlightTab(QWidget):
     def on_cfg(self, v: dict):
         self.cfg = v
 
+    def on_disconnected(self):
+        """The link is gone: no #!CFG any more, and a recording ends here,
+        so a file never spans two connections."""
+        self.cfg = {}
+        if self.rec:
+            path, n = self.rec_path, self.rec_n
+            self.rec_btn.setChecked(False)
+            self.main._say("# [viewer] link closed: recording stopped, %s (%d rows)" % (path, n))
+
     def on_frame(self, _frame):
         self.last_frame_at = time.monotonic()
 

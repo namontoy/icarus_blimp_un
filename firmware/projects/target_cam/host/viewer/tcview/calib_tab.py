@@ -218,19 +218,10 @@ class CalibTab(QWidget):
         self.live_chk = QCheckBox("Live (a frame every loop)")
         self.live_chk.clicked.connect(lambda on: self.main.send("v1" if on else "v0"))
         gl.addWidget(self.live_chk, 0, 1)
-        gl.addWidget(QLabel("Baud:"), 1, 0)
-        bl = QHBoxLayout()
-        self.baud_combo = QComboBox()
-        for b in P.BAUDS:
-            self.baud_combo.addItem("%d  (frame %.2f s)" % (b, P.frame_seconds(W * H * 2, b)), b)
-        bl.addWidget(self.baud_combo)
-        sb = QPushButton("Set")
-        sb.clicked.connect(lambda: self.main.send("B%d" % self.baud_combo.currentData()))
-        bl.addWidget(sb)
-        gl.addLayout(bl, 1, 1)
+        # The baud choice is in the connection bar (Set baud).
         self.link_lbl = QLabel()
         self.link_lbl.setWordWrap(True)
-        gl.addWidget(self.link_lbl, 2, 0, 1, 2)
+        gl.addWidget(self.link_lbl, 1, 0, 1, 2)
         left.addWidget(g)
 
         g = QGroupBox("Colour test (what counts as the target)")
@@ -449,6 +440,21 @@ class CalibTab(QWidget):
                  "them. Press 'Save to camera' when done.", AMBER)
         self._redraw()
 
+    def on_disconnected(self):
+        """The link is gone: forget everything the camera said, as at start.
+        The frame on screen stays."""
+        self.cfg = {}
+        self.pending_cmds.clear()
+        for ctl in self.p.values():
+            ctl.forget_camera()
+        for lbl in (self.stage_lbl, self.settings_lbl):
+            lbl.setText("")
+            lbl.setStyleSheet("")
+        self.preset_lbl.setText("")
+        self.live_chk.setChecked(False)
+        self.order_btn.setText("Byte order: ?")
+        self._redraw()
+
     def on_frame(self, frame: P.Frame):
         self.frame = frame
         self.frame_row = None
@@ -496,7 +502,9 @@ class CalibTab(QWidget):
         fmt, _ = PARAMS[key]
         cmd = fmt % v
         self.pending_cmds[cmd] = self.p[key]
-        self.main.send(cmd)
+        if not self.main.send(cmd):         # not connected: nothing is in flight
+            self.pending_cmds.pop(cmd, None)
+            self.p[key].done(False)
 
     def _use_region(self):
         if self.frame is None:

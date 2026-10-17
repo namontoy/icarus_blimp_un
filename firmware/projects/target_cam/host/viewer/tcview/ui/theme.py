@@ -254,6 +254,9 @@ QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; border: 0; ba
 QScrollBar::add-page, QScrollBar::sub-page {{ background: none; }}
 
 QStatusBar {{ background: {panel}; border-top: 1px solid {border}; color: {text_muted}; }}
+QWidget#ConnBar {{ background: {panel}; border-bottom: 1px solid {border}; }}
+QWidget#ConsoleHeader, QWidget#ConsoleBody {{ background: {panel}; }}
+QLineEdit#LastLine {{ background: transparent; border: 0; padding: 0 2px; color: {text_muted}; }}
 QStatusBar::item {{ border: 0; }}
 QMenu {{ background: {raised}; border: 1px solid {border_strong}; padding: 4px; }}
 QMenu::item {{ padding: 4px 16px; border-radius: 4px; }}
@@ -272,8 +275,15 @@ class ThemeStyle(QProxyStyle):
     def __init__(self):
         super().__init__("Fusion")
 
+    def pixelMetric(self, m, opt=None, w=None):
+        if m == QStyle.PixelMetric.PM_DockWidgetSeparatorExtent:
+            return 7                    # the same grab width as GripSplitter (§2)
+        return super().pixelMetric(m, opt, w)
+
     def drawPrimitive(self, el, opt, p, w=None):
         PE = QStyle.PrimitiveElement
+        if el == PE.PE_IndicatorDockWidgetResizeHandle:
+            return self._grip(opt, p)
         if el not in (PE.PE_IndicatorCheckBox, PE.PE_IndicatorRadioButton):
             return super().drawPrimitive(el, opt, p, w)
         S = QStyle.StateFlag
@@ -313,6 +323,25 @@ class ThemeStyle(QProxyStyle):
             elif partial:
                 y = r.center().y()
                 p.drawLine(QPointF(r.left() + side * 0.27, y), QPointF(r.right() - side * 0.27, y))
+        p.restore()
+
+
+    @staticmethod
+    def _grip(opt, p):
+        """The dock separator (the console's top edge), drawn like
+        GripSplitter's handle: a dark bar with five dots."""
+        r = opt.rect
+        p.save()
+        p.fillRect(r, qcolor("splitter"))
+        p.setRenderHint(p.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        hot = bool(opt.state & QStyle.StateFlag.State_MouseOver)
+        p.setBrush(qcolor("text_faint" if hot else "border_strong"))
+        c = QPointF(r.center())
+        across = r.width() > r.height()         # a horizontal bar: dots side by side
+        for k in (-8, -4, 0, 4, 8):
+            p.drawEllipse(QPointF(c.x() + k, c.y()) if across else QPointF(c.x(), c.y() + k),
+                          1.1, 1.1)
         p.restore()
 
 

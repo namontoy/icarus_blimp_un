@@ -19,9 +19,17 @@ If we hear nothing at the new speed we drop back to 115200 ourselves, after
 waiting out the camera's revert. The same fallback runs if we are on a faster speed
 and hear only junk for 3 s, after first asking the camera down (see
 _watchdog: the camera may have rebooted, or the link may have failed under it).
+
+The port is opened exclusively, so a second viewer (or a second person on a
+shared machine) is told the port is in use instead of silently splitting
+the byte stream. A disconnect first asks the camera back to 115200
+(close()): every connection starts at 115200, and the camera's own revert
+only guards the handshake, so a camera left at a fast speed would be
+unreachable for the next viewer.
 """
 from __future__ import annotations
 
+import errno
 import queue
 import threading
 import time
@@ -34,6 +42,26 @@ from PyQt6.QtCore import QThread, pyqtSignal
 from . import protocol as P
 
 REVERT_S = 3.0      # firmware LINK_REVERT_MS
+CLOSE_S = 5.0       # how long a disconnect waits for the camera to come down to 115200
+
+# closed(kind, detail)
+STOPPED, OPEN_FAILED, LOST = "stopped", "open_failed", "lost"
+
+
+def open_error(port: str, e: Exception) -> tuple[str, str]:
+    """(short text for the pill, hint for the console) for a failed open.
+    pyserial passes the OS errno through, also for the exclusive lock."""
+    code = getattr(e, "errno", None)
+    text = str(e)
+    if code in (errno.ENOENT, errno.ENODEV, errno.ENXIO) or "No such file" in text:
+        return "Port not found: %s" % port, "unplugged, or a different port name"
+    if code in (errno.EACCES, errno.EPERM) or "Permission denied" in text:
+        return "Permission denied: %s" % port, \
+            "add your user to the `dialout` group, then log out and in"
+    if code in (errno.EBUSY, errno.EAGAIN) or "lock" in text:
+        return "Port in use: %s" % port, ("the port is in use by another program (another "
+                                          "viewer, `idf.py monitor`, a serial terminal)")
+    return "Cannot open %s" % port, ""
 
 
 @dataclass
@@ -77,6 +105,8 @@ class SerialLink(QThread):
     command_done = pyqtSignal(str, bool, str)   # cmd, accepted, reason
     state = pyqtSignal(str)                 # human-readable link state
     baud_changed = pyqtSignal(int)
+    opened = pyqtSignal()                   # the port is open, at BOOT_BAUD
+    closed = pyqtSignal(str, str)           # STOPPED / OPEN_FAILED / LOST, detail
 
     def __init__(self, port: str, parent=None):
         super().__init__(parent)
@@ -91,6 +121,8 @@ class SerialLink(QThread):
         self._parser = P.StreamParser()
         self._last_valid = time.monotonic()
         self._switch: Optional[dict] = None     # baud switch in progress
+        self._closing: Optional[float] = None   # close() deadline
+        self.open_exc: Optional[Exception] = None
 
     # ---- API (any thread) ----------------------------------------------------
 
@@ -113,6 +145,29 @@ class SerialLink(QThread):
         self._stop.set()
         self.wait(3000)
 
+    def close(self):
+        """Ask the camera back to 115200 if it is not there (bounded by
+        CLOSE_S), then close the port. Returns at once; `closed` follows.
+        Commands not yet sent are dropped; nothing else is sent."""
+        if self._closing is not None:
+            return
+        while True:
+            try:
+                self._q.get_nowait()
+            except queue.Empty:
+                break
+        if self.baud != P.BOOT_BAUD or self._switch is not None:
+            self._q.put(_Cmd("B%d" % P.BOOT_BAUD, P.BOOT_BAUD))
+        self._closing = time.monotonic() + CLOSE_S
+
+    def _closed_down(self) -> bool:
+        if self._closing is None:
+            return False
+        if time.monotonic() > self._closing:
+            return True
+        return (self.baud == P.BOOT_BAUD and self._switch is None and self._cur is None
+                and self._q.empty())
+
     # ---- thread --------------------------------------------------------------
 
     def run(self):
@@ -121,22 +176,32 @@ class SerialLink(QThread):
             s.port, s.baudrate, s.timeout = self.port, P.BOOT_BAUD, 0.02
             s.dtr = False
             s.rts = False
+            s.exclusive = True
             s.open()
         except (serial.SerialException, OSError) as e:
+            self.open_exc = e           # for open_error(): it keeps the errno
             self.state.emit("cannot open %s: %s" % (self.port, e))
+            self.closed.emit(OPEN_FAILED, str(e))
             return
         self._ser = s
         self.state.emit("connected to %s at %d" % (self.port, self.baud))
         self.baud_changed.emit(self.baud)
+        self.opened.emit()
+        kind, detail = STOPPED, ""
         try:
-            while not self._stop.is_set():
+            while not self._stop.is_set() and not self._closed_down():
                 self._read()
                 self._commands()
                 self._watchdog()
         except (serial.SerialException, OSError) as e:
             self.state.emit("link lost: %s" % e)
+            kind, detail = LOST, str(e)
         finally:
             s.close()
+        if kind == STOPPED and self.baud != P.BOOT_BAUD:
+            detail = "the camera did not come back to %d; it stays at %d until it reverts " \
+                     "or is reset" % (P.BOOT_BAUD, self.baud)
+        self.closed.emit(kind, detail)
 
     def _read(self):
         s = self._ser

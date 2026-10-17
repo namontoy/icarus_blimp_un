@@ -141,6 +141,13 @@ class ParamControl(QWidget):
             self.changed.emit(self.local)
         self._refresh()
 
+    def forget_camera(self):
+        """The link is gone: what the camera uses is unknown again. The shown
+        value stays, so a reconnect can be compared against it."""
+        self.camera = None
+        self.in_flight = False
+        self._refresh()
+
     def done(self, ok: bool):
         self.in_flight = False
         if not ok and self.camera is not None and not self.dragging():

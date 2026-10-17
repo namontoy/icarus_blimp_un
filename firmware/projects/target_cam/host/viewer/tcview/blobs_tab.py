@@ -155,6 +155,12 @@ class BlobsTab(QWidget):
         self.cfg = v
         self._refresh_collect()
 
+    def on_disconnected(self):
+        """The link is gone: whether the camera collects is unknown. The
+        samples stay."""
+        self.cfg = {}
+        self._refresh_collect()
+
     def on_frame(self, f: P.Frame):
         self.last_frame = f
 

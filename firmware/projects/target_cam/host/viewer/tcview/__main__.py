@@ -1,7 +1,8 @@
 """
 target_cam viewer.
 
-  python -m tcview --port /dev/ttyACM0     the real camera (ESP32-CAM-MB programmer)
+  python -m tcview                         choose the port in the window, then Connect
+  python -m tcview --port /dev/ttyACM0     connect to the camera at once (ESP32-CAM-MB)
   python -m tcview --fake                  a synthetic camera on a pseudo-terminal
   python -m tcview --label [DIR]           label saved frames; no camera needed
 
@@ -9,8 +10,9 @@ Four screens: "Image & calibration" (see the real pixels, tune the detector
 by hand, save frames, save to the camera's flash), "Flight data" (only the CSV
 the ESP32-S3 will receive), "Label frames" (mark balloon and background on
 saved frames, for training and scoring) and "Blobs" (collect and label the
-blobs stage 2's classifier will learn from). The console at the bottom shows
-everything else the camera says, and takes raw commands.
+blobs stage 2's classifier will learn from). The bar at the top picks the port
+and connects; the console at the bottom shows everything else the camera says,
+and takes raw commands.
 """
 from __future__ import annotations
 
@@ -18,11 +20,8 @@ import argparse
 import sys
 import time
 
-from PyQt6.QtCore import QTimer
-from PyQt6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QLineEdit,
-                             QMainWindow, QPlainTextEdit, QPushButton,
-                             QTabWidget, QVBoxLayout, QWidget)
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QSettings, Qt, QTimer
+from PyQt6.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget
 
 from . import detector as D
 from . import protocol as P
@@ -30,61 +29,69 @@ from .blobs_tab import BlobsTab
 from .calib_tab import CalibTab
 from .flight_tab import FlightTab
 from .label_tab import LabelTab
-from .link import SerialLink
+from .link import CLOSE_S, LOST, OPEN_FAILED, REVERT_S, SerialLink, open_error
 from .ui import theme
-from .ui.widgets import GripSplitter
+from .ui.shell import (ConnectionBar, ConsoleDock, PageTabs, StatsBar,
+                       counter_segments)
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, port: str, title_note: str = ""):
-        super().__init__()
-        self.setWindowTitle("target_cam viewer - %s%s" % (port, title_note))
-        self.port = port
-        self.link: SerialLink | None = None
+    """The shell (§5) around the four tabs. `port` preselects a port (and
+    `fake` lists it as the fake camera); nothing connects until
+    connect_link(), which main() calls only for --port or --fake."""
 
-        self.tabs = QTabWidget()
+    def __init__(self, port: str | None = None, title_note: str = "", fake: bool = False):
+        super().__init__()
+        self.port = port or ""              # of the current or last connection
+        self.link: SerialLink | None = None
+        self.conn = "off"                   # off / connecting / on / closing
+        self._notes = {port: title_note} if port else {}
+        self.store = QSettings("icarus_blimp", "tcview")
+
+        self.bar = ConnectionBar()
+        self.tabs = PageTabs()
         self.calib = CalibTab(self)
         self.flight = FlightTab(self)
-        self.tabs.addTab(self.calib, "Image && calibration")
-        self.tabs.addTab(self.flight, "Flight data (what the ESP32-S3 gets)")
         self.label = LabelTab()
-        self.tabs.addTab(self.label, "Label frames")
         self.blobs = BlobsTab(self)
-        self.tabs.addTab(self.blobs, "Blobs (classifier data)")
+        self.tabs.add_page(self.calib, "Image && calibration")
+        self.tabs.add_page(self.flight, "Flight data", "what the ESP32-S3 gets")
+        self.tabs.add_page(self.label, "Label frames")
+        self.tabs.add_page(self.blobs, "Blobs", "classifier data")
         self.tabs.currentChanged.connect(self._tab_changed)
-
-        console = QWidget()
-        cl = QVBoxLayout(console)
+        central = QWidget()
+        cl = QVBoxLayout(central)
         cl.setContentsMargins(0, 0, 0, 0)
-        self.log = QPlainTextEdit()
-        self.log.setReadOnly(True)
-        self.log.setMaximumBlockCount(3000)
-        self.log.setObjectName("Console")
-        theme.mono(self.log)
-        cl.addWidget(self.log)
-        ent = QHBoxLayout()
-        ent.addWidget(QLabel("Command:"))
-        self.entry = QLineEdit()
-        self.entry.setPlaceholderText("any camera command, e.g. ?  m  H350  p red  !save  "
-                                      "(the console shows the camera's # replies)")
+        cl.setSpacing(0)
+        cl.addWidget(self.bar)
+        cl.addWidget(self.tabs, 1)
+        self.setCentralWidget(central)
+
+        self.console = ConsoleDock(self)
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.console)
+        self.log, self.entry = self.console.log, self.console.entry
+        self.show_rows = self.console.show_rows
         self.entry.returnPressed.connect(self._entry)
-        ent.addWidget(self.entry, 1)
-        self.show_rows = QPushButton("Show CSV rows")
-        self.show_rows.setCheckable(True)
-        ent.addWidget(self.show_rows)
-        cl.addLayout(ent)
+        self.console.send_btn.clicked.connect(self._entry)
 
-        split = GripSplitter(Qt.Orientation.Vertical)
-        split.addWidget(self.tabs)
-        split.addWidget(console)
-        split.setStretchFactor(0, 5)
-        split.setStretchFactor(1, 1)
-        self.setCentralWidget(split)
+        self.stats = StatsBar()
+        self.statusBar().addWidget(self.stats, 1)
 
-        self.state_lbl = QLabel()
-        self.stats_lbl = QLabel()
-        self.statusBar().addWidget(self.state_lbl, 1)
-        self.statusBar().addPermanentWidget(self.stats_lbl)
+        combo = self.bar.port_combo
+        if fake and port:
+            combo.add_extra(port, "FAKE camera (%s)" % port)
+        last = self.store.value("conn/port", "", type=str)
+        if port:
+            combo.set_port(port)
+        elif last and combo.has(last):
+            combo.set_port(last)
+        elif combo.usb:
+            combo.set_port(combo.usb[0])
+        self.bar.set_baud(self.store.value("conn/baud", P.BOOT_BAUD, type=int))
+        self.bar.baud_combo.currentIndexChanged.connect(
+            lambda _i: self.store.setValue("conn/baud", self.bar.baud()))
+        self.bar.connect_btn.clicked.connect(self._connect_clicked)
+        self.bar.set_baud_btn.clicked.connect(lambda: self.send("B%d" % self.bar.baud()))
 
         self._t1 = QTimer(self, interval=1000)
         self._t1.timeout.connect(self._tick1)
@@ -93,35 +100,142 @@ class MainWindow(QMainWindow):
         self._t10.timeout.connect(self.flight.tick)
         self._t10.start()
         self._last_rows = (time.monotonic(), 0)
+        self._set_conn("off")
+        self._tick1()
+        self._sized_console = False
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        if not self._sized_console:
+            # A dock starts at its content's size hint, which is half the
+            # window here. A quarter of it leaves the tabs their room.
+            self._sized_console = True
+            QTimer.singleShot(0, lambda: self.resizeDocks(
+                [self.console], [max(150, self.height() // 4)], Qt.Orientation.Vertical))
 
     # ---- link ----------------------------------------------------------------
 
     def connect_link(self):
-        self.link = SerialLink(self.port)
-        self.link.event.connect(self._event)
-        self.link.command_done.connect(self._done)
-        self.link.state.connect(self._state)
-        self.link.baud_changed.connect(lambda b: self._say("# [viewer] port now at %d baud" % b))
-        self.link.start()
+        """Open the port chosen in the bar. Returns at once: `opened` or
+        `closed` from the link says how it went."""
+        if self.link is not None:
+            return
+        port = self.bar.port_combo.port()
+        if not port:
+            self.bar.pill.set("err", "No port chosen")
+            self._say("# [viewer] no port chosen: pick one under Port, or type its path", "err")
+            return
+        self.port = port
+        link = SerialLink(port)
+        link.event.connect(self._event)
+        link.command_done.connect(self._done)
+        link.state.connect(self._state)
+        link.baud_changed.connect(self._baud_changed)
+        link.opened.connect(self._opened)
+        link.closed.connect(lambda kind, detail, l=link: self._closed(l, kind, detail))
+        self.link = link
+        self._set_conn("connecting")
+        link.start()
+
+    def disconnect_link(self):
+        """Back to 115200 first if needed (bounded), then close the port.
+        Returns at once; the GUI goes disconnected when the link has closed."""
+        if self.link is None or self.conn == "closing":
+            return
+        if self.link.baud != P.BOOT_BAUD:
+            self._say("# [viewer] asking the camera back to %d before closing the port"
+                      % P.BOOT_BAUD)
+        self._set_conn("closing")
+        self.link.close()
+
+    def _connect_clicked(self):
+        if self.conn == "off":
+            self.connect_link()
+        else:
+            self.disconnect_link()
+
+    def _opened(self):
+        self._last_rows = (time.monotonic(), 0)
+        self.store.setValue("conn/port", self.port)
+        self._set_conn("on")
         # Ask for the config at once: the camera may have booted long ago.
         self.send("k")
 
-    def send(self, cmd: str):
-        if self.link is None:
-            return
+    def _closed(self, link: SerialLink, kind: str, detail: str):
+        if link is not self.link:
+            return                          # a link the window already let go of
+        link.wait(2000)
+        self.link = None
+        port = link.port
+        if kind == OPEN_FAILED:
+            short, hint = open_error(port, link.open_exc or Exception(detail))
+            self.bar.pill.set("err", short)
+            if hint:
+                self._say("# [viewer] %s: %s" % (short.split(":")[0].lower(), hint), "err")
+        elif kind == LOST:
+            self.bar.pill.set("err", "Link lost · %s" % port)
+        else:
+            self.bar.pill.set("neutral", "Not connected")
+            if detail:
+                self._say("# [viewer] " + detail, "err")
+        self._set_conn("off", keep_pill=True)
+        self.bar.port_combo.refresh()
+        for tab in (self.calib, self.flight, self.blobs):
+            tab.on_disconnected()
+        self._tick1()
+
+    def _set_conn(self, state: str, keep_pill: bool = False):
+        self.conn = state
+        bar = self.bar
+        off = state == "off"
+        bar.connect_btn.setText("Connect" if off else "Disconnect")
+        theme.set_role(bar.connect_btn, "primary" if off else "")
+        bar.connect_btn.setEnabled(state != "closing")
+        bar.port_combo.setEnabled(off)
+        bar.set_baud_btn.setEnabled(state == "on")
+        if state == "connecting":
+            bar.pill.set("warn", "Connecting…")
+        elif state == "on":
+            self._show_connected()
+        elif state == "closing":
+            bar.pill.set("warn", "Disconnecting…")
+        elif not keep_pill:
+            bar.pill.set("neutral", "Not connected")
+        self.setWindowTitle("target_cam viewer - %s" % (
+            "not connected" if off else self.port + self._notes.get(self.port, "")))
+        self._show_offline_note()
+
+    def _show_connected(self):
+        self.bar.pill.set("ok", "Connected · %s · %d baud" % (self.port, self.link.baud))
+
+    def _show_offline_note(self):
+        self.bar.offline_note.setVisible(
+            self.conn == "off" and self.tabs.current_page() is self.label)
+
+    def _baud_changed(self, b: int):
+        self._say("# [viewer] port now at %d baud" % b)
+        self.bar.set_baud(b)                # the combo shows the speed in use
+        if self.conn == "on":
+            self._show_connected()
+
+    def send(self, cmd: str) -> bool:
+        if self.link is None or self.conn == "closing":
+            self._say("# [viewer] not connected: '%s' not sent" % cmd, "err")
+            return False
         self._say("> " + cmd)
         self.link.send(cmd)
+        return True
 
-    def _say(self, text):
-        self.log.appendPlainText(text)
+    def _say(self, text, kind=None):
+        self.console.say(text, kind)
 
     def _state(self, text):
-        self.state_lbl.setText(text)
-        self._say("# [viewer] " + text)
+        bad = text.startswith(("cannot open", "link lost"))
+        self._say("# [viewer] " + text, "err" if bad else None)
 
     def _done(self, cmd, ok, reason):
         if not ok:
-            self._say("# [viewer] command %r failed: %s" % (cmd, reason))
+            self._say("# [viewer] command %r failed: %s" % (cmd, reason), "err")
         self.calib.on_command_done(cmd, ok, reason)
 
     def _event(self, ev):
@@ -147,7 +261,8 @@ class MainWindow(QMainWindow):
         elif isinstance(ev, P.Nak):
             self._say("#!NAK %s -- %s" % (ev.cmd, ev.reason))
         elif isinstance(ev, P.FrameError):
-            self._say("# [viewer] %s %s dropped: %s" % (ev.kind.lower(), ev.seq, ev.reason))
+            self._say("# [viewer] %s %s dropped: %s" % (ev.kind.lower(), ev.seq, ev.reason),
+                      "err")
         elif isinstance(ev, P.Baud):
             self._say("#!BAUD %d" % ev.baud)
 
@@ -155,33 +270,41 @@ class MainWindow(QMainWindow):
         cmd = self.entry.text().strip()
         self.entry.clear()
         if cmd:
+            self.entry.remember(cmd)
             self.send(cmd)
 
     def _tab_changed(self, i):
-        if self.tabs.widget(i) is self.flight:
+        page = self.tabs.page(i)
+        # Entering Flight data puts the link in flight state; with no link
+        # there is nothing to put right.
+        if page is self.flight and self.link is not None:
             self.flight.entered()
-        elif self.tabs.widget(i) is self.label:
+        elif page is self.label:
             self.label.entered()
+        self._show_offline_note()
 
     def _tick1(self):
         self.calib.tick()
         self.blobs.tick()
-        if self.link is None:
+        if self.link is None or self.conn != "on":
+            self.stats.set_segments(counter_segments(None, 0))
             return
         c = self.link.counters
         t0, n0 = self._last_rows
         now = time.monotonic()
         rps = (c.rows - n0) / (now - t0) if now > t0 else 0
         self._last_rows = (now, c.rows)
-        self.stats_lbl.setText(
-            "%d baud | %.1f kB/s | rows %.1f/s | frames ok %d bad %d | blobs ok %d bad %d | "
-            "junk lines %d | NAK %d retries %d timeouts %d" % (
-                self.link.baud, c.rate() / 1000, rps, c.frames_ok, c.frames_bad,
-                c.blobs_ok, c.blobs_bad, c.junk_lines, c.naks, c.retries, c.timeouts))
+        self.stats.set_segments(counter_segments(self.link, rps))
 
     def closeEvent(self, e):
-        if self.link is not None:
-            self.link.stop()
+        link, self.link = self.link, None
+        if link is not None:
+            # As Disconnect: the camera back to 115200 first, or the next
+            # connection hears only junk. close() is bounded by CLOSE_S, and
+            # a fallback inside it may sleep REVERT_S more.
+            link.close()
+            if not link.wait(int((CLOSE_S + REVERT_S + 1) * 1000)):
+                link.stop()
         if self.flight.rec:
             self.flight.rec_btn.setChecked(False)
         self.label.save_if_dirty()
@@ -217,8 +340,6 @@ def main(argv=None):
     ap.add_argument("--quit-after", type=float, metavar="S",
                     help="close after S seconds (smoke tests)")
     args = ap.parse_args(argv)
-    if not args.port and not args.fake and args.label is None:
-        ap.error("give --port PORT, --fake or --label")
 
     app = QApplication(sys.argv[:1])
     theme.apply(app)        # before any window: pyqtgraph reads its colours at creation
@@ -238,13 +359,14 @@ def main(argv=None):
         from .fake_cam import FakeCamera
         fake = FakeCamera(corrupt_every=args.fake_corrupt).start()
         port, note = fake.port, " (FAKE camera)"
-    win = MainWindow(port, note)
+    win = MainWindow(port, note, fake=fake is not None)
     # 1450 x 1000 shows the Calib tab with every panel open; on a smaller
     # screen take what there is (the controls column scrolls).
     avail = app.primaryScreen().availableGeometry()
     win.resize(min(1450, avail.width()), min(1000, avail.height()))
     win.show()
-    win.connect_link()
+    if port:                # --port or --fake; with neither, the window opens disconnected
+        win.connect_link()
     if args.quit_after:
         QTimer.singleShot(int(args.quit_after * 1000), win.close)
     rc = app.exec()
