@@ -102,7 +102,7 @@ def test_bench_session(app, rig):
                 and win.link.pending() == 0, timeout=15)
     assert wait(app, lambda: flight.banner.text().startswith("FLIGHT-IDENTICAL"), timeout=6)
     flight.tick()
-    assert "rows/s" in flight.health.text()
+    assert "rows/s" in flight.health.copy_text()
 
     # A stage with no model is accepted, and falls back visibly: #!CFG and
     # every v2 row say what really runs. The colour table exists and the
@@ -116,7 +116,7 @@ def test_bench_session(app, rig):
     win.send("!stage 9")
     assert wait(app, lambda: win.link.counters.naks >= 3)
     flight.tick()
-    assert "dt != 80" in flight.health.text() and "stage      1 running" in flight.health.text()
+    assert "dt != 80" in flight.health.copy_text() and "stage      1 running" in flight.health.copy_text()
 
 
 def test_camera_revert_when_pc_never_confirms(app):
