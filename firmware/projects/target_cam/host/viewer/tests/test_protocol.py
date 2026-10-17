@@ -1,7 +1,9 @@
 """The stream splitter, on text, CSV and framed binary split at random read
-boundaries, plus the ways a frame can arrive broken."""
+boundaries, plus the ways a frame can arrive broken, and the #!BLOB records of
+'!collect 1'."""
 import random
 
+import numpy as np
 import pytest
 
 from tcview import protocol as P
@@ -174,3 +176,68 @@ def test_crc_that_looks_like_a_float_is_still_a_frame():
     p = P.StreamParser()
     ev = p.feed(b"#!FRAME seq=1 t_ms=2 w=1 h=1 fmt=rgb565be len=2 crc=76555e46\r\n\x00\x00")
     assert len(ev) == 1 and isinstance(ev[0], P.FrameError) and ev[0].reason == "CRC mismatch"
+
+
+# ---- #!BLOB records ('!collect 1') -------------------------------------------
+
+def blob_packet(seq=9, t_ms=12345, k=1, crop_seed=0, feat=None):
+    rng = random.Random(crop_seed)
+    crop = np.array([rng.randrange(65536) for _ in range(P.CROP * P.CROP)],
+                    np.uint16).reshape(P.CROP, P.CROP)
+    crop[0, :3] = [0x0A0D, 0x0D0A, 0x0A0A]         # newline bytes in the payload
+    feat = feat if feat is not None else [0.613, -0.37, 11.214, 160.092, 1e-7, 0, -0.0,
+                                          25.443, 24.335, 0.0, 0.384, 7.156]
+    pkt = P.encode_blob(seq, t_ms, k, 2, feat, crop, 80.5, 60.25, 1282, (60, 40, 101, 80),
+                        (49, 28, 63), stage=1, conf=-1, fw="v-test")
+    return pkt, crop, np.array(feat, np.float32)
+
+
+def test_blob_record_round_trip():
+    pkt, crop, feat = blob_packet()
+    p = P.StreamParser()
+    ev = p.feed(pkt)
+    assert kinds(ev) == ["BlobRec", "End"]
+    r = ev[0]
+    assert (r.seq, r.t_ms, r.k, r.n, r.stage, r.csv, r.fv, r.fw) == \
+           (9, 12345, 1, 2, 1, P.CSV_VERSION, P.FEAT_VERSION, "v-test")
+    assert (r.cx, r.cy, r.area, r.box, r.crop_box, r.conf) == \
+           (80.5, 60.25, 1282, (60, 40, 101, 80), (49, 28, 63), -1.0)
+    assert np.array_equal(r.crop, crop) and r.crop.dtype == np.uint16
+    assert np.allclose(r.feat, feat, rtol=1e-6, atol=0) and r.feat.shape == (P.FEAT_N,)
+    assert r.rgb().shape == (P.CROP, P.CROP, 3)
+    assert (p.blobs_ok, p.blobs_bad, p.frames_ok, p.frames_bad) == (1, 0, 0, 0)
+
+
+def test_broken_blob_is_a_blob_error_and_resyncs():
+    pkt, _, _ = blob_packet()
+    k = len(pkt) - 300
+    broken = pkt[:k] + b"W (1) x\r\n" + pkt[k:]
+    p = P.StreamParser()
+    ev = p.feed(broken + ROW.encode() + b"\r\n" + blob_packet(seq=10)[0])
+    err = [e for e in ev if isinstance(e, P.FrameError)]
+    assert len(err) == 1 and err[0].kind == "BLOB" and err[0].reason == "CRC mismatch"
+    assert any(isinstance(e, P.Row) for e in ev)
+    assert [e.seq for e in ev if isinstance(e, P.BlobRec)] == [10]
+    assert (p.blobs_ok, p.blobs_bad, p.frames_bad) == (1, 1, 0)
+
+
+@pytest.mark.parametrize("seed", range(10))
+def test_frame_row_and_blobs_any_chunking(seed):
+    """The order '!collect 1' plus 'v1' puts on the wire: frame, row, records."""
+    data = payload(seed)
+    b0, c0, _ = blob_packet(seq=8, k=0, crop_seed=seed)
+    b1, c1, _ = blob_packet(seq=9, k=1, crop_seed=seed + 100)
+    wire = P.encode_frame(7, 12345, data) + ROW.encode() + b"\r\n" + b0 + b1
+    p = P.StreamParser()
+    ev = [e for e in feed_chunked(p, wire, random.Random(seed)) if not isinstance(e, P.End)]
+    assert kinds(ev) == ["Frame", "Row", "BlobRec", "BlobRec"]
+    assert ev[0].data == data
+    assert np.array_equal(ev[2].crop, c0) and np.array_equal(ev[3].crop, c1)
+    assert ev[0].t_ms == ev[1].v["t_ms"] == ev[2].t_ms == ev[3].t_ms
+    assert (p.frames_ok, p.blobs_ok, p.frames_bad, p.blobs_bad) == (1, 2, 0, 0)
+
+
+def test_blob_header_with_the_wrong_crop_size_is_not_a_record():
+    pkt, _, _ = blob_packet()
+    ev = P.StreamParser().feed(pkt.replace(b"cw=24", b"cw=16", 1))
+    assert not any(isinstance(e, P.BlobRec) for e in ev)

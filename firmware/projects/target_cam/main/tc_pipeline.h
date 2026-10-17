@@ -28,6 +28,7 @@
 #include <stdint.h>
 
 #include "blob_detect.h"
+#include "blob_feat.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -53,7 +54,17 @@ typedef struct {
     int32_t t_b_us;             /* blob features + classifier                 */
     int32_t t_c_us;             /* crops + CNN                                */
     int32_t t_total_us;         /* the whole call                             */
+    int     n_feat;             /* entries of feat[] filled: r.n_report when
+                                   features were computed, else 0             */
+    blob_feat_t feat[BLOB_MAX_REPORT];  /* per reported blob (blob_feat.h)    */
 } tc_result_t;
+
+/* tc_pipeline_run() flags. */
+#define TC_RUN_FEATURES 0x1     /* compute blob features even below stage 2,
+                                   which needs them anyway: for collecting
+                                   training data (!collect), and for timing
+                                   them on the camera (t_b_us) before any
+                                   classifier exists                          */
 
 /* Highest stage the given models allow, 0..TC_STAGE_MAX. */
 int tc_stage_available(const tc_models_t *m);
@@ -75,13 +86,14 @@ int tc_pipeline_mask(const blob_cfg_t *cfg, int stage_req, const tc_models_t *m,
 
 /*
  * Run the stages up to tc_stage_effective(stage_req, m) on one frame.
+ * `flags` is TC_RUN_* or 0.
  * `work` is blob_detect's workspace (blob_workspace_bytes(cfg) bytes, 4-byte
  * aligned). `now_us` may be NULL, and then every time field is 0.
  * Returns out->r.found.
  */
-int tc_pipeline_run(const blob_cfg_t *cfg, int stage_req, const tc_models_t *m,
-                    const uint8_t *frame, void *work, blob_clock_fn now_us,
-                    tc_result_t *out);
+int tc_pipeline_run(const blob_cfg_t *cfg, int stage_req, int flags,
+                    const tc_models_t *m, const uint8_t *frame, void *work,
+                    blob_clock_fn now_us, tc_result_t *out);
 
 /* Standard CRC-32 (zlib.crc32, reflected, poly 0xEDB88320, init and xorout
    0xFFFFFFFF; "123456789" -> 0xCBF43926). The camera's link uses the ROM

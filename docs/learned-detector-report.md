@@ -7,8 +7,9 @@ programmer, ESP-IDF v5.5.5. The task statement is
 [`claude_code_prompt_learned detector.md`](claude_code_prompt_learned%20detector.md).
 
 This report covers Phase 0 (groundwork), Phase A1 (labelled frames and the
-stage 0 baseline), Phase A2 (the learned colour table, stage 1, §8) and the
-plan for the next frames (§9). Later phases append to it. Each section keeps
+stage 0 baseline), Phase A2 (the learned colour table, stage 1, §8), the
+plan for the next frames (§9) and Phase B1 (blob features and data collection
+for the stage 2 classifier, §10). Later phases append to it. Each section keeps
 **measured** (numbers from the board or from `eval_frames.py` on labelled
 frames) apart from **reasoned** (what the numbers suggest, not yet tested).
 §7 lists what is not established.
@@ -470,3 +471,158 @@ balloon, and any other is not. Saved frames also survive a retrained table,
 because the blobs can be rebuilt from the pixels. Blobs collected live with
 `!collect` cannot be. Their limit is volume: at about 3.3 s per frame they
 give tens of blobs, against hundreds from `!collect`.
+
+---
+
+## 10. Phase B1: blob features and data collection (2026-10-16)
+
+Stage 2 will be a classifier that looks at each blob the colour stage
+reports and decides "balloon or not". B1 builds what it needs: the features,
+a way to collect them from the camera, and a way to label them. **Nothing
+decides anything yet.** At stage 2 the camera still falls back to stage 1,
+because there is no classifier model.
+
+### 10.1 What was built, and why each choice
+
+- **`main/blob_feat.{h,c}`: 12 features and a 24 × 24 crop per reported
+  blob.** The features are `fill`, `log_aspect`, `hue_spread`, `sat_mean`,
+  `sat_std`, `val_mean`, `highlight`, `edge`, `texture`, `ring`, `cy_norm`
+  and `log_area`. The reason for each is in the file's header. In short, they
+  measure shape (a sphere fills π/4 of its box at aspect 1), surface (mylar
+  reflects the room and has a specular highlight; paint is flat) and context
+  (a fragment of a larger red region has red just outside its box). The plan
+  listed about 10. `texture` (gradient inside the blob) and `ring` (colour
+  just outside the box) were added because the false blobs in §5 are pieces
+  of larger surfaces (louvred door panels, furniture). A piece can have a
+  balloon-like box, and its colour already passed the colour test.
+- **Portable C, integer per-pixel arithmetic.** The same file runs on the
+  camera and, through `libblob_detect.so`, on the PC. So the classifier is
+  trained on the numbers the camera will compute in flight, not on a Python
+  re-implementation of them. Hue spread is a circular statistic, which
+  normally needs `sinf`/`cosf`. A Q14 sine table replaces them, so the
+  per-pixel sums are bit-identical on both machines. Only the final `logf` and
+  `sqrtf` can differ, by an ulp.
+- **Cost bounded by the blob, not the frame.** The box is sampled on the
+  coarsest grid that keeps at most 1024 samples, so a blob filling the frame
+  costs about what a 32 × 32 one does. Stage 2 has to fit in the 80 ms
+  period beside stage 1's ~9 ms (§8.5).
+- **`!collect 1` sends one `#!BLOB` record per reported blob, every 4th
+  frame, and on every frame sent to the PC.** A record is about 1.44 kB: the features as text, plus the crop as
+  1152 binary bytes, framed and CRC-checked like a `#!FRAME`. Every 4th
+  frame, because a record costs 125 ms on the wire at 115200, and
+  consecutive frames are near-duplicates anyway. A frame that goes to the PC
+  (`g`, `v1`) always carries its records, so the agreement check works at
+  115200 (added after the first board session, below). Collection is a
+  bench mode: the flight screen turns it off and its banner names it.
+- **The crop is 24 × 24, from a square 1.5 × the blob's longer side.** The
+  margin keeps the balloon's edge and some background, which is what tells a
+  balloon from a red patch on a larger object. 24 rather than 16, because a
+  24 crop can be reduced to 16 exactly (`blob_crop_down16`, tested) and a 16
+  crop cannot be enlarged back. The CNN's input size is Phase C's decision,
+  and this data serves either. Area averaging uses integers only, so the PC
+  reproduces the crop bit for bit.
+- **`BLOB_FEAT_VERSION` (`fv`) travels with every record and dataset.**
+  Changing a feature's definition changes the number. `blobset.save` refuses
+  to mix versions, so a classifier is never fed features computed by rules it
+  wasn't trained on.
+- **Two sources of labelled blobs, one format (`tcview/blobset.py`).** The
+  first is live records, labelled by hand in the new Blobs tab. The second is
+  blobs rebuilt from saved, hand-labelled frames (§9.3): the tab's "Add from
+  labelled frames…", or `host/tools/blobs_from_frames.py`. Saved frames are
+  labelled automatically from the paint, by the rule the frame scores use: a
+  blob is a balloon if its centroid lies in a painted balloon's box.
+- **Board/PC agreement check, built into the tab.** When a record arrives for
+  a frame that was also sent (`v1`, or `g`), the PC runs the same pipeline on
+  those pixels and compares. Features must match to the record's 6
+  significant digits, and the crop must match bit for bit. This is the B1
+  board check, and it runs throughout collection, not once.
+
+### 10.2 Deviations from the plan
+
+- **Features run in a separate scan after detection, not inside
+  `blob_detect`'s labelling pass.** The plan put them in "pass 4". They are
+  computed in `tc_pipeline_run`, after the blobs are known, by scanning each
+  reported blob's box (plus the ring). This keeps `blob_detect.c`, which is
+  tested and committed, unchanged. It means the features only cost anything
+  for the ≤ 4 reported blobs, never for the others. The price is the
+  approximation in §10.4: the box scan re-finds the blob's pixels by the
+  colour test.
+- **The Blobs tab does not pre-fill labels from "the current stage's
+  verdict".** No stage has a per-blob verdict yet (`conf` is −1 below stage
+  2). `blobset.verdict()` will pre-fill from `conf` once stage 2 exists.
+  Live records start unlabelled ("?"). Saved frames are labelled from the
+  paint, which is better than any verdict.
+- **Labelling keys:** a click selects (and shows the features), a
+  double-click cycles one tile, and B / N / U label the whole selection. A
+  single click that also changed the label would make it impossible to look
+  at a blob without relabelling it.
+- **`!stage 2` turns the features on** although no classifier exists. Stage 2
+  then falls back to 1, but `t_b_us` measures what stage 2's features will
+  cost, at 80 ms, before there is a model.
+
+### 10.3 Measured (PC, no board yet)
+
+- `make -C host test`: the three C suites pass under ASan and UBSan
+  (`test_blob_feat`: fill, aspect, highlight fraction, hue across 0/360, ring
+  band, stride rule, byte order, crop rule, all with exact expected values).
+  The viewer's 98 tests pass, including the crop and its 16 × 16 reduction
+  against a numpy re-implementation (bit for bit, at the frame edges, both
+  byte orders), `#!BLOB` parsing at any read chunking, and a whole collection
+  session against the fake camera, where every record agrees with the PC.
+- The firmware builds with no warnings.
+- **The committed test frames give 16 stage-1 blobs: 14 balloons and 2 not**
+  (`blobs_from_frames.py host/testdata`). Both false blobs are clipped
+  white, a lamp (`red_s1/130cm_wood`) and a window (`red_s2/130cm_window`),
+  with mean saturation 1–3 and mean value 255. The colour table accepts pure
+  white because the mylar highlights were labelled as balloon (§3.2). So
+  `sat_mean` alone would reject both. **Two negatives are an anecdote, not a
+  training set.** They show that the features measure what they were meant
+  to, and that stage 1's remaining false blobs are not the "red door" kind
+  the features were mostly designed for.
+
+### 10.4 Approximations and what is not established
+
+- **The blob's pixels are re-found as the box pixels that pass the colour
+  test.** A second blob reaching into the box, or matching pixels that the
+  cell pooling discarded, count as this blob's. For overlapping boxes the
+  features mix. Reasoned to be rare at blimp ranges, but not measured.
+- **For large blobs, every feature except fill, aspect, cy and area is
+  estimated from ≤ 1024 samples.**
+- **Not yet on the board:** the agreement check against real camera records,
+  the collection rate, and the features' cost (`t_b_us`) at stage 1 on real
+  scenes. These are the B1 board check.
+- **Whether any feature separates balloons from real clutter** is Phase B2's
+  measurement, and needs hundreds of labelled blobs from more than one session
+  (§9).
+
+### 10.5 First board session: the link hang (2026-10-17)
+
+**Observed (user report):** with the link switched above 115200,
+`!collect 1` and then `v1`, some records arrived in the Blobs tab. Then the
+viewer's terminal showed only noise characters and the camera answered no
+command. The user reports that the ESP32-CAM-MB cannot run faster than
+460800, which agrees with the failures logged on 2026-10-14
+(`docs/artifacts/target_cam and tcview.md`, link table).
+
+**Cause (reasoned from the code, not measured):** the two ends were left at
+different speeds. After a confirmed switch the camera stays at the new speed
+for good; its 3 s revert only guards the handshake. The viewer's watchdog
+drops to 115200 after 3 s of junk at a faster speed, on the assumption that
+the camera rebooted. If the link instead fails under the image traffic, the
+camera is still up at the fast speed, and from then on each side hears the
+other as noise. A replug recovers, because every boot starts at 115200.
+
+**Fixes:**
+- The watchdog first sends `B115200` at the fast speed, then follows. A
+  short command can get through a link that cannot carry a 38 kB frame. To a
+  camera that really rebooted, the request is a few bytes of noise.
+  `test_gui_fake.py` reproduces the hang with a fake whose output turns to
+  noise at the fast speed. It fails without the fix and passes with it.
+- A frame sent to the PC (`g`, `v1`) now always carries its records. Before,
+  records went out on every 4th frame only, so at 115200 most grabs had
+  nothing to compare against. That is why the board check had asked for
+  921600. It now runs at 115200 with `g`.
+
+Not established: whether the bridge, the USB host or the ESP32 side corrupts
+the fast link, and whether the `B115200` request gets through on the real
+bridge.

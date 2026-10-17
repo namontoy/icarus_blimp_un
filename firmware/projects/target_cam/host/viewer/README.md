@@ -4,13 +4,14 @@ A PC program that shows what the ESP32-CAM sees and what it says, so the colour
 detector can be calibrated by hand. Everything goes over the same USB serial
 cable used for flashing.
 
-Three screens:
+Four screens:
 
 | Screen | Link | What it shows | Same as flight? |
 |---|---|---|---|
-| **Image & calibration** | Any baud (921600 is typical), image on | The camera's raw RGB565 pixels at ×4, a mask overlay, sliders, and pixel/region colour readouts | **No.** Sending a 38 kB frame blocks the camera's loop, so `dt_ms` and FPS are not representative. The screen says so. |
+| **Image & calibration** | 115200 (at most 460800: faster fails on the ESP32-CAM-MB), image on | The camera's raw RGB565 pixels at ×4, a mask overlay, sliders, and pixel/region colour readouts | **No.** Sending a 38 kB frame blocks the camera's loop, so `dt_ms` and FPS are not representative. The screen says so. |
 | **Flight data** | 115200, image off | Only the CSV rows, as a dashboard: target status, the 4 blobs, a field-of-view plot, 30 s plots, link health, and the last raw line | **Yes**, when the green FLIGHT-IDENTICAL banner is shown. The banner is driven by the camera's own `#!CFG` report, not by what the viewer asked for. |
 | **Label frames** | None needed | Saved frames, painted by hand as balloon / background, with the detector's boxes and its score against the labels | Not applicable: it works on files. |
+| **Blobs (classifier data)** | 115200, `!collect 1`, `g` for frames | One 24×24 crop per blob the camera reported, with its 12 features, labelled by hand; plus blobs from labelled frames; saved as a dataset for the stage 2 classifier | **No.** Records slow the loop like frames do. |
 
 The overlay and the PC-side boxes are computed by the **same C file the camera
 runs** (`main/blob_detect.c`, built as `host/libblob_detect.so` and loaded
@@ -154,6 +155,40 @@ the same library. Under it is the live score against the labels: the same
 TP / FN / FP / split rule and pixel precision/recall as `eval_frames.py`,
 because both import `tcview/labels.py`.
 
+## Blobs screen
+
+The data for stage 2, the blob classifier (Phase B). Each tile is one blob:
+its 24×24 crop at ×3, framed grey (unlabelled, "?"), green (balloon) or red
+(not a balloon). Click a tile to see its crop at ×8 and its 12 features.
+
+- **Collect from camera** sends `!collect 1`; the button follows the camera's
+  `#!CFG collect=`, not the click. Every 4th frame, and every frame it
+  sends to the PC (`g`, `v1`), the camera then sends one `#!BLOB` record per
+  reported blob. They arrive unlabelled. 115200 is enough: about 5 blobs/s
+  with no image.
+- **Add from labelled frames…** runs the camera's pipeline (stage 1) on every
+  saved frame under a folder that has a `.labels.png`, and labels each blob
+  from the paint: balloon if its centroid is in a painted balloon's box, not
+  a balloon otherwise. A frame already in the set is not added twice.
+- **Label**: select tiles (click, shift/ctrl-click, or drag) and press **B**
+  (balloon), **N** (not) or **U** (unlabelled). A double-click cycles one tile.
+- **Save dataset…** writes every sample, labelled or not, as `.npz`
+  (`tcview/blobset.py` documents the arrays; `np.load(allow_pickle=False)`
+  reads it). **Load dataset…** appends one. If the window closes with unsaved
+  samples, they are written to `target_cam/data/blobs/blobs_autosave_*.npz`
+  rather than lost.
+
+**The agreement line is the board check.** The classifier will be trained on
+features the PC computes and run on features the camera computes, so the two
+must be the same numbers. With frames on as well (`v1`, or `g` for one), every
+record whose frame arrived is re-run on the PC through the same C code and
+compared: features to the 6 significant digits the record carries, crops bit
+for bit. Green "board = PC" means every checked record agreed; red names the
+worst feature and the size of the difference.
+
+`host/tools/blobs_from_frames.py DIR... -o out.npz` builds the same dataset
+from labelled frames without the GUI.
+
 ## Protocol (firmware ↔ viewer)
 
 The text protocol stays readable in a plain terminal and in `target_monitor.py`.
@@ -166,13 +201,15 @@ The machine lines all start with `#!`:
 | `#!CAL ok\|refused hue= spread= sat= val=` | The result of `c`. |
 | `#!BAUD <n>` | Printed just before the camera changes speed (and on the 3 s revert). |
 | `#!FRAME seq= t_ms= w=160 h=120 fmt=rgb565be len=38400 crc=<hex>` | Followed by exactly `len` raw bytes, then `\n#!END seq=`. The CSV row for the same frame comes next. |
+| `#!BLOB seq= t_ms= k= n= stage= csv= fv= fw= c= area= box= crop= conf= feat= cw=24 fmt=rgb565le len=1152 crc=<hex>` | `!collect 1`: blob *k* of the row with the same `t_ms`, after that row. 1152 bytes of 24×24 crop, then `\n#!END seq=`. Framed and checked like a frame; frames and records share `seq`. The format is in the target_cam README. |
 
 - The payload is written with `uart_write_bytes()`, bypassing the console's
   `\n`→`\r\n` translation.
 - The CRC is CRC-32 (zlib's), checked against the firmware with the
   `"123456789"` → `CBF43926` vector that `link_init()` prints at boot.
 - A log line from another task can land inside a frame. The CRC catches it: the
-  viewer drops that frame and resyncs on the next `#!FRAME`.
+  viewer drops that frame and resyncs on the next `#!FRAME` or `#!BLOB`. The
+  status bar counts frames and blob records, ok and bad, separately.
 - A truncated frame (the camera reset mid-transfer) times out. Its bytes are
   re-read as text, so the boot log after it is not lost.
 - The commands that touch flash are whole words (`!save`, `!load`, `!reset`).
@@ -189,7 +226,8 @@ python -m pytest -q
 - **`test_protocol.py`:** the stream splitter on mixed text, CSV and binary
   frames cut at random read boundaries. It also covers CRC parity with the
   firmware, a log line injected mid-frame, truncated frames, bad headers and
-  binary noise.
+  binary noise; and `#!BLOB` records: round trip, a broken record (a BLOB
+  error, not a frame error) and frame + row + records at any chunking.
 - **`test_detector.py`:** the ctypes binding against the C suite's synthetic
   disc. `blob_mask` agrees with `blob_pixel_matches`, and the sampling and
   calibration rule match `c`.
@@ -202,3 +240,13 @@ python -m pytest -q
   (including the diagonal case and the camera's centroid convention), the
   rest-to-background band, the scoring rules, `eval_frames.py` on a synthetic
   set, and the Label tab: paint, save on frame change, reload, undo.
+- **`test_blobfeat.py`:** the crop and its 16×16 reduction against a numpy
+  re-implementation, bit for bit, at the frame edges and both byte orders; a
+  disc's features; pipeline features equal `blob_features()`; the dataset's
+  auto-labels, `.npz` round trip and version check; `blobs_from_frames.py`;
+  and the agreement check catching a changed crop and feature.
+- **`test_gui_fake.py`** also collects from the fake camera at 115200 with
+  `g`, as on the bench: every record must agree with the PC, then labels and
+  saves. And it makes the fake's output noise after a switch to 460800 with
+  image on (the 2026-10-17 hang): the viewer must ask the camera down to
+  115200 and both must end up there, talking.

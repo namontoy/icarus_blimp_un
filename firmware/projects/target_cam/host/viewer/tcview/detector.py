@@ -2,7 +2,7 @@
 The camera's own detector, called from Python.
 
 host/libblob_detect.so is the camera's portable sources (../main/blob_detect.c,
-tc_pipeline.c and color_lut.c, the list is SRC in host/Makefile) compiled for
+tc_pipeline.c, color_lut.c and blob_feat.c, the list is SRC in host/Makefile) compiled for
 this PC: the same files the firmware runs. So the viewer's mask overlay, its per-pixel
 H/S/V readout and its region statistics are the camera's arithmetic, not a
 Python re-implementation that could drift from it (the hue of a pixel, for
@@ -27,7 +27,8 @@ MAIN_DIR = HOST_DIR.parent / "main"
 LIB_PATH = HOST_DIR / "libblob_detect.so"
 SOURCES = [MAIN_DIR / n for n in ("blob_detect.c", "blob_detect.h",
                                    "tc_pipeline.c", "tc_pipeline.h",
-                                   "color_lut.c", "color_lut.h")]
+                                   "color_lut.c", "color_lut.h",
+                                   "blob_feat.c", "blob_feat.h")]
 # The colour table the firmware compiles in (main/models/lut_model.h holds the
 # same bytes; a host test checks they agree).
 LUT_MODEL = MAIN_DIR / "models" / "lut_model.bin"
@@ -38,6 +39,10 @@ BLOB_MAX_REPORT = 4
 TC_STAGE_MAX = 3
 PRESETS = ["red", "blue", "green", "orange"]
 CAL_PATCH = 16          # target_main.c: the centre patch 'c' samples
+TC_RUN_FEATURES = 0x1   # tc_pipeline.h
+BLOB_FEAT_N = 12        # blob_feat.h; checked against the library at load
+BLOB_CROP = 24
+BLOB_CROP_SMALL = 16
 
 
 class BlobCfg(C.Structure):
@@ -70,11 +75,26 @@ class TcModels(C.Structure):
         self.lut_path = None
 
 
+class BlobFeat(C.Structure):
+    _fields_ = [("v", C.c_float * BLOB_FEAT_N)]
+
+
+class CropBox(C.Structure):
+    _fields_ = [("xs", C.c_int), ("ys", C.c_int), ("side", C.c_int)]
+
+
 class TcResult(C.Structure):
     _fields_ = [("r", BlobResult), ("stage", C.c_int),
                 ("conf", C.c_float * BLOB_MAX_REPORT),
                 ("t_px_us", C.c_int32), ("t_b_us", C.c_int32), ("t_c_us", C.c_int32),
-                ("t_total_us", C.c_int32)]
+                ("t_total_us", C.c_int32), ("n_feat", C.c_int),
+                ("feat", BlobFeat * BLOB_MAX_REPORT)]
+
+    def features(self) -> np.ndarray:
+        """(n_feat, BLOB_FEAT_N) float32: the features of the reported blobs,
+        empty when the pipeline was not asked for them."""
+        return np.array([list(self.feat[k].v) for k in range(self.n_feat)],
+                        dtype=np.float32).reshape(self.n_feat, BLOB_FEAT_N)
 
 
 # blob_clock_fn: int64_t (*)(void). A Python clock costs a microsecond or two
@@ -117,8 +137,17 @@ def load_library() -> C.CDLL:
     lib.blob_preset_apply.argtypes = [P(BlobCfg), C.c_int]
     lib.tc_stage_available.argtypes = [P(TcModels)]
     lib.tc_stage_effective.argtypes = [C.c_int, P(TcModels)]
-    lib.tc_pipeline_run.argtypes = [P(BlobCfg), C.c_int, P(TcModels), C.c_char_p,
-                                    C.c_void_p, CLOCK_FN, P(TcResult)]
+    lib.tc_pipeline_run.argtypes = [P(BlobCfg), C.c_int, C.c_int, P(TcModels),
+                                    C.c_char_p, C.c_void_p, CLOCK_FN, P(TcResult)]
+    lib.blob_features.argtypes = [P(BlobCfg), C.c_char_p, P(Blob), P(BlobFeat)]
+    lib.blob_features.restype = None
+    lib.blob_feat_step.argtypes = [C.c_int, C.c_int]
+    lib.blob_crop_box.argtypes = [P(Blob), P(CropBox)]
+    lib.blob_crop_box.restype = None
+    lib.blob_crop.argtypes = [P(BlobCfg), C.c_char_p, P(CropBox), C.c_void_p]
+    lib.blob_crop.restype = None
+    lib.blob_crop_down16.argtypes = [C.c_void_p, C.c_void_p]
+    lib.blob_crop_down16.restype = None
     lib.tc_pipeline_mask.argtypes = [P(BlobCfg), C.c_int, P(TcModels), C.c_char_p,
                                      C.c_void_p]
     lib.tc_crc32.argtypes = [C.c_char_p, C.c_size_t]
@@ -281,9 +310,10 @@ def hsv_table(st: Settings) -> np.ndarray:
 
 
 def pipeline(st: Settings, frame: bytes, stage: int = 0, m: TcModels | None = None,
-             timed: bool = False) -> TcResult:
+             timed: bool = False, features: bool = False) -> TcResult:
     """tc_pipeline_run(): the camera's whole detector at the requested stage,
-    with the same fallback. timed=True passes a PC clock, for the fake camera."""
+    with the same fallback. timed=True passes a PC clock, for the fake camera.
+    features=True is TC_RUN_FEATURES: blob features below stage 2 too."""
     c = st.c()
     if not lib().blob_cfg_valid(C.byref(c)):
         raise ValueError("invalid detector configuration")
@@ -291,8 +321,52 @@ def pipeline(st: Settings, frame: bytes, stage: int = 0, m: TcModels | None = No
     m = m if m is not None else models()
     out = TcResult()
     clock = _PY_CLOCK if timed else CLOCK_FN()      # CLOCK_FN() is NULL
-    lib().tc_pipeline_run(C.byref(c), int(stage), C.byref(m), frame,
-                          C.cast(work, C.c_void_p), clock, C.byref(out))
+    lib().tc_pipeline_run(C.byref(c), int(stage), TC_RUN_FEATURES if features else 0,
+                          C.byref(m), frame, C.cast(work, C.c_void_p), clock, C.byref(out))
+    return out
+
+
+def feat_names() -> list:
+    """blob_feat_names, from the library itself, so a dataset's column names
+    are the ones the code that computed it uses."""
+    names = (C.c_char_p * BLOB_FEAT_N).in_dll(lib(), "blob_feat_names")
+    return [n.decode() for n in names]
+
+
+def blob_features(st: Settings, frame: bytes, b: Blob, stage: int = 0,
+                  m: TcModels | None = None) -> np.ndarray:
+    """blob_features() for one blob, with the pixel test of `stage` (as the
+    pipeline would run it). (BLOB_FEAT_N,) float32."""
+    m = m if m is not None else models()
+    c = st.c()
+    if lib().tc_stage_effective(int(stage), C.byref(m)) >= 1:
+        c.lut = m.lut
+    out = BlobFeat()
+    lib().blob_features(C.byref(c), frame, C.byref(b), C.byref(out))
+    return np.array(list(out.v), dtype=np.float32)
+
+
+def crop_box(b: Blob) -> tuple:
+    """blob_crop_box(): the source square (xs, ys, side)."""
+    out = CropBox()
+    lib().blob_crop_box(C.byref(b), C.byref(out))
+    return out.xs, out.ys, out.side
+
+
+def crop(st: Settings, frame: bytes, box: tuple) -> np.ndarray:
+    """blob_crop(): (24, 24) uint16 RGB565 values."""
+    out = np.zeros((BLOB_CROP, BLOB_CROP), np.uint16)
+    c = st.c()
+    lib().blob_crop(C.byref(c), frame, C.byref(CropBox(*box)),
+                    out.ctypes.data_as(C.c_void_p))
+    return out
+
+
+def crop_down16(crop24: np.ndarray) -> np.ndarray:
+    """blob_crop_down16(): (24, 24) -> (16, 16) uint16."""
+    src = np.ascontiguousarray(crop24, dtype=np.uint16)
+    out = np.zeros((BLOB_CROP_SMALL, BLOB_CROP_SMALL), np.uint16)
+    lib().blob_crop_down16(src.ctypes.data_as(C.c_void_p), out.ctypes.data_as(C.c_void_p))
     return out
 
 

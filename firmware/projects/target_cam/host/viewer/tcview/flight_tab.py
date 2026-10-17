@@ -1,14 +1,14 @@
 """
 Flight data screen: only what leaves the camera in flight.
 
-Entering this screen turns the image off (v0) and returns the link to 115200
-baud, so what arrives is exactly the CSV stream the ESP32-S3 will read - same
+Entering this screen turns the image and blob collection off (v0,
+!collect 0) and returns the link to 115200 baud, so what arrives is exactly the CSV stream the ESP32-S3 will read - same
 rows, same rate, same timing. Nothing here comes from the PC detector: every
 figure is decoded from the camera's own rows.
 
 The green "flight-identical" banner is shown only when the camera's own #!CFG
-confirms image off, 115200 baud and streaming on, and no frame has arrived
-recently. It is the camera's word, not the viewer's assumption.
+confirms image off, collection off, 115200 baud and streaming on, and no
+frame has arrived recently. It is the camera's word, not the viewer's assumption.
 
 The pacing check counts every row whose dt_ms is not the configured period
 (80.0 ms at 12.5 FPS). The hard requirement is zero such rows with every stage
@@ -147,9 +147,11 @@ class FlightTab(QWidget):
     # ---- from the main window ------------------------------------------------
 
     def entered(self):
-        """Put the link in its flight state: image off, 115200."""
+        """Put the link in its flight state: image and collection off, 115200."""
         if self.cfg.get("image") == 1:
             self.main.send("v0")
+        if self.cfg.get("collect") == 1:
+            self.main.send("!collect 0")
         link = self.main.link
         if link is not None and link.baud != P.BOOT_BAUD:
             self.main.send("B%d" % P.BOOT_BAUD)
@@ -220,6 +222,8 @@ class FlightTab(QWidget):
         else:
             if c.get("image") != 0:
                 why.append("image sending is ON")
+            if c.get("collect") == 1:
+                why.append("blob collection is ON ('!collect')")
             if c.get("baud") != P.BOOT_BAUD:
                 why.append("link at %s baud, not 115200" % c.get("baud"))
             if c.get("stream") != 1:

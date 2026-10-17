@@ -132,3 +132,77 @@ def test_camera_revert_when_pc_never_confirms(app):
     finally:
         os.close(fd)
         cam.stop()
+
+
+def test_link_recovers_when_the_fast_speed_goes_bad(app):
+    """The 2026-10-17 hang: switched up, image on, then the camera's output
+    turns to noise while it is still at the fast speed. The viewer must ask
+    it down before following it to 115200, or the two stay apart."""
+    cam = FakeCamera().start()
+    win = MainWindow(cam.port, " test")
+    win.show()
+    win.connect_link()
+    try:
+        win.send("B460800")
+        assert wait(app, lambda: win.link.baud == 460800 and win.link.pending() == 0)
+        win.send("v1")
+        assert wait(app, lambda: win.link.pending() == 0)
+        cam.noisy_fast = True
+        assert wait(app, lambda: cam.baud == P.BOOT_BAUD and win.link.baud == P.BOOT_BAUD,
+                    timeout=15)
+        rows = win.link.counters.rows
+        assert wait(app, lambda: win.link.counters.rows > rows, timeout=10)
+    finally:
+        win.close()
+        cam.stop()
+
+
+def test_collect_records_match_the_pc(app, tmp_path):
+    """'!collect 1' and 'g' at 115200, the bench procedure: a grabbed frame
+    carries its records, and every record is re-computed on the PC from that
+    frame and must be the same numbers (the B1 check, here against the fake,
+    which runs the same C code; on the board it is the real test). Then label
+    some, save, and nothing is autosaved twice."""
+    from tcview import blobset as B
+    cam = FakeCamera().start()
+    win = MainWindow(cam.port, " test")
+    win.show()
+    win.connect_link()
+    blobs = win.blobs
+    blobs.autosave_dir = tmp_path / "auto"
+    try:
+        assert wait(app, lambda: "collect" in blobs.cfg)
+        assert not blobs.collect_btn.isChecked() and blobs.cfg["collect"] == 0
+        blobs.collect_btn.setChecked(True)                # sends !collect 1
+        assert wait(app, lambda: blobs.cfg.get("collect") == 1)
+        # A grab is 3.3 s on the wire at 115200; each one brings its records.
+        for _ in range(4):
+            win.send("g")
+            n = blobs.agree.checked
+            assert wait(app, lambda: blobs.agree.checked > n, timeout=10), blobs.agree.text()
+            if blobs.agree.checked >= 3:
+                break
+        assert blobs.agree.checked >= 3, blobs.agree.text()
+        assert blobs.agree.missing == 0, blobs.agree.text()     # same blobs found on both
+        assert blobs.agree.ok(), blobs.agree.text()
+        assert all(s.source == "live" and s.label == B.UNLABELLED for s in blobs.samples)
+        assert win.link.counters.blobs_ok >= 3 and win.link.counters.blobs_bad == 0
+        # Entering the flight screen ends collection (and the image); the
+        # banner names it while it is on.
+        win.flight.tick()
+        assert "blob collection is ON" in win.flight.banner.text()
+        win.tabs.setCurrentWidget(win.flight)
+        assert wait(app, lambda: blobs.cfg.get("collect") == 0 and blobs.cfg.get("image") == 0
+                    and win.link.pending() == 0, timeout=15)
+        assert not blobs.collect_btn.isChecked()
+
+        blobs.set_label([0, 1], B.BALLOON)
+        assert B.counts(blobs.samples)["balloon"] == 2 and blobs.dirty
+        blobs.save_to(tmp_path / "s.npz")
+        assert not blobs.dirty
+        back = B.load(tmp_path / "s.npz")
+        assert len(back) >= len(blobs.samples) - 4      # more may have arrived since
+        assert [s.label for s in back[:2]] == [B.BALLOON, B.BALLOON]
+    finally:
+        win.close()
+        cam.stop()

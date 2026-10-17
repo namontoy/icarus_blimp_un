@@ -86,14 +86,12 @@ void link_poll(void)
     }
 }
 
-void link_send_frame(const uint8_t *buf, size_t len, int w, int h,
-                     bool big_endian, int64_t t_ms)
+void link_send_packet(const char *kind, const char *fields, const uint8_t *buf,
+                      size_t len)
 {
     uint32_t seq = s_seq++;
-    printf("#!FRAME seq=%lu t_ms=%lld w=%d h=%d fmt=%s len=%u crc=%08lx\n",
-           (unsigned long)seq, (long long)t_ms, w, h,
-           big_endian ? "rgb565be" : "rgb565le", (unsigned)len,
-           (unsigned long)crc32(buf, len));
+    printf("#!%s seq=%lu %s len=%u crc=%08lx\n", kind, (unsigned long)seq, fields,
+           (unsigned)len, (unsigned long)crc32(buf, len));
     /* stdout must be empty before the raw bytes go out, or the header could
        land after them. The payload bypasses stdio because the console turns
        every 0x0A into 0x0D 0x0A, which would corrupt the pixels. */
@@ -101,4 +99,13 @@ void link_send_frame(const uint8_t *buf, size_t len, int w, int h,
     uart_write_bytes(LINK_UART, buf, len);
     printf("\n#!END seq=%lu\n", (unsigned long)seq);
     fflush(stdout);
+}
+
+void link_send_frame(const uint8_t *buf, size_t len, int w, int h,
+                     bool big_endian, int64_t t_ms)
+{
+    char fields[96];
+    snprintf(fields, sizeof fields, "t_ms=%lld w=%d h=%d fmt=%s", (long long)t_ms, w, h,
+             big_endian ? "rgb565be" : "rgb565le");
+    link_send_packet("FRAME", fields, buf, len);
 }

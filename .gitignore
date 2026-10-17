@@ -11,6 +11,7 @@ dependencies.lock
 firmware/projects/*/host/test_flow_match
 firmware/projects/*/host/test_blob_detect
 firmware/projects/*/host/test_pipeline
+firmware/projects/*/host/test_blob_feat
 firmware/projects/*/host/libblob_detect.so
 
 # Reference papers: published third-party work, 35 MB, re-downloadable.

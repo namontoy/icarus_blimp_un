@@ -2,8 +2,9 @@
  * tc_pipeline - see tc_pipeline.h for what and why.
  *
  * Stage 1 (Phase A2) is the colour table: the same detector with a different
- * pixel test, switched in through cfg->lut. Stages 2 and 3 have no models yet,
- * so requests for them fall back to 1 (or 0) and the rows say so.
+ * pixel test, switched in through cfg->lut. Stage 2's features (Phase B1) are
+ * computed here, but its classifier is not trained yet, so a request for
+ * stage 2 or 3 still falls back to 1 (or 0) and the rows say so.
  */
 #include "tc_pipeline.h"
 
@@ -39,9 +40,9 @@ int tc_pipeline_mask(const blob_cfg_t *cfg, int stage_req, const tc_models_t *m,
     return blob_mask(&c, frame, mask);
 }
 
-int tc_pipeline_run(const blob_cfg_t *cfg, int stage_req, const tc_models_t *m,
-                    const uint8_t *frame, void *work, blob_clock_fn now_us,
-                    tc_result_t *out)
+int tc_pipeline_run(const blob_cfg_t *cfg, int stage_req, int flags,
+                    const tc_models_t *m, const uint8_t *frame, void *work,
+                    blob_clock_fn now_us, tc_result_t *out)
 {
     int64_t t0 = now_us ? now_us() : 0;
 
@@ -55,6 +56,20 @@ int tc_pipeline_run(const blob_cfg_t *cfg, int stage_req, const tc_models_t *m,
        from which pixels match and nothing else. */
     blob_cfg_t c = tc_stage_cfg(cfg, stage_req, m);
     blob_detect_timed(&c, frame, work, &out->r, now_us, &out->t_px_us);
+
+    /* Features after detection, from the frame again, rather than inside
+       blob_detect's moment pass: that keeps stages 0 and 1 bit-identical to
+       what they were and costs nothing when no one asks. The price is a
+       second read of each blob's box, which blob_feat bounds per blob. */
+    out->n_feat = 0;
+    memset(out->feat, 0, sizeof out->feat);
+    if ((flags & TC_RUN_FEATURES) || out->stage >= 2) {
+        int64_t tb = now_us ? now_us() : 0;
+        for (int k = 0; k < out->r.n_report; k++)
+            blob_features(&c, frame, &out->r.b[k], &out->feat[k]);
+        out->n_feat = out->r.n_report;
+        out->t_b_us = now_us ? (int32_t)(now_us() - tb) : 0;
+    }
 
     out->t_total_us = now_us ? (int32_t)(now_us() - t0) : 0;
     return out->r.found;

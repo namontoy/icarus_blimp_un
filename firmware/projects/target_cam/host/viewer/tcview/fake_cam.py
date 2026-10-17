@@ -23,12 +23,14 @@ import tty
 import numpy as np
 
 from . import detector as D
-from .protocol import BAUDS, BOOT_BAUD, COLUMNS, CSV_VERSION, encode_frame, frame_seconds
+from .protocol import (BAUDS, BOOT_BAUD, COLUMNS, CSV_VERSION, FEAT_VERSION, encode_blob,
+                       encode_frame, frame_seconds)
 
 W, H = 160, 120
 # The sensor is the clock, as on the camera: a frame every 79.968 ms at XCLK
 # 20 MHz, and the rows come every n-th one ('f' picks n).
 SENSOR_US = 1599360.0 / 20
+COLLECT_EVERY = 4       # target_main.c: records on every 4th frame
 DEFAULT = dict(hue=0, tol=12, sat=110, val=50, area=25, mm=550, fov=54.0,
                every=1, awb=1, be=1, preset="red", stage=0, cnn_k=2)
 
@@ -71,7 +73,7 @@ class Scene:
 
 
 class FakeCamera:
-    def __init__(self, corrupt_every: int = 0):
+    def __init__(self, corrupt_every: int = 0, noisy_fast: bool = False):
         self.master, slave = pty.openpty()
         tty.setraw(slave)
         self.port = os.ttyname(slave)
@@ -83,8 +85,12 @@ class FakeCamera:
         self.grab = False
         self.stream = True
         self.calibrate = False
+        self.collect = False
+        self.collect_n = 0
         self.revert_at = 0.0
         self.corrupt_every = corrupt_every
+        self.noisy_fast = noisy_fast
+        self._noise = np.random.default_rng(7)
         self.seq = 0
         self.loop_us = 0
         self.scene = Scene()
@@ -96,6 +102,12 @@ class FakeCamera:
     # ---- output -----------------------------------------------------------
 
     def _write(self, data: bytes):
+        if self.noisy_fast and self.baud != BOOT_BAUD:
+            # The likeliest reading of the 2026-10-17 hang on the ESP32-CAM-MB
+            # (inferred, not measured): above 115200 and under image traffic
+            # the camera runs on but its output arrives unreadable, while the
+            # short commands still get through.
+            data = bytes(self._noise.integers(0, 256, max(1, len(data) // 8), dtype=np.uint8))
         with self._wlock:
             view = memoryview(data)
             while view:
@@ -122,14 +134,15 @@ class FakeCamera:
         self._print("#!CFG w=%d h=%d cell=2 hue=%d tol=%d sat=%d val=%d area=%d mm=%d "
                     "fov=%.1f fps=%.3g period_ms=%.1f sensor_us=%.0f awb=%d be=%d preset=%s baud=%d "
                     "image=%d stream=%d settings=%s stage=%d stage_eff=%d lut=%s lut_id=%d "
-                    "clf=none cnn=none cnn_k=%d csv=%d fw=fake collect=0\n"
+                    "clf=none cnn=none cnn_k=%d csv=%d fw=fake collect=%d fv=%d\n"
                     % (W, H, c["hue"], c["tol"], c["sat"], c["val"], c["area"], c["mm"],
                        c["fov"], 1000.0 / self._period_ms(), self._period_ms(), SENSOR_US,
                        c["awb"],
                        c["be"], c["preset"], self.baud, int(self.image),
                        int(self.stream), self._settings_state(), c["stage"],
                        self._stage_eff(), "ok" if D.models().lut else "none",
-                       D.models().lut_id, c["cnn_k"], CSV_VERSION))
+                       D.models().lut_id, c["cnn_k"], CSV_VERSION, int(self.collect),
+                       FEAT_VERSION))
 
     def _period_ms(self) -> float:
         return self.cfg["every"] * SENSOR_US / 1000.0
@@ -176,8 +189,15 @@ class FakeCamera:
                 err = "usage: !stage <0-%d>" % D.TC_STAGE_MAX
             else:
                 self.cfg["stage"] = int(a)
+        elif line.split(" ")[0] == "!collect":
+            a = line[9:] if line[8:9] == " " else ""
+            if a.strip() not in ("0", "1"):
+                err = "usage: !collect <0|1>"
+            else:
+                self.collect = a.strip() == "1"
+                self.collect_n = 0
         elif c == "!":
-            err = "unknown command (!save, !load, !reset, !stage)"
+            err = "unknown (!save !load !reset !stage !collect)"
         elif c == "H":
             err = self._set_int("hue", arg, 0, 359, True)
         elif c == "T":
@@ -335,9 +355,17 @@ class FakeCamera:
                                     preset="custom")
                 self._print_cfg()
             t1 = time.perf_counter()
-            tr = D.pipeline(st, frame, self.cfg["stage"], timed=True)
+            tr = D.pipeline(st, frame, self.cfg["stage"], timed=True,
+                            features=self.collect or self.cfg["stage"] >= 2)
             proc_us = int((time.perf_counter() - t1) * 1e6)
-            if self.grab or self.image:
+            send_img = self.grab or self.image
+            send_rec = False
+            if self.collect:
+                self.collect_n += 1
+                if self.collect_n >= COLLECT_EVERY or send_img:
+                    self.collect_n = 0
+                    send_rec = True
+            if send_img:
                 self.grab = False
                 pkt = encode_frame(self.seq, t_ms, frame, big_endian=be)
                 self.seq += 1
@@ -350,7 +378,25 @@ class FakeCamera:
             prev = now
             if self.stream:
                 self._write(self._row(tr, t_ms, dt, proc_us).encode())
+            # After the frame, so the shared seq runs in send order, as on
+            # the camera.
+            for pkt in (self._records(st, frame, tr, t_ms) if send_rec else []):
+                self._write(pkt)
+                time.sleep(frame_seconds(len(pkt), self.baud))
             self.loop_us = int((time.perf_counter() - wake) * 1e6)
+
+    def _records(self, st, frame, tr, t_ms) -> list:
+        """One #!BLOB packet per reported blob, as send_blob_records()."""
+        out = []
+        for k in range(tr.n_feat):
+            b = tr.r.b[k]
+            box = D.crop_box(b)
+            out.append(encode_blob(self.seq, t_ms, k, tr.n_feat, list(tr.feat[k].v),
+                                   D.crop(st, frame, box), b.cx, b.cy, b.area,
+                                   (b.x0, b.y0, b.x1, b.y1), box, stage=tr.stage,
+                                   conf=tr.conf[k]))
+            self.seq += 1
+        return out
 
     def _row(self, tr, t_ms, dt, proc_us) -> str:
         r = tr.r

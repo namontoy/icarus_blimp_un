@@ -330,12 +330,14 @@ Commands are case-sensitive: `S` is saturation, `s` is the stream.
 | `!load` | Reload the settings saved in flash |
 | `!reset` | Erase the saved settings and go back to the Kconfig defaults |
 | `!stage <0-3>` | Detector level: 0 HSV, 1 learned colour table, 2 + blob classifier, 3 + CNN. A level whose model is missing or invalid is accepted but **falls back** to the highest complete one; `#!CFG` (`stage_eff`) and every row (`stage`) say what really runs. Live only; `!save` keeps it. |
+| `!collect <0\|1>` | Training data for the blob classifier: every 4th frame and every sent frame (`g`, `v1`), one `#!BLOB` record (features + 24×24 crop) per reported blob, after the row. **Timing is not flight-representative while on.** Live only, never saved. See [Blob records](#blob-records-collect). |
 
 Every command line is answered with `#!ACK <cmd>` or `#!NAK <cmd> -- <reason>`.
 A setting change is followed by `#!CFG`. The commands that touch flash are
 whole words, so one garbled byte (on the bench, `m` once arrived as `W`) can
-never write to flash. `!stage` is a whole word for the same reason, although it
-writes nothing: one corrupted byte must not change the detector level in flight.
+never write to flash. `!stage` and `!collect` are whole words for the same
+reason, although they write nothing: one corrupted byte must not change the
+detector level in flight, or start a transfer that stalls the loop.
 
 From stage 1 up, the learned colour table decides which pixels match. The HSV
 settings (`H T S V`, `c`, presets) are kept and still reported, but they have
@@ -354,8 +356,8 @@ sensor's frame period as the driver's timestamps measure it. `#!CFG` ends with
 the learned-detector state: `stage=` (requested) `stage_eff=`
 (running) `lut= clf= cnn=` (`ok`, `none` or `bad` for each model) `lut_id=`
 (the colour table's train id, 0 without one) `cnn_k=`
-`csv=2` (the row format) `fw=` (the app version) `collect=` (data collection,
-always 0 for now).
+`csv=2` (the row format) `fw=` (the app version) `collect=` (`!collect`, 0 or 1)
+`fv=` (the blob feature definition, `BLOB_FEAT_VERSION`).
 
 ## Output format
 
@@ -389,7 +391,7 @@ S3 reader is to be written against v2.
 | `stage` | The level that **ran** for this row (0–3), after any fallback. |
 | `conf`, `bN_conf` | Confidence 0–1 of blob 1 and blobs 2–4. **−1 = not computed** (stage < 2) or no blob in that slot. |
 | `t_px_us` | Pixel-classification pass (HSV at stage 0, the colour table at ≥ 1). |
-| `t_b_us`, `t_c_us` | Blob features + classifier, and crops + CNN. 0 when the stage did not run. |
+| `t_b_us`, `t_c_us` | Blob features + classifier, and crops + CNN. 0 when the stage did not run. Below stage 2, `t_b_us` is the features alone when they are asked for (`!collect 1`, or `!stage 2` falling back with no classifier), so their cost can be measured before a classifier exists. |
 | `loop_us` | CPU busy time of the **previous** loop, from the frame's arrival to after its row was handed to the UART and any command was answered. This is the CPU figure to hold against the 80 ms period. It does **not** include the row's time on the wire: printf returns once the row is in the UART's 128 B hardware FIFO, and a 129 B row then takes another ~11 ms to go out. That is a separate budget, which `csv_report.py` reports as `wire`. |
 | `csv_v` | Row format version, 2. |
 
@@ -397,6 +399,49 @@ S3 reader is to be written against v2.
 is not 80 (exit status 1 if there is one), rows lost on the wire, p50/p99/max
 of every timing column, the ok-rate and the "jumps" of blob 1. It reads a file
 or records from `--port` without resetting the camera.
+
+### Blob records (`!collect`)
+
+Stage 2 will be a classifier that looks at each reported blob and decides
+"balloon or not", because the false blobs that pass the colour table (a red
+door, a chair, a shirt) differ from a mylar balloon in shape and surface, not
+in colour. Phase B1 only collects the data it will learn from. With
+`!collect 1`, on every 4th frame and on every frame it sends to the PC
+(`g`, `v1`), the camera sends, after that frame's row, one packet per
+reported blob:
+
+```
+#!BLOB seq=<n> t_ms=<ms> k=<0-3> n=<blobs> stage=<ran> csv=2 fv=1 fw=<version>
+       c=<cx>,<cy> area=<px> box=<x0>,<y0>,<x1>,<y1> crop=<xs>,<ys>,<side>
+       conf=<-1|0-1> feat=<12 values, %.6g> cw=24 fmt=rgb565le len=1152 crc=<hex8>\r\n
+<1152 bytes: the 24x24 crop, RGB565 little-endian>
+\r\n#!END seq=<n>\r\n
+```
+
+(one header line on the wire; wrapped here). `t_ms` and `k` tie the record to
+blob *k* of the row with the same `t_ms`, and to the frame of that capture if
+one was sent (`g`, `v1`). The framing, CRC and sequence counter are the
+frame packet's (`main/link.h`), so a damaged record is dropped, never misread.
+
+The 12 features (`main/blob_feat.c` gives the reason for each): `fill`,
+`log_aspect`, `hue_spread`, `sat_mean`, `sat_std`, `val_mean`, `highlight`,
+`edge`, `texture`, `ring`, `cy_norm`, `log_area`. They are computed by
+portable C that the PC runs too, so the classifier is trained on the numbers
+the camera will compute in flight. Their cost is bounded by the blob, not the
+frame: a large blob is sampled on a grid of at most 1024 points. The crop is
+the square 1.5× the blob's longer side (at least 12 px), centred on the
+centroid and area-averaged down to 24×24, black where it leaves the frame. It
+is for the person labelling and for the stage 3 CNN.
+
+Records cost about 1.44 kB each on the wire (125 ms at 115200), which is why
+collection takes every 4th frame and is a bench mode. A sent frame always
+carries its records, because a record can only be checked against the pixels
+it came from, and beside a 38 kB frame they cost little. 115200 is enough for
+collecting: the faster speeds fail on the ESP32-CAM-MB.
+The viewer's **Blobs** tab collects and labels them, and re-checks them
+against the PC's own computation (see the viewer README).
+`host/tools/blobs_from_frames.py` makes the same kind of dataset from saved,
+hand-labelled frames.
 
 ## Verification
 
@@ -437,6 +482,13 @@ injected clock. For stage 1 it checks that a table built from an HSV setting
 gives stage 0's result and mask bit for bit, and that a damaged model record
 is refused with the right reason and leaves the caller's table untouched.
 
+`make test` last runs `test_blob_feat`: the features of shapes with known
+answers (a disc's fill of π/4, a rectangle's aspect ln(w/h), a highlight's
+exact fraction, a hue spread across 0/360, the ring band, the sampling stride
+rule), byte-order independence, and the crop rule (box, flat colour stays
+flat, black outside the frame). The viewer's tests add a numpy re-implementation
+of the crop that the C must match bit for bit.
+
 Test 9 matters most for robustness. A checkerboard is the worst case for
 provisional labels. The label arrays are sized for it, so no input can overrun
 them, and ASan confirms it.
@@ -454,24 +506,27 @@ measured distances (see the checklist).
 |---|---|
 | `main/blob_detect.h/.c` | The detector. Portable C, no ESP-IDF and no heap; the caller provides a workspace (28 KB at 2×2 cells). |
 | `main/tc_pipeline.h/.c` | The staged detector entry point the camera and the viewer both call: stage fallback, per-stage timing, `tc_crc32()`, the model record check. Portable C. |
+| `main/blob_feat.h/.c` | Blob features and 24×24 crops for the classifier (Phase B). Portable C, integer per-pixel arithmetic so the PC reproduces it. |
 | `main/color_lut.h/.c` | Stage 1: the learned colour table (one bit per RGB565 value, 8 kB), its record loader and the HSV-equivalent table the tests use. Portable C. |
 | `main/models/lut_model.{h,bin,json}` | The trained colour table: the C array the firmware compiles in, the same bytes for the PC tools, and how it was made. Generated by `host/train/train_lut.py`; do not edit. |
 | `main/target_main.c` | Camera setup, pacing, calibration, mask dump, bearing/range, CSV, commands. |
-| `main/link.h/.c` | Raw frame transport (`#!FRAME`, CRC-32) and run-time baud changes with the 3 s safety revert. |
+| `main/link.h/.c` | Binary packets (`#!FRAME`, `#!BLOB`; CRC-32, one sequence counter) and run-time baud changes with the 3 s safety revert. |
 | `main/settings.h/.c` | Versioned settings record in NVS (`!save` / `!load` / `!reset`). |
 | `main/camera_pins.h` | Pin maps: AI-Thinker, ESP-EYE, XIAO S3 (shared with optflow_cam). |
 | `main/Kconfig.projbuild` | Board, frame period, XCLK, FOV, flips, default colour, area, target size. |
 | `sdkconfig.defaults` | 240 MHz, 1 kHz tick, PSRAM optional, brownout on. |
 | `host/test_blob_detect.c` | The verification suite above. |
-| `host/test_pipeline.c` | The pipeline suite (CRC, fallback, stage 0 equality, timing). |
+| `host/test_pipeline.c` | The pipeline suite (CRC, fallback, stage 0 equality, timing, the features flag). |
+| `host/test_blob_feat.c` | The blob feature and crop suite. |
 | `host/tools/csv_report.py` | Pacing, timing and scene report of a CSV recording or a live port. |
 | `host/tools/eval_frames.py` | Scores the camera's pipeline on hand-labelled saved frames: blob TP/FN/FP/split, blob 1, pixel precision/recall. `--stage 1` uses the committed table, `--lut` another. |
+| `host/tools/blobs_from_frames.py` | A blob dataset (`.npz`: features, crops, labels) from hand-labelled saved frames, labelled from the paint. Same format as the viewer's Blobs tab. |
 | `host/train/train_lut.py` | Trains the colour table from labelled sessions, choosing its parameters by leave-one-session-out, and writes `main/models/lut_model.*`. Runs in the viewer's `targetcam` env. |
 | `host/target_monitor.py` | Live viewer with an azimuth gauge, and a CSV logger (needs `pyserial`). |
-| `host/viewer/` | `tcview`: image, hand calibration, flight-data and frame-labelling screens (PyQt6, own conda env). `tcview/labels.py` holds the label format and the scoring rule that `eval_frames.py` shares. |
+| `host/viewer/` | `tcview`: image, hand calibration, flight-data, frame-labelling and blob-collection screens (PyQt6, own conda env). `tcview/labels.py` holds the label format and the scoring rule that `eval_frames.py` shares; `tcview/blobset.py` the blob dataset format. |
 | `host/testdata/` | The labelled test set: two capture sessions of the red balloon (`red_s1`, `red_s2`; 14 balloon frames, 6 clutter-only), each frame as `.rgb565` + `.json` + `.png` + `.labels.png`. Baseline numbers in `docs/learned-detector-report.md`. |
 | `data/` | Saved frames (`.rgb565` + `.json` + `.png`), their hand labels (`<stem>.labels.png`: 0 unlabelled, 1 balloon, 2 background) and CSV recordings. A working folder, untracked; the curated, committed test frames go to `host/testdata/`. |
-| `host/Makefile` | `make test` runs both suites; `make lib` builds `libblob_detect.so` (every portable source) for the viewer. |
+| `host/Makefile` | `make test` runs the three suites; `make lib` builds `libblob_detect.so` (every portable source) for the viewer. |
 
 ## Known gaps
 

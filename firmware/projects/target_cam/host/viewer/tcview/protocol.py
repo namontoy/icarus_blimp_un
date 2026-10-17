@@ -13,13 +13,18 @@ What comes out of the camera on UART0 is one byte stream that mixes:
     #!NAK <cmd> -- <reason>    a command arrived and was refused
     #!BAUD <n>                 the camera is switching to n baud now
     #!CAL ok|refused hue= ...  the result of 'c' (calibrate on centre)
-    #!END seq=<n>              closes a frame packet
+    #!END seq=<n>              closes a binary packet
 
-  frame packets (only when the viewer asked with 'g' or 'v1')
-    #!FRAME seq= t_ms= w= h= fmt= len= crc=   then exactly len raw bytes
+  binary packets: a header line ending in len= crc=, exactly len raw bytes,
+  then #!END
+    #!FRAME seq= t_ms= w= h= fmt= len= crc=   a camera frame ('g' or 'v1')
+    #!BLOB  seq= t_ms= k= ... feat= ... len= crc=
+                                              one reported blob's features and
+                                              24x24 crop ('!collect 1'), see
+                                              BlobRec
 
 The raw bytes are binary: they can contain 0x0A, so the splitter has to switch
-from "read a line" to "read len bytes" after a #!FRAME header. A log line from
+from "read a line" to "read len bytes" after a packet header. A log line from
 another task on the camera can land inside the payload. Then the CRC fails, the
 frame is dropped, and the tail of the payload comes out as junk text until the
 next newline - the parser resynchronises by itself on the following line.
@@ -157,8 +162,47 @@ class Frame:
 
 @dataclass
 class FrameError:
+    """A binary packet that failed: CRC, or truncated. kind is the header's
+    tag, "FRAME" or "BLOB"."""
     seq: Optional[int]
     reason: str
+    kind: str = "FRAME"
+
+
+CROP = 24                   # blob_feat.h BLOB_CROP
+FEAT_N = 12                 # blob_feat.h BLOB_FEAT_N
+FEAT_VERSION = 1            # blob_feat.h BLOB_FEAT_VERSION
+
+
+@dataclass
+class BlobRec:
+    """One reported blob, as '!collect 1' sends it: what stage 2's classifier
+    will see (feat) and what the CNN and the person labelling will see (crop).
+
+    The blob is the k-th of the n reported in the CSV row with the same t_ms,
+    so a record can always be tied back to its row (and to a frame, if one was
+    grabbed in the same loop). crop_box is the source square in frame pixels,
+    (xs, ys, side), possibly partly outside the frame; the crop is that square
+    resampled to 24x24 by blob_crop()."""
+    seq: int
+    t_ms: int
+    k: int
+    n: int
+    stage: int
+    csv: int
+    fv: int                     # feature definition version
+    fw: str
+    cx: float
+    cy: float
+    area: int
+    box: tuple                  # x0, y0, x1, y1 inclusive
+    crop_box: tuple             # xs, ys, side
+    conf: float                 # -1 = no classifier ran
+    feat: np.ndarray            # (FEAT_N,) float32
+    crop: np.ndarray            # (24, 24) uint16 RGB565 values
+
+    def rgb(self) -> np.ndarray:
+        return rgb565_to_rgb888(self.crop)
 
 
 def rgb565_to_rgb888(px: np.ndarray) -> np.ndarray:
@@ -259,11 +303,9 @@ def parse_line(line: str):
 
 @dataclass
 class _Pending:
+    kind: str                   # "FRAME" or "BLOB"
     seq: int
-    t_ms: int
-    w: int
-    h: int
-    fmt: str
+    kv: dict                    # the header's fields, as strings
     length: int
     crc: int
     started: float
@@ -276,8 +318,9 @@ MAX_LINE = 4096     # longer than any real line; beyond this it is binary noise
 class StreamParser:
     """Feed it bytes as they arrive, in any chunking; get events back.
 
-    Counters (bytes_text, bytes_frame, frames_ok, frames_bad, junk_lines) are
-    what the link-health display shows.
+    Counters (bytes_text, bytes_frame, frames_ok, frames_bad, blobs_ok,
+    blobs_bad, junk_lines) are what the link-health display shows. bytes_frame
+    counts every binary payload, blob crops included.
     """
 
     def __init__(self):
@@ -287,6 +330,8 @@ class StreamParser:
         self.bytes_frame = 0
         self.frames_ok = 0
         self.frames_bad = 0
+        self.blobs_ok = 0
+        self.blobs_bad = 0
         self.junk_lines = 0
 
     def reset(self):
@@ -337,9 +382,10 @@ class StreamParser:
         if f is None or now - f.started < frame_seconds(f.length, baud) * 1.5 + slack:
             return []
         self._frame = None
-        self.frames_bad += 1
+        self._count(f.kind, False)
         self.bytes_frame -= len(f.buf)
-        events = [FrameError(f.seq, "truncated: %d of %d bytes" % (len(f.buf), f.length))]
+        events = [FrameError(f.seq, "truncated: %d of %d bytes" % (len(f.buf), f.length),
+                             f.kind)]
         events += self.feed(bytes(f.buf), now)
         return events
 
@@ -352,8 +398,9 @@ class StreamParser:
         self._line.clear()
         if not raw:
             return None
-        if raw.startswith(b"#!FRAME "):
-            return self._start_frame(raw, now)
+        for kind in PACKETS:
+            if raw.startswith(b"#!" + kind.encode() + b" "):
+                return self._start_packet(kind, raw, now)
         try:
             text = raw.decode("ascii")
         except UnicodeDecodeError:
@@ -363,17 +410,25 @@ class StreamParser:
             self.junk_lines += 1
         return ev
 
-    def _start_frame(self, raw: bytes, now: float):
-        kv = parse_kv(raw.decode("ascii", "replace")[8:], convert=False)
+    def _count(self, kind: str, ok: bool):
+        name = ("frames_" if kind == "FRAME" else "blobs_") + ("ok" if ok else "bad")
+        setattr(self, name, getattr(self, name) + 1)
+
+    def _start_packet(self, kind: str, raw: bytes, now: float):
+        """A packet header: every kind ends in len= crc= and is closed by
+        #!END. What else the header must say, and how long the payload may
+        be, is the kind's own check (PACKETS). A header that fails it is junk,
+        and its payload then arrives as junk lines until the parser is back
+        in step."""
+        kv = parse_kv(raw.decode("ascii", "replace")[len(kind) + 3:], convert=False)
         try:
-            seq, t_ms, w, h = int(kv["seq"]), int(kv["t_ms"]), int(kv["w"]), int(kv["h"])
-            fmt, length = kv["fmt"], int(kv["len"])
-            crc = int(kv["crc"], 16)
+            seq, length, crc = int(kv["seq"]), int(kv["len"]), int(kv["crc"], 16)
+            ok = PACKETS[kind][0](kv, length)
         except (KeyError, ValueError):
+            ok = False
+        if not ok or not 0 < length <= 1 << 20:
             return self._junk(raw)
-        if fmt not in ("rgb565be", "rgb565le") or length != w * h * 2 or not 0 < length <= 1 << 20:
-            return self._junk(raw)
-        self._frame = _Pending(seq, t_ms, w, h, fmt, length, crc, now)
+        self._frame = _Pending(kind, seq, kv, length, crc, now)
         return None
 
     def _finish_frame(self):
@@ -381,10 +436,66 @@ class StreamParser:
         self._frame = None
         data = bytes(f.buf)
         if crc32(data) != f.crc:
-            self.frames_bad += 1
-            return FrameError(f.seq, "CRC mismatch")
-        self.frames_ok += 1
-        return Frame(f.seq, f.t_ms, f.w, f.h, f.fmt, data)
+            self._count(f.kind, False)
+            return FrameError(f.seq, "CRC mismatch", f.kind)
+        try:
+            ev = PACKETS[f.kind][1](f.seq, f.kv, data)
+        except (KeyError, ValueError) as e:
+            self._count(f.kind, False)
+            return FrameError(f.seq, "bad header field: %s" % e, f.kind)
+        self._count(f.kind, True)
+        return ev
+
+
+# --------------------------------------------------------------------------
+# Packet kinds: (header check, payload -> event). Both raise KeyError or
+# ValueError on a missing or malformed field.
+
+def _frame_ok(kv: dict, length: int) -> bool:
+    w, h = int(kv["w"]), int(kv["h"])
+    return kv["fmt"] in ("rgb565be", "rgb565le") and length == w * h * 2
+
+
+def _frame_event(seq: int, kv: dict, data: bytes) -> Frame:
+    return Frame(seq, int(kv["t_ms"]), int(kv["w"]), int(kv["h"]), kv["fmt"], data)
+
+
+def _ints(s: str, n: int) -> tuple:
+    v = tuple(int(x) for x in s.split(","))
+    if len(v) != n:
+        raise ValueError("%r: want %d values" % (s, n))
+    return v
+
+
+def _blob_ok(kv: dict, length: int) -> bool:
+    cw = int(kv["cw"])
+    return kv["fmt"] == "rgb565le" and length == cw * cw * 2 and cw == CROP
+
+
+def _blob_event(seq: int, kv: dict, data: bytes) -> BlobRec:
+    feat = np.array([float(x) for x in kv["feat"].split(",")], dtype=np.float32)
+    cx, cy = (float(x) for x in kv["c"].split(","))
+    crop = np.frombuffer(data, dtype="<u2").reshape(CROP, CROP).astype(np.uint16)
+    return BlobRec(seq, int(kv["t_ms"]), int(kv["k"]), int(kv["n"]), int(kv["stage"]),
+                   int(kv["csv"]), int(kv["fv"]), kv["fw"], cx, cy, int(kv["area"]),
+                   _ints(kv["box"], 4), _ints(kv["crop"], 3), float(kv["conf"]), feat, crop)
+
+
+PACKETS = {"FRAME": (_frame_ok, _frame_event), "BLOB": (_blob_ok, _blob_event)}
+
+
+def encode_blob(seq: int, t_ms: int, k: int, n: int, feat, crop: np.ndarray,
+                cx: float, cy: float, area: int, box, crop_box, stage: int = 1,
+                conf: float = -1.0, fw: str = "fake", fv: int = FEAT_VERSION) -> bytes:
+    """A blob packet exactly as the firmware's send_blob_records() puts it on
+    the wire. Used by the fake camera and the tests."""
+    data = np.ascontiguousarray(crop, dtype="<u2").tobytes()
+    head = ("#!BLOB seq=%d t_ms=%d k=%d n=%d stage=%d csv=%d fv=%d fw=%s c=%.2f,%.2f "
+            "area=%d box=%d,%d,%d,%d crop=%d,%d,%d conf=%.3g feat=%s cw=%d fmt=rgb565le "
+            "len=%d crc=%08x\r\n") % (
+        seq, t_ms, k, n, stage, CSV_VERSION, fv, fw, cx, cy, area, *box, *crop_box, conf,
+        ",".join("%.6g" % float(v) for v in feat), CROP, len(data), crc32(data))
+    return head.encode() + data + ("\r\n#!END seq=%d\r\n" % seq).encode()
 
 
 def encode_frame(seq: int, t_ms: int, data: bytes, w: int = 160, h: int = 120,

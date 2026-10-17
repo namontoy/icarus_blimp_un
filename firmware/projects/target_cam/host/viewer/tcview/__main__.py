@@ -5,10 +5,11 @@ target_cam viewer.
   python -m tcview --fake                  a synthetic camera on a pseudo-terminal
   python -m tcview --label [DIR]           label saved frames; no camera needed
 
-Three screens: "Image & calibration" (see the real pixels, tune the detector
+Four screens: "Image & calibration" (see the real pixels, tune the detector
 by hand, save frames, save to the camera's flash), "Flight data" (only the CSV
-the ESP32-S3 will receive) and "Label frames" (mark balloon and background on
-saved frames, for training and scoring). The console at the bottom shows
+the ESP32-S3 will receive), "Label frames" (mark balloon and background on
+saved frames, for training and scoring) and "Blobs" (collect and label the
+blobs stage 2's classifier will learn from). The console at the bottom shows
 everything else the camera says, and takes raw commands.
 """
 from __future__ import annotations
@@ -25,6 +26,7 @@ from PyQt6.QtCore import Qt
 
 from . import detector as D
 from . import protocol as P
+from .blobs_tab import BlobsTab
 from .calib_tab import CalibTab
 from .flight_tab import FlightTab
 from .label_tab import LabelTab
@@ -45,6 +47,8 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.flight, "Flight data (what the ESP32-S3 gets)")
         self.label = LabelTab()
         self.tabs.addTab(self.label, "Label frames")
+        self.blobs = BlobsTab(self)
+        self.tabs.addTab(self.blobs, "Blobs (classifier data)")
         self.tabs.currentChanged.connect(self._tab_changed)
 
         console = QWidget()
@@ -126,9 +130,13 @@ class MainWindow(QMainWindow):
         elif isinstance(ev, P.Frame):
             self.calib.on_frame(ev)
             self.flight.on_frame(ev)
+            self.blobs.on_frame(ev)
+        elif isinstance(ev, P.BlobRec):
+            self.blobs.on_blob(ev)
         elif isinstance(ev, P.Cfg):
             self.calib.on_cfg(ev.v)
             self.flight.on_cfg(ev.v)
+            self.blobs.on_cfg(ev.v)
         elif isinstance(ev, P.Cal):
             self.calib.on_cal(ev)
         elif isinstance(ev, P.Comment):
@@ -136,7 +144,7 @@ class MainWindow(QMainWindow):
         elif isinstance(ev, P.Nak):
             self._say("#!NAK %s -- %s" % (ev.cmd, ev.reason))
         elif isinstance(ev, P.FrameError):
-            self._say("# [viewer] frame %s dropped: %s" % (ev.seq, ev.reason))
+            self._say("# [viewer] %s %s dropped: %s" % (ev.kind.lower(), ev.seq, ev.reason))
         elif isinstance(ev, P.Baud):
             self._say("#!BAUD %d" % ev.baud)
 
@@ -154,6 +162,7 @@ class MainWindow(QMainWindow):
 
     def _tick1(self):
         self.calib.tick()
+        self.blobs.tick()
         if self.link is None:
             return
         c = self.link.counters
@@ -162,10 +171,10 @@ class MainWindow(QMainWindow):
         rps = (c.rows - n0) / (now - t0) if now > t0 else 0
         self._last_rows = (now, c.rows)
         self.stats_lbl.setText(
-            "%d baud | %.1f kB/s | rows %.1f/s | frames ok %d bad %d | junk lines %d | "
-            "NAK %d retries %d timeouts %d" % (
+            "%d baud | %.1f kB/s | rows %.1f/s | frames ok %d bad %d | blobs ok %d bad %d | "
+            "junk lines %d | NAK %d retries %d timeouts %d" % (
                 self.link.baud, c.rate() / 1000, rps, c.frames_ok, c.frames_bad,
-                c.junk_lines, c.naks, c.retries, c.timeouts))
+                c.blobs_ok, c.blobs_bad, c.junk_lines, c.naks, c.retries, c.timeouts))
 
     def closeEvent(self, e):
         if self.link is not None:
@@ -173,6 +182,9 @@ class MainWindow(QMainWindow):
         if self.flight.rec:
             self.flight.rec_btn.setChecked(False)
         self.label.save_if_dirty()
+        path = self.blobs.autosave()
+        if path is not None:
+            print("tcview: unsaved blobs written to %s" % path)
         super().closeEvent(e)
 
 

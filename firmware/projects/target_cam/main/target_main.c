@@ -98,6 +98,24 @@ static bool  s_grab;                /* 'g': send the next frame only */
 static int   s_pending_baud;        /* 'B': switched once its ACK is out */
 static int   s_stage_req;           /* '!stage': the level asked for, 0..3 */
 static int   s_cnn_k      = 2;      /* blobs stage 3 checks (Phase C)      */
+static bool  s_collect;             /* '!collect 1': blob records (Phase B1).
+                                       Never saved: collecting is a bench
+                                       session, and a board that boots into
+                                       it would be slow in flight.            */
+static int   s_collect_n;           /* frames since the last records          */
+
+/* Records go out on every COLLECT_EVERY-th frame: 12.5 / 4 = 3.1 frames a
+   second, up to four blobs each. Consecutive frames 80 ms apart are nearly
+   the same picture, so taking all of them would add bytes, not examples;
+   and four records are ~6 kB, 0.05 s at 921600 baud but 0.5 s at 115200,
+   which is the real ceiling on the slow link. */
+#define COLLECT_EVERY   4
+
+/* The crops of the frame being collected, cut while the frame is still held
+   and sent after its CSV row. Static, 4.6 kB: allocated once, never in the
+   loop. */
+static uint16_t        s_crops[BLOB_MAX_REPORT][BLOB_CROP * BLOB_CROP];
+static blob_crop_box_t s_crop_box[BLOB_MAX_REPORT];
 
 /* The learned models, each validated once at boot; NULL = absent or rejected,
    and the pipeline falls back past it. The state strings are what #!CFG
@@ -423,7 +441,7 @@ static void print_cfg(void)
     printf("#!CFG w=%d h=%d cell=%d hue=%d tol=%d sat=%d val=%d area=%d mm=%.0f "
            "fov=%.1f fps=%.3g period_ms=%.1f sensor_us=%.0f awb=%d be=%d preset=%s "
            "baud=%d image=%d stream=%d settings=%s stage=%d stage_eff=%d lut=%s lut_id=%u "
-           "clf=%s cnn=%s cnn_k=%d csv=%d fw=%s collect=0\n",
+           "clf=%s cnn=%s cnn_k=%d csv=%d fw=%s collect=%d fv=%d\n",
            FRAME_W, FRAME_H, s_cfg.cell, s_cfg.hue, s_cfg.hue_tol, s_cfg.sat_min,
            s_cfg.val_min, s_cfg.min_area, s_target_mm, s_hfov_deg, frame_fps(),
            period_ms(), s_sensor_us, s_awb ? 1 : 0, s_cfg.big_endian,
@@ -431,7 +449,7 @@ static void print_cfg(void)
            link_baud(), s_image ? 1 : 0, s_streaming ? 1 : 0, settings_state(),
            s_stage_req, tc_stage_effective(s_stage_req, &s_models),
            s_lut_state, (unsigned)s_lut_id, s_clf_state, s_cnn_state, s_cnn_k, CSV_VERSION,
-           esp_app_get_description()->version);
+           esp_app_get_description()->version, s_collect ? 1 : 0, BLOB_FEAT_VERSION);
 }
 
 /* ------------------------------------------------------------------ */
@@ -476,7 +494,8 @@ static void print_banner(void)
            "s stream | ? info\n");
     printf("#              k config | g grab frame | v<0|1> every frame | "
            "B<baud> link speed | !save | !load | !reset\n");
-    printf("#              !stage <0-3> detector level\n");
+    printf("#              !stage <0-3> detector level | "
+           "!collect <0|1> blob records for training\n");
     printf("# columns      t_ms,ok,cx_px,cy_px,az_deg,el_deg,area_px,w_px,h_px,"
            "fill,range_mm,clipped,blobs,matched_px,b2_az,b2_el,b2_range_mm,"
            "b3_az,b3_el,b3_range_mm,b4_az,b4_el,b4_range_mm,dt_ms,proc_us,"
@@ -557,7 +576,7 @@ static cmd_res_t run_store_command(const char *line)
         printf("# saved settings erased; running the Kconfig defaults\n");
         return CMD_OK;
     }
-    snprintf(s_why, sizeof s_why, "unknown command (!save, !load, !reset, !stage)");
+    snprintf(s_why, sizeof s_why, "unknown (!save !load !reset !stage !collect)");
     return CMD_NAK;
 }
 
@@ -588,6 +607,27 @@ static cmd_res_t run_stage_command(const char *line)
     return CMD_OK;
 }
 
+/* '!collect 0|1'. A whole word for the same reason as !stage: it slows the
+   loop by the records' transfer time, so no stray byte may switch it on. */
+static cmd_res_t run_collect_command(const char *line)
+{
+    int v;
+    if (line[8] != ' ' || !arg_in(line + 9, 0, 1, &v)) {
+        snprintf(s_why, sizeof s_why, "usage: !collect <0|1>");
+        return CMD_NAK;
+    }
+    s_collect = v != 0;
+    s_collect_n = 0;
+    if (s_collect) {
+        printf("# collect on: features and a %dx%d crop of each reported blob, every "
+               "%d frames (timing is NOT flight-representative)\n",
+               BLOB_CROP, BLOB_CROP, COLLECT_EVERY);
+    } else {
+        printf("# collect off\n");
+    }
+    return CMD_OK;
+}
+
 static cmd_res_t run_command(const char *line)
 {
     int v;
@@ -604,6 +644,9 @@ static cmd_res_t run_command(const char *line)
     case '!':
         if (strncmp(line, "!stage", 6) == 0 && (line[6] == ' ' || line[6] == '\0')) {
             return run_stage_command(line);
+        }
+        if (strncmp(line, "!collect", 8) == 0 && (line[8] == ' ' || line[8] == '\0')) {
+            return run_collect_command(line);
         }
         return run_store_command(line);
     case 'c':
@@ -840,6 +883,41 @@ static void calibrate(const uint8_t *frame)
    reported centroid. The text fallback for when the PC viewer is not to hand.
    It tests pixels one by one rather than through blob_mask(), which would
    need a 19 kB buffer in DRAM that is already holding two frames. */
+/*
+ * '!collect' records, one #!BLOB packet per reported blob, after the CSV row
+ * with the same t_ms: the row says what the detector reported, the records
+ * what each of those blobs looked like. Header fields (protocol.py BlobRec):
+ * k of n reported, the stage that ran, the CSV and feature versions and the
+ * firmware, so a dataset row can always be traced to the code that made it;
+ * the blob's centroid, area and box; the crop's source square; the stage's
+ * confidence (-1 until stage 2 has a classifier); the features, %.6g, which
+ * is float precision.
+ */
+static void send_blob_records(const tc_result_t *tr, int n, int64_t t_ms)
+{
+    for (int k = 0; k < n; k++) {
+        const blob_t *b = &tr->r.b[k];
+        const blob_crop_box_t *cb = &s_crop_box[k];
+        char feat[BLOB_FEAT_N * 16];
+        size_t at = 0;
+        for (int i = 0; i < BLOB_FEAT_N && at < sizeof feat; i++)
+            at += (size_t)snprintf(feat + at, sizeof feat - at, "%s%.6g", i ? "," : "",
+                                   (double)tr->feat[k].v[i]);
+        char fields[448];
+        snprintf(fields, sizeof fields,
+                 "t_ms=%lld k=%d n=%d stage=%d csv=%d fv=%d fw=%s c=%.2f,%.2f area=%d "
+                 "box=%d,%d,%d,%d crop=%d,%d,%d conf=%.3g feat=%s cw=%d fmt=rgb565le",
+                 (long long)t_ms, k, n, tr->stage, CSV_VERSION, BLOB_FEAT_VERSION,
+                 esp_app_get_description()->version, b->cx, b->cy, b->area,
+                 b->x0, b->y0, b->x1, b->y1, cb->xs, cb->ys, cb->side,
+                 (double)tr->conf[k], feat, BLOB_CROP);
+        /* The ESP32 is little-endian, so the uint16 array in memory is
+           already rgb565le on the wire. */
+        link_send_packet("BLOB", fields, (const uint8_t *)s_crops[k],
+                         sizeof s_crops[k]);
+    }
+}
+
 static void dump_mask(const uint8_t *frame, const blob_result_t *r)
 {
     int xc = r->found ? (int)r->b[0].cx / 4 : -1;
@@ -1130,9 +1208,15 @@ void app_main(void)
             fflush(stdout);
         }
 
+        /* Features are computed on every frame while collecting, not only
+           on the frames whose records go out, so t_b_us in the rows is a
+           steady figure. Asking for stage 2 turns them on too: with no
+           classifier yet the stage falls back, but t_b_us then measures what
+           stage 2 will cost at 80 ms with nothing else changed. */
+        int flags = (s_collect || s_stage_req >= 2) ? TC_RUN_FEATURES : 0;
         int64_t t0 = esp_timer_get_time();
         tc_result_t tr;
-        int ok = tc_pipeline_run(&s_cfg, s_stage_req, &s_models, fb->buf, s_work,
+        int ok = tc_pipeline_run(&s_cfg, s_stage_req, flags, &s_models, fb->buf, s_work,
                                  esp_timer_get_time, &tr);
         int64_t proc_us = esp_timer_get_time() - t0;
         const blob_result_t r = tr.r;
@@ -1141,11 +1225,28 @@ void app_main(void)
             s_dump_mask = false;
             dump_mask(fb->buf, &r);
         }
+        /* Crops come from the pixels, so they are cut before the frame goes
+           back; the records themselves go out after the row. A frame that
+           goes to the PC ('g' or 'v1') always carries its records: the PC
+           can only check a record against the pixels it came from, and next
+           to a 38 kB frame the records' 6 kB are cheap. Without that, at
+           115200 only one grab in four would be checkable. */
+        bool send_img = s_grab || s_image;
+        int n_rec = 0;
+        if (s_collect && (++s_collect_n >= COLLECT_EVERY || send_img)) {
+            s_collect_n = 0;
+            n_rec = tr.n_feat;
+            for (int k = 0; k < n_rec; k++) {
+                blob_crop_box(&r.b[k], &s_crop_box[k]);
+                blob_crop(&s_cfg, fb->buf, &s_crop_box[k], s_crops[k]);
+            }
+        }
+
         /* The frame goes out before its CSV row, with the same t_ms, so the PC
            can draw this detection on these pixels. The buffer is held while
            it is sent; with two buffers and GRAB_LATEST the driver keeps
            filling the other. */
-        if (s_grab || s_image) {
+        if (send_img) {
             s_grab = false;
             link_send_frame(fb->buf, fb->len, FRAME_W, FRAME_H,
                             s_cfg.big_endian, capture_us / 1000);
@@ -1187,6 +1288,7 @@ void app_main(void)
                    s_loop_us, CSV_VERSION);
             fflush(stdout);
         }
+        send_blob_records(&tr, n_rec, capture_us / 1000);
         serve_commands();
         /* Busy time from the frame's arrival to here - detection, the row,
            any command reply - reported in the next row. */

@@ -19,6 +19,12 @@
  *   - a model record is refused for each kind of damage, with the right
  *     reason, and a refused table leaves the caller's copy untouched.
  *
+ * Blob features (Phase B1):
+ *
+ *   - asking for them changes nothing the detector reports, fills exactly
+ *     the reported slots with blob_features()'s answer, and times them.
+ *     What each feature measures is test_blob_feat.c's business.
+ *
  * Whether a TRAINED table is any good is a question about data, answered on
  * the labelled frames by host/train/train_lut.py and eval_frames.py, not here.
  */
@@ -148,7 +154,7 @@ static void test_stage0_is_blob_detect(void)
         for (int req = 0; req <= TC_STAGE_MAX; req++) {
             tc_result_t t;
             memset(&t, 0xA5, sizeof t);             /* catch unset fields */
-            int ok = tc_pipeline_run(&c, req, &none, frame, work_buf, NULL, &t);
+            int ok = tc_pipeline_run(&c, req, 0, &none, frame, work_buf, NULL, &t);
             int eq = memcmp(&t.r, &ref, sizeof ref) == 0 && ok == ref.found;
             same += eq;
             check(eq, "pipeline result differs from blob_detect");
@@ -171,7 +177,7 @@ static void test_timing(void)
     scene(3);
     tc_result_t t;
     s_ticks = 0;
-    tc_pipeline_run(&c, 0, &none, frame, work_buf, fake_clock, &t);
+    tc_pipeline_run(&c, 0, 0, &none, frame, work_buf, fake_clock, &t);
     printf("   ticks: px %d, total %d, clock calls %lld\n",
            (int)t.t_px_us, (int)t.t_total_us, (long long)s_ticks);
     check(t.t_px_us > 0, "pixel pass not timed");
@@ -183,6 +189,47 @@ static void test_timing(void)
     blob_detect(&c, frame, work_buf, &a);
     blob_detect_timed(&c, frame, work_buf, &b, fake_clock, &tp);
     check(memcmp(&a, &b, sizeof a) == 0, "timing changed the detection");
+}
+
+/* Phase B1: features are an add-on to stages 0 and 1, asked for by flag. */
+static void test_features_flag(void)
+{
+    printf("7. TC_RUN_FEATURES: features for every reported blob, detection unchanged\n");
+    blob_cfg_t c = red_cfg();
+    tc_models_t none = { NULL, NULL, NULL };
+    int same = 0, nblobs = 0;
+    for (int i = 0; i < 30; i++) {
+        scene(i % 5);
+        tc_result_t a, b;
+        memset(&a, 0xA5, sizeof a);
+        memset(&b, 0x5A, sizeof b);
+        tc_pipeline_run(&c, 0, 0, &none, frame, work_buf, NULL, &a);
+        tc_pipeline_run(&c, 0, TC_RUN_FEATURES, &none, frame, work_buf, NULL, &b);
+        int eq = memcmp(&a.r, &b.r, sizeof a.r) == 0 && a.stage == b.stage;
+        same += eq;
+        check(eq, "computing features changed the detection");
+        check(a.n_feat == 0 && b.n_feat == b.r.n_report, "n_feat wrong");
+        for (int k = 0; k < BLOB_MAX_REPORT; k++) {
+            blob_feat_t ref;
+            memset(&ref, 0, sizeof ref);
+            if (k < b.r.n_report) blob_features(&c, frame, &b.r.b[k], &ref);
+            check(memcmp(&ref, &b.feat[k], sizeof ref) == 0,
+                  "pipeline features differ from blob_features (or an empty slot is not 0)");
+            check(b.conf[k] == -1.0f, "features alone must not produce a confidence");
+        }
+        nblobs += b.r.n_report;
+    }
+    printf("   %d/30 detections unchanged, %d blobs with features\n", same, nblobs);
+
+    scene(4);
+    tc_result_t t;
+    s_ticks = 0;
+    tc_pipeline_run(&c, 0, TC_RUN_FEATURES, &none, frame, work_buf, fake_clock, &t);
+    printf("   ticks: px %d, b %d, total %d\n", (int)t.t_px_us, (int)t.t_b_us,
+           (int)t.t_total_us);
+    check(t.r.n_report > 0, "scene(4) should have blobs");
+    check(t.t_b_us > 0, "features not timed");
+    check(t.t_total_us > t.t_px_us + t.t_b_us, "total must include both spans");
 }
 
 static uint8_t lut[COLOR_LUT_BYTES];
@@ -210,8 +257,8 @@ static void test_hsv_table_is_stage0(void)
         for (int i = 0; i < 25; i++) {
             scene(i % 6);
             tc_result_t t0, t1;
-            tc_pipeline_run(&c, 0, &m, frame, big_work, NULL, &t0);
-            tc_pipeline_run(&c, 1, &m, frame, big_work, NULL, &t1);
+            tc_pipeline_run(&c, 0, 0, &m, frame, big_work, NULL, &t0);
+            tc_pipeline_run(&c, 1, 0, &m, frame, big_work, NULL, &t1);
             int eq = memcmp(&t0.r, &t1.r, sizeof t0.r) == 0;
             int na = tc_pipeline_mask(&c, 0, &m, frame, mask_a);
             int nb = tc_pipeline_mask(&c, 1, &m, frame, mask_b);
@@ -232,8 +279,8 @@ static void test_hsv_table_is_stage0(void)
     tc_models_t m = { lut, NULL, NULL };
     scene(3);
     tc_result_t t0, t1;
-    tc_pipeline_run(&c, 0, &m, frame, work_buf, NULL, &t0);
-    tc_pipeline_run(&c, 1, &m, frame, work_buf, NULL, &t1);
+    tc_pipeline_run(&c, 0, 0, &m, frame, work_buf, NULL, &t0);
+    tc_pipeline_run(&c, 1, 0, &m, frame, work_buf, NULL, &t1);
     printf("   empty table: stage 0 matched %d px, stage 1 matched %d\n",
            t0.r.matched, t1.r.matched);
     check(t0.r.found && !t1.r.found && t1.r.matched == 0, "stage 1 ignored the table");
@@ -311,6 +358,7 @@ int main(void)
     test_timing();
     test_hsv_table_is_stage0();
     test_records();
+    test_features_flag();
     printf("\n%s (%d failure%s)\n", failures ? "FAILED" : "PASSED",
            failures, failures == 1 ? "" : "s");
     return failures ? 1 : 0;

@@ -16,8 +16,9 @@ Baud changes follow the firmware's handshake (see main/link.h): the camera
 ACKs 'B<n>', prints #!BAUD <n> at the old speed and switches; we switch and
 send 'k'; if the camera hears nothing valid within 3 s it reverts to 115200.
 If we hear nothing at the new speed we drop back to 115200 ourselves, after
-waiting out the camera's revert. The same fallback runs if the camera reboots
-(a replug always comes back at 115200) while we are on a faster speed.
+waiting out the camera's revert. The same fallback runs if we are on a faster speed
+and hear only junk for 3 s, after first asking the camera down (see
+_watchdog: the camera may have rebooted, or the link may have failed under it).
 """
 from __future__ import annotations
 
@@ -50,6 +51,8 @@ class Counters:
     bytes_frame: int = 0
     frames_ok: int = 0
     frames_bad: int = 0
+    blobs_ok: int = 0
+    blobs_bad: int = 0
     junk_lines: int = 0
     rows: int = 0
     naks: int = 0
@@ -149,6 +152,7 @@ class SerialLink(QThread):
         p = self._parser
         c.bytes_text, c.bytes_frame = p.bytes_text, p.bytes_frame
         c.frames_ok, c.frames_bad, c.junk_lines = p.frames_ok, p.frames_bad, p.junk_lines
+        c.blobs_ok, c.blobs_bad = p.blobs_ok, p.blobs_bad
         c.history.append((now, c.bytes_total))
         while c.history and now - c.history[0][0] > 10.0:
             c.history.pop(0)
@@ -261,12 +265,23 @@ class SerialLink(QThread):
         self.state.emit("link at %d baud (fallback)" % P.BOOT_BAUD)
 
     def _watchdog(self):
-        """A board that rebooted talks at 115200; if we are faster and hear
-        only junk for 3 s, follow it down."""
+        """Only junk for 3 s at a faster speed has two causes. The camera
+        rebooted (a replug, a brownout) and talks at 115200: follow it down.
+        Or it is still at this speed and the link has gone bad under load,
+        as the ESP32-CAM-MB's bridge appears to above 115200 with image on
+        (2026-10-17, inferred): the camera's own revert only guards the handshake, so
+        it would stay up here for good while we sat at 115200, each side
+        hearing the other as noise. So ask it down first, at this speed -
+        a short command can get through where a 38 kB frame cannot - and
+        then follow. To a camera already at 115200 the request is a few
+        bytes of noise."""
         if (self.baud != P.BOOT_BAUD and self._switch is None
                 and time.monotonic() - self._last_valid > 3.0
                 and self.counters.rate(1.0) > 0):
+            was = self.baud
+            self._ser.write(("\nB%d\n" % P.BOOT_BAUD).encode())
+            self._ser.flush()       # out at this speed before the port changes
             self._set_port_baud(P.BOOT_BAUD)
-            self.state.emit("only junk at the faster speed (camera rebooted?); "
-                            "back at %d" % P.BOOT_BAUD)
+            self.state.emit("only junk at %d for 3 s; asked the camera down and "
+                            "followed to %d (if junk goes on, replug it)" % (was, P.BOOT_BAUD))
             self.send("k")

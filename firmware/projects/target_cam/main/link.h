@@ -1,5 +1,6 @@
 /*
- * link - raw camera frames and baud-rate changes on UART0, for the PC viewer.
+ * link - raw camera frames, blob records and baud-rate changes on UART0, for
+ * the PC viewer.
  *
  * The flight output of this firmware is the CSV stream at 115200 baud: that is
  * what the ESP32-S3 will read. Everything here is bench-only. It lets the PC
@@ -17,6 +18,10 @@
  * (zlib.crc32). A log line from another task can land inside the payload; the
  * CRC exposes it and the PC drops that frame and resynchronises on the next
  * "#!FRAME" header.
+ *
+ * Blob records ('!collect 1', Phase B1) use the same framing with the tag
+ * "#!BLOB" and a 1152-byte payload (a 24x24 RGB565 crop); see
+ * link_send_packet() below and the target_cam README.
  *
  * Sending a frame blocks the main loop for len*10/baud seconds - 3.3 s at
  * 115200, 0.42 s at 921600 - so while frames are being sent, dt_ms and FPS do
@@ -54,3 +59,13 @@ void link_poll(void);
 /* Send one frame packet (see above). */
 void link_send_frame(const uint8_t *buf, size_t len, int w, int h,
                      bool big_endian, int64_t t_ms);
+
+/* Any binary packet, framed as a frame is:
+ *
+ *   #!<kind> seq=<n> <fields> len=<len> crc=<hex8>\r\n <len bytes> \r\n#!END seq=<n>\r\n
+ *
+ * `fields` is the kind's own key=value text, no line break. Frames and blob
+ * records ('!collect', "#!BLOB") share the sequence counter, so a #!END can
+ * never close the wrong packet. */
+void link_send_packet(const char *kind, const char *fields, const uint8_t *buf,
+                      size_t len);
