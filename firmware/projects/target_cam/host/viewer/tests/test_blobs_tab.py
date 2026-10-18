@@ -205,6 +205,9 @@ def test_collect_and_check_pills(tab):
     tab.agree.feat_equal = 2
     tab._refresh_agreement()
     assert tab.agree_chip.tone() == "warn" and "features equal in 2" in tab.agree_lbl.text()
+    assert tab.agree_copy.copy() == QApplication.clipboard().text() == (
+        "board != PC\n3 records checked against the PC library: features equal in 2, crops "
+        "identical in 3; worst feature difference 0 (relative)")
 
 
 def test_save_clears_unsaved_and_clear_empties(tab, tmp_path):

@@ -356,6 +356,7 @@ Copy buttons must produce plain text that is useful when pasted into notes, a sp
 | Last raw row | the raw CSV line verbatim |
 | Label stats | `<frame name>  saved` ⏎ `balloon 2187 px  background 17013 px  unlabelled 0 px (0 %)` ⏎ `balloons (labelled objects): 1  [2187 px at 75,62]` |
 | Detector vs labels | `detector, stage 0 (hue 145 +/-40, sat >= 48, val >= 82): 1 blob(s) reported` ⏎ `vs labels: TP 1  FN 0  FP 0  split 0  blob 1 = balloon` ⏎ `pixels: precision 84.6 %  recall 81.9 %` |
+| Board = PC check (Blobs) | `board = PC ✓` ⏎ `12 records checked against the PC library: features equal in 12, crops identical in 12; worst feature difference 0 (relative)` |
 | Blob record | the old right-panel text block (`live t26622234  blob 1`, `label ?`, `stage 1  conf -1  fw c2ba88a-dirty`, `fv 1`, `centroid …  area …`, `box …`, `crop …`) |
 | Feature vector | CSV: `fill,log_aspect,hue_spread,sat_mean,sat_std,val_mean,highlight,edge,texture,ring,cy_norm,log_area` ⏎ `0.2045,0.2113,11.82,163.5,20.09,63.68,0,18.58,24.8,0.06548,0.4295,4.29` |
 | Status bar | `baud 460800 | kB/s 1.8 | rows/s 12.0 | frames ok/bad 11 / 0 | …` |

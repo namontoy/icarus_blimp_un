@@ -223,10 +223,11 @@ class BlobsTab(QWidget):
         check.setSpacing(8)
         self.agree_chip = StatusPill()
         check.addWidget(self.agree_chip, 0, Qt.AlignmentFlag.AlignTop)
-        self.agree_lbl = QLabel()
-        self.agree_lbl.setWordWrap(True)
+        self.agree_lbl = value_label(mono=False, wrap=True)
         theme.set_prop(self.agree_lbl, "muted", True)
         check.addWidget(self.agree_lbl, 1)
+        self.agree_copy = CopyButton(self.agree_text, tooltip="Copy the board = PC check")
+        check.addWidget(self.agree_copy, 0, Qt.AlignmentFlag.AlignTop)
         v.addLayout(check)
 
         tb = QWidget()
@@ -662,6 +663,10 @@ class BlobsTab(QWidget):
         self.copy_all.setEnabled(True)
 
     # ---- copy texts (§7) ----------------------------------------------------------
+
+    def agree_text(self) -> str:
+        """The check line: the chip, then the counts or the hint."""
+        return "%s\n%s" % (self.agree_chip.text(), self.agree_lbl.text())
 
     def record_text(self) -> str:
         """The old side panel's record block, line for line."""
