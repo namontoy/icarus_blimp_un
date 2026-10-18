@@ -10,8 +10,8 @@ from __future__ import annotations
 from typing import Callable, Optional, Sequence
 
 from PyQt6.QtCore import QPoint, QRect, QRectF, QSize, Qt
-from PyQt6.QtGui import QFont, QPainter, QPainterPath
-from PyQt6.QtWidgets import (QAbstractItemView, QFrame, QGridLayout, QHBoxLayout,
+from PyQt6.QtGui import QFont, QKeySequence, QPainter, QPainterPath
+from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QFrame, QGridLayout, QHBoxLayout,
                              QHeaderView, QLabel, QLayout,
                              QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
@@ -148,6 +148,26 @@ class ReadoutTable(QTableWidget):
 
     def csv(self) -> str:
         return "\n".join(",".join(row) for row in [self.headers()] + self.rows())
+
+    def selected_tsv(self) -> str:
+        """The selected cells as tab-separated lines, the bounding rows and
+        columns of the selection (a spreadsheet pastes it into a block)."""
+        idx = self.selectedIndexes()
+        if not idx:
+            return ""
+        rows = sorted({i.row() for i in idx})
+        cols = sorted({i.column() for i in idx})
+        sel = {(i.row(), i.column()) for i in idx}
+        return "\n".join("\t".join(self.item(r, c).text() if (r, c) in sel and self.item(r, c)
+                                   else "" for c in cols) for r in rows)
+
+    def keyPressEvent(self, e):
+        # Qt's own Ctrl+C copies only the current cell.
+        if e.matches(QKeySequence.StandardKey.Copy) and self.selectedIndexes():
+            QApplication.clipboard().setText(self.selected_tsv())
+            e.accept()
+            return
+        super().keyPressEvent(e)
 
 
 class Bar(QWidget):
