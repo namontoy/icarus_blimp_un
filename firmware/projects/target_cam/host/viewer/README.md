@@ -91,6 +91,11 @@ see a dropped frame and the resync.
 7. **Save frame...** writes a `.png`, the raw `.rgb565` bytes and the settings as
    `.json` to `target_cam/data/`, which is enough to reproduce a case in the
    host test suite.
+8. **Rotate 180°**, next to Save frame, is for a board whose image arrives
+   upside down. It sends `!flip 1` (and `!flip 0` to undo), so the camera turns
+   the image in the sensor: detection, az/el, saved frames and blob crops come
+   out the right way up, not just the picture on screen. **Save to camera**
+   keeps it. The button stays greyed out with a firmware that has no `!flip`.
 
 Other controls: the preset menu, AWB auto/frozen, the RGB565 byte order, and
 `c` (calibrate on the centre 16×16 patch, shown dashed on the image).

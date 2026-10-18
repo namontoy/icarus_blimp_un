@@ -93,6 +93,7 @@ static bool  s_streaming  = true;
 static bool  s_dump_mask;           /* set by 'm', served on the next frame */
 static bool  s_calibrate;           /* set by 'c', served on the next frame */
 static bool  s_awb        = true;
+static bool  s_flip;                /* '!flip': image turned 180 deg       */
 static bool  s_image;               /* 'v1': send every frame to the PC viewer */
 static bool  s_grab;                /* 'g': send the next frame only */
 static int   s_pending_baud;        /* 'B': switched once its ACK is out */
@@ -281,6 +282,20 @@ static esp_err_t camera_init_at(camera_fb_location_t where)
     return esp_camera_init(&config);
 }
 
+/* '!flip 1' turns the image 180 deg on top of the build's VFLIP/HMIRROR. A
+   student's board with the same parts delivered its image upside down, and a
+   flip in the sensor (rather than on the PC) is what keeps everything after it
+   right: +el above the nose, +az right of it, and the frames, labels and blob
+   crops the same way up as every other camera's. Like set_awb(), before the
+   sensor is up this only records the wish; camera_start() applies it. */
+static void set_flip(bool on)
+{
+    sensor_t *s = esp_camera_sensor_get();
+    if (s && s->set_vflip)   { s->set_vflip(s, CAM_VFLIP ^ (on ? 1 : 0)); }
+    if (s && s->set_hmirror) { s->set_hmirror(s, CAM_HMIRROR ^ (on ? 1 : 0)); }
+    s_flip = on;
+}
+
 static esp_err_t camera_start(void)
 {
     esp_err_t err = camera_init_at(CAMERA_FB_IN_DRAM);
@@ -318,8 +333,7 @@ static esp_err_t camera_start(void)
     if (s->set_wpc)         { s->set_wpc(s, 1); }
     if (s->set_raw_gma)     { s->set_raw_gma(s, 1); }
     if (s->set_dcw)         { s->set_dcw(s, 1); }
-    if (s->set_vflip)       { s->set_vflip(s, CAM_VFLIP); }
-    if (s->set_hmirror)     { s->set_hmirror(s, CAM_HMIRROR); }
+    set_flip(s_flip);
     /* Same gain cap as optflow: high gain buys brightness with chroma noise,
        and chroma noise is exactly what scatters hue. */
     if (s->set_gain_ctrl)   { s->set_gain_ctrl(s, 1); }
@@ -351,6 +365,7 @@ static void live_defaults(void)
     s_preset         = DEFAULT_PRESET;
     s_stage_req      = 0;
     s_cnn_k          = 2;
+    set_flip(false);
     blob_preset_apply(&s_cfg, s_preset);
     /* Before the camera starts there is no sensor yet; set_awb() then only
        records the wish, and app_main() applies it once the sensor is up. */
@@ -376,6 +391,7 @@ static tc_settings_t live_capture(void)
     t.preset     = (int8_t)s_preset;
     t.stage      = (int8_t)s_stage_req;
     t.cnn_k      = (int8_t)s_cnn_k;
+    t.flip       = s_flip ? 1 : 0;
     return t;
 }
 
@@ -393,7 +409,8 @@ static bool live_apply(const tc_settings_t *t)
         (t->awb != 0 && t->awb != 1) || (t->big_endian != 0 && t->big_endian != 1) ||
         t->preset < -1 || t->preset >= BLOB_PRESET_COUNT ||
         t->stage < 0 || t->stage > TC_STAGE_MAX ||
-        t->cnn_k < 1 || t->cnn_k > BLOB_MAX_REPORT) {
+        t->cnn_k < 1 || t->cnn_k > BLOB_MAX_REPORT ||
+        (t->flip != 0 && t->flip != 1)) {
         return false;
     }
     s_cfg.hue        = t->hue;
@@ -419,6 +436,7 @@ static bool live_apply(const tc_settings_t *t)
         }
     }
     set_awb(t->awb != 0);
+    set_flip(t->flip != 0);
     return true;
 }
 
@@ -441,7 +459,7 @@ static void print_cfg(void)
     printf("#!CFG w=%d h=%d cell=%d hue=%d tol=%d sat=%d val=%d area=%d mm=%.0f "
            "fov=%.1f fps=%.3g period_ms=%.1f sensor_us=%.0f awb=%d be=%d preset=%s "
            "baud=%d image=%d stream=%d settings=%s stage=%d stage_eff=%d lut=%s lut_id=%u "
-           "clf=%s cnn=%s cnn_k=%d csv=%d fw=%s collect=%d fv=%d\n",
+           "clf=%s cnn=%s cnn_k=%d csv=%d fw=%s collect=%d fv=%d flip=%d\n",
            FRAME_W, FRAME_H, s_cfg.cell, s_cfg.hue, s_cfg.hue_tol, s_cfg.sat_min,
            s_cfg.val_min, s_cfg.min_area, s_target_mm, s_hfov_deg, frame_fps(),
            period_ms(), s_sensor_us, s_awb ? 1 : 0, s_cfg.big_endian,
@@ -449,7 +467,8 @@ static void print_cfg(void)
            link_baud(), s_image ? 1 : 0, s_streaming ? 1 : 0, settings_state(),
            s_stage_req, tc_stage_effective(s_stage_req, &s_models),
            s_lut_state, (unsigned)s_lut_id, s_clf_state, s_cnn_state, s_cnn_k, CSV_VERSION,
-           esp_app_get_description()->version, s_collect ? 1 : 0, BLOB_FEAT_VERSION);
+           esp_app_get_description()->version, s_collect ? 1 : 0, BLOB_FEAT_VERSION,
+           s_flip ? 1 : 0);
 }
 
 /* ------------------------------------------------------------------ */
@@ -458,9 +477,10 @@ static void print_banner(void)
 {
     float f = focal_px();
     printf("\n# ESP32-CAM forward colour target\n");
-    printf("# frame        %dx%d RGB565 (%s-endian), XCLK %d MHz, sensor frame "
+    printf("# frame        %dx%d RGB565 (%s-endian%s), XCLK %d MHz, sensor frame "
            "%.3f ms; every %d -> %.3g FPS (%.1f ms)\n",
            FRAME_W, FRAME_H, s_cfg.big_endian ? "big" : "little",
+           s_flip ? ", turned 180 deg" : "",
            CONFIG_TARGETCAM_XCLK_MHZ, s_sensor_us / 1000.0, s_every_n, frame_fps(),
            period_ms());
     printf("# colour       %s: hue %d +/-%d deg, sat >= %d, val >= %d, AWB %s\n",
@@ -495,7 +515,7 @@ static void print_banner(void)
     printf("#              k config | g grab frame | v<0|1> every frame | "
            "B<baud> link speed | !save | !load | !reset\n");
     printf("#              !stage <0-3> detector level | "
-           "!collect <0|1> blob records for training\n");
+           "!collect <0|1> blob records for training | !flip <0|1> image 180 deg\n");
     printf("# columns      t_ms,ok,cx_px,cy_px,az_deg,el_deg,area_px,w_px,h_px,"
            "fill,range_mm,clipped,blobs,matched_px,b2_az,b2_el,b2_range_mm,"
            "b3_az,b3_el,b3_range_mm,b4_az,b4_el,b4_range_mm,dt_ms,proc_us,"
@@ -576,7 +596,7 @@ static cmd_res_t run_store_command(const char *line)
         printf("# saved settings erased; running the Kconfig defaults\n");
         return CMD_OK;
     }
-    snprintf(s_why, sizeof s_why, "unknown (!save !load !reset !stage !collect)");
+    snprintf(s_why, sizeof s_why, "unknown (!save !load !reset !stage !collect !flip)");
     return CMD_NAK;
 }
 
@@ -628,6 +648,20 @@ static cmd_res_t run_collect_command(const char *line)
     return CMD_OK;
 }
 
+/* '!flip 0|1'. A whole word for the same reason as !stage: a stray byte that
+   turned the image over in flight would flip the sign of every az and el. */
+static cmd_res_t run_flip_command(const char *line)
+{
+    int v;
+    if (line[5] != ' ' || !arg_in(line + 6, 0, 1, &v)) {
+        snprintf(s_why, sizeof s_why, "usage: !flip <0|1>");
+        return CMD_NAK;
+    }
+    set_flip(v != 0);
+    printf("# image %s\n", s_flip ? "turned 180 deg" : "as the build mounts it");
+    return CMD_OK;
+}
+
 static cmd_res_t run_command(const char *line)
 {
     int v;
@@ -647,6 +681,9 @@ static cmd_res_t run_command(const char *line)
         }
         if (strncmp(line, "!collect", 8) == 0 && (line[8] == ' ' || line[8] == '\0')) {
             return run_collect_command(line);
+        }
+        if (strncmp(line, "!flip", 5) == 0 && (line[5] == ' ' || line[5] == '\0')) {
+            return run_flip_command(line);
         }
         return run_store_command(line);
     case 'c':

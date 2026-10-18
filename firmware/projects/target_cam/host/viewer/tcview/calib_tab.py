@@ -199,7 +199,19 @@ class CalibTab(QWidget):
         self.save_btn.setToolTip("PNG for viewing, the raw .rgb565 bytes and the settings as "
                                  ".json (enough to replay this frame through the host tests).")
         self.save_btn.clicked.connect(self._save_frame)
-        flow.addWidget(_group(self.zoom_seg, self.save_btn))
+        # In the camera, not on screen: the sensor turns the image before the
+        # detector sees it, so az/el, saved frames and blob crops come out
+        # the right way up too. Enabled once the camera reports flip= (a
+        # firmware without !flip never does).
+        self.flip_btn = QPushButton("Rotate 180°")
+        self.flip_btn.setCheckable(True)
+        self.flip_btn.setEnabled(False)
+        self.flip_btn.setToolTip("For a board whose image arrives upside down: the camera turns "
+                                 "it 180° in the sensor ('!flip 1'), so detection, az/el, saved "
+                                 "frames and blob crops are turned too. Save to camera keeps it. "
+                                 "Needs a target_cam firmware with !flip.")
+        self.flip_btn.clicked.connect(lambda on: self.main.send("!flip 1" if on else "!flip 0"))
+        flow.addWidget(_group(self.zoom_seg, self.save_btn, self.flip_btn))
         v.addWidget(tb)
 
         self.view = PixelImageView(W, H)
@@ -537,6 +549,8 @@ class CalibTab(QWidget):
                 self.p[key].set_camera(v[ck])
         self.live_chk.setChecked(v.get("image") == 1)
         self.awb_chk.setChecked(v.get("awb") == 1)
+        self.flip_btn.setEnabled("flip" in v)
+        self.flip_btn.setChecked(v.get("flip") == 1)
         self.order_btn.setText("Byte order: %s-endian" % ("big" if v.get("be") == 1 else "LITTLE"))
         preset = v.get("preset", "?")
         self.preset_lbl.setText("camera: %s" % preset)
@@ -557,6 +571,8 @@ class CalibTab(QWidget):
         self._dim.setEnabled(False)
         self.preset_lbl.setText("")
         self.live_chk.setChecked(False)
+        self.flip_btn.setChecked(False)
+        self.flip_btn.setEnabled(False)
         self.order_btn.setText("Byte order: ?")
         self._show_settings()
         self._redraw()
@@ -822,8 +838,9 @@ class CalibTab(QWidget):
         sec["blobs"].set_summary("area ≥ %d px · %d mm · FOV %.1f°" % (
             self.p["area"].local, self.p["mm"].local, self.p["fov"].local))
         if v:
-            sec["sensor"].set_summary("AWB %s · %s-endian" % (
-                "on" if v.get("awb") == 1 else "off", "big" if v.get("be") == 1 else "LITTLE"))
+            sec["sensor"].set_summary("AWB %s · %s-endian%s" % (
+                "on" if v.get("awb") == 1 else "off", "big" if v.get("be") == 1 else "LITTLE",
+                " · turned 180°" if v.get("flip") == 1 else ""))
             sec["flash"].set_summary({"saved": "● saved", "defaults": "● defaults"}.get(
                 v.get("settings"), "● unsaved"))
         else:

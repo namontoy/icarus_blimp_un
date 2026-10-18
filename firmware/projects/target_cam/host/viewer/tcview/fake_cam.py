@@ -32,7 +32,7 @@ W, H = 160, 120
 SENSOR_US = 1599360.0 / 20
 COLLECT_EVERY = 4       # target_main.c: records on every 4th frame
 DEFAULT = dict(hue=0, tol=12, sat=110, val=50, area=25, mm=550, fov=54.0,
-               every=1, awb=1, be=1, preset="red", stage=0, cnn_k=2)
+               every=1, awb=1, be=1, preset="red", stage=0, cnn_k=2, flip=0)
 
 
 def _rgb565(r, g, b) -> np.ndarray:
@@ -134,7 +134,7 @@ class FakeCamera:
         self._print("#!CFG w=%d h=%d cell=2 hue=%d tol=%d sat=%d val=%d area=%d mm=%d "
                     "fov=%.1f fps=%.3g period_ms=%.1f sensor_us=%.0f awb=%d be=%d preset=%s baud=%d "
                     "image=%d stream=%d settings=%s stage=%d stage_eff=%d lut=%s lut_id=%d "
-                    "clf=none cnn=none cnn_k=%d csv=%d fw=fake collect=%d fv=%d\n"
+                    "clf=none cnn=none cnn_k=%d csv=%d fw=fake collect=%d fv=%d flip=%d\n"
                     % (W, H, c["hue"], c["tol"], c["sat"], c["val"], c["area"], c["mm"],
                        c["fov"], 1000.0 / self._period_ms(), self._period_ms(), SENSOR_US,
                        c["awb"],
@@ -142,7 +142,7 @@ class FakeCamera:
                        int(self.stream), self._settings_state(), c["stage"],
                        self._stage_eff(), "ok" if D.models().lut else "none",
                        D.models().lut_id, c["cnn_k"], CSV_VERSION, int(self.collect),
-                       FEAT_VERSION))
+                       FEAT_VERSION, c["flip"]))
 
     def _period_ms(self) -> float:
         return self.cfg["every"] * SENSOR_US / 1000.0
@@ -196,8 +196,14 @@ class FakeCamera:
             else:
                 self.collect = a.strip() == "1"
                 self.collect_n = 0
+        elif line.split(" ")[0] == "!flip":
+            a = line[6:] if line[5:6] == " " else ""
+            if a.strip() not in ("0", "1"):
+                err = "usage: !flip <0|1>"
+            else:
+                self.cfg["flip"] = int(a)
         elif c == "!":
-            err = "unknown (!save !load !reset !stage !collect)"
+            err = "unknown (!save !load !reset !stage !collect !flip)"
         elif c == "H":
             err = self._set_int("hue", arg, 0, 359, True)
         elif c == "T":
@@ -336,6 +342,8 @@ class FakeCamera:
             now = time.monotonic()
             t_ms = int((now - t0) * 1000) + 6000
             px = self.scene.render(now - t0)
+            if self.cfg["flip"]:
+                px = px[::-1, ::-1]         # the sensor turns it, before anything else
             be = bool(self.cfg["be"])
             # The camera always sends high byte first; 'o' only changes how the
             # detector reads it - which is exactly what the 'o' test is for.

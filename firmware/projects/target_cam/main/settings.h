@@ -9,7 +9,7 @@
  *
  * The record is a versioned, fixed-size struct. A record of another version or
  * size is ignored (defaults are used, and the banner says so) rather than
- * reinterpreted. The exceptions are the v1 and v2 records, which
+ * reinterpreted. The exceptions are the v1, v2 and v3 records, which
  * settings_load() migrates field by field: see there.
  */
 #pragma once
@@ -32,6 +32,7 @@ typedef struct {
     int8_t  preset;         /* blob_preset_t, or -1 for hand-tuned            */
     int8_t  stage;          /* requested detector stage, 0..3 (v3)            */
     int8_t  cnn_k;          /* blobs the CNN checks per frame, 1..4 (v3)      */
+    int8_t  flip;           /* image turned 180 deg on top of the build (v4)  */
 } tc_settings_t;
 
 /* Initialise NVS. A partition that is full or from a newer IDF is erased:
@@ -41,7 +42,8 @@ esp_err_t settings_init(void);
 /* true and *out filled if a valid saved record exists. *migrated is set when
    it was a v1 record, whose frame rate was replaced by the build default. A v2
    record loads without that flag: it gains only stage 0, which is what every
-   v2 build ran, so nothing the user tuned has changed. */
+   v2 build ran, so nothing the user tuned has changed. Nor does a v3 record:
+   it gains flip 0, the image as every v3 build delivered it. */
 bool settings_load(tc_settings_t *out, bool *migrated);
 
 esp_err_t settings_save(const tc_settings_t *s);

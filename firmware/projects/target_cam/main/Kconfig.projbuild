@@ -54,7 +54,8 @@ menu "Target Camera Configuration"
         default n
         help
             Set this if the camera is mounted upside down on the airframe, so
-            that +el still means "above the nose".
+            that +el still means "above the nose". A single board can also be
+            turned at run time, without a rebuild: !flip 1, then !save.
 
     config TARGETCAM_HMIRROR
         bool "Mirror the image horizontally"

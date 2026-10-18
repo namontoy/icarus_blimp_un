@@ -15,8 +15,9 @@
    v2: the int16 'fps' became 'period_ms', so 12.5 FPS (80 ms) is storable.
    v3: 'stage' and 'cnn_k' (the learned detector). They sit in what was the
        struct's tail padding, so all three versions have the same size, and
-       only the version tells them apart. */
-#define VERSION     3
+       only the version tells them apart.
+   v4: 'flip' (!flip), in the last byte of that padding. */
+#define VERSION     4
 
 /* The migration below relies on the size staying 28 B; adding a field that
    grows it makes every older record fail the size check instead. */
@@ -59,6 +60,10 @@ bool settings_load(tc_settings_t *out, bool *migrated)
         r.s.stage = 0;
         r.s.cnn_k = 2;
     }
+    if (r.version <= 3) {
+        /* Padding before v4, so set: no build before v4 could turn it. */
+        r.s.flip = 0;
+    }
     if (r.version == 1) {
         /* Same layout, but the frame-rate slot held an integer fps. Every v1
            record says 10, the only default that version had, so carrying it
@@ -67,7 +72,7 @@ bool settings_load(tc_settings_t *out, bool *migrated)
            default, and the caller says so. */
         r.s.period_ms = CONFIG_TARGETCAM_FRAME_PERIOD_MS;
         *migrated = true;
-    } else if (r.version != 2 && r.version != VERSION) {
+    } else if (r.version != 2 && r.version != 3 && r.version != VERSION) {
         return false;
     }
     *out = r.s;

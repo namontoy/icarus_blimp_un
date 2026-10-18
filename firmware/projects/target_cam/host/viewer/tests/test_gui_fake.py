@@ -119,6 +119,58 @@ def test_bench_session(app, rig):
     assert "dt != 80" in flight.health.copy_text() and "stage      1 running" in flight.health.copy_text()
 
 
+def test_rotate_180_turns_the_image_in_the_camera(app, rig):
+    """Rotate 180° sends !flip; the camera turns the image itself, so the
+    wood patch (lower left in the scene) arrives upper right."""
+    win, cam = rig
+    cal = win.calib
+
+    def wood_corner():
+        rgb = cal.frame.rgb().astype(int)
+        lower_left, upper_right = rgb[110, 10], rgb[9, 149]
+        return "lower left" if lower_left[0] - lower_left[2] > 50 else \
+            "upper right" if upper_right[0] - upper_right[2] > 50 else "?"
+
+    def grab():
+        # The rig corrupts every 4th frame, and a corrupt one is dropped.
+        seq = cal.frame.seq if cal.frame is not None else None
+        for _ in range(3):
+            win.send("g")
+            if wait(app, lambda: cal.frame is not None and cal.frame.seq != seq, 6.0):
+                return
+        raise AssertionError("no frame")
+
+    assert wait(app, lambda: "flip" in cal.cfg)
+    assert cal.flip_btn.isEnabled() and not cal.flip_btn.isChecked()
+    # The fake writes a frame at once and then sleeps for its wire time, so
+    # at 115200 its replies lag 3 s behind the frame; a fast link keeps the
+    # commands below inside their timeout.
+    win.send("B921600")
+    assert wait(app, lambda: win.link.baud == 921600 and win.link.pending() == 0
+                and cal.cfg.get("baud") == 921600)
+    grab()
+    assert wood_corner() == "lower left"
+
+    cal.flip_btn.click()
+    assert wait(app, lambda: cal.cfg.get("flip") == 1)
+    assert cam.cfg["flip"] == 1 and cal.flip_btn.isChecked()
+    assert cal.cfg["settings"] == "modified"
+    assert "turned 180°" in cal.sections["sensor"].summary()
+    grab()
+    assert wood_corner() == "upper right"
+
+    win.send("!flip 2")
+    assert wait(app, lambda: win.link.counters.naks >= 1)
+    assert cam.cfg["flip"] == 1
+    cal.flip_btn.click()
+    assert wait(app, lambda: cal.cfg.get("flip") == 0)
+    assert not cal.flip_btn.isChecked() and cal.cfg["settings"] == "defaults"
+
+    # A camera whose firmware has no !flip never reports flip=.
+    cal.on_cfg({k: v for k, v in cal.cfg.items() if k != "flip"})
+    assert not cal.flip_btn.isEnabled()
+
+
 def test_camera_revert_when_pc_never_confirms(app):
     """Firmware side of the handshake, on the fake: no command at the new
     speed within 3 s -> back to 115200."""

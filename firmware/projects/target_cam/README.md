@@ -172,11 +172,16 @@ any settings saved with `!save` (NVS namespace `targetcam`). The banner's
 unless you erase the whole flash. A record saved by the 10 FPS firmware (record
 v1) is still loaded, calibration included, but its frame rate is replaced by the
 build default of 80 ms, and the banner says so. A v2 record (before the
-learned detector) loads with stage 0 and `cnn_k` 2. `!save` writes the current
-version, v3.
+learned detector) loads with stage 0 and `cnn_k` 2, and a v3 record (before
+`!flip`) loads with the image not turned. `!save` writes the current version,
+v4.
 
 For a camera mounted upside down, set `TARGETCAM_VFLIP` and `TARGETCAM_HMIRROR`
 in `menuconfig`. That keeps +az as "right of the nose" and +el as "above it".
+A single board whose image arrives upside down can be turned at run time
+instead, without a rebuild: `!flip 1`, then `!save` (the viewer's **Rotate
+180°** button). The sensor turns the image on top of the build's two flags, so
+the detector, az/el, `g` frames and blob crops all see it turned.
 
 ## PC viewer: see the image and calibrate by hand
 
@@ -330,6 +335,7 @@ Commands are case-sensitive: `S` is saturation, `s` is the stream.
 | `!load` | Reload the settings saved in flash |
 | `!reset` | Erase the saved settings and go back to the Kconfig defaults |
 | `!stage <0-3>` | Detector level: 0 HSV, 1 learned colour table, 2 + blob classifier, 3 + CNN. A level whose model is missing or invalid is accepted but **falls back** to the highest complete one; `#!CFG` (`stage_eff`) and every row (`stage`) say what really runs. Live only; `!save` keeps it. |
+| `!flip <0\|1>` | Turn the image 180° in the sensor (vertical flip and mirror together), on top of `TARGETCAM_VFLIP`/`HMIRROR`. For a board whose image arrives upside down. Live; `!save` keeps it. |
 | `!collect <0\|1>` | Training data for the blob classifier: every 4th frame and every sent frame (`g`, `v1`), one `#!BLOB` record (features + 24×24 crop) per reported blob, after the row. **Timing is not flight-representative while on.** Live only, never saved. See [Blob records](#blob-records-collect). |
 
 Every command line is answered with `#!ACK <cmd>` or `#!NAK <cmd> -- <reason>`.
@@ -337,7 +343,8 @@ A setting change is followed by `#!CFG`. The commands that touch flash are
 whole words, so one garbled byte (on the bench, `m` once arrived as `W`) can
 never write to flash. `!stage` and `!collect` are whole words for the same
 reason, although they write nothing: one corrupted byte must not change the
-detector level in flight, or start a transfer that stalls the loop.
+detector level in flight, or start a transfer that stalls the loop. `!flip` is
+one too: a turned image swaps the signs of az and el.
 
 From stage 1 up, the learned colour table decides which pixels match. The HSV
 settings (`H T S V`, `c`, presets) are kept and still reported, but they have
@@ -357,7 +364,7 @@ the learned-detector state: `stage=` (requested) `stage_eff=`
 (running) `lut= clf= cnn=` (`ok`, `none` or `bad` for each model) `lut_id=`
 (the colour table's train id, 0 without one) `cnn_k=`
 `csv=2` (the row format) `fw=` (the app version) `collect=` (`!collect`, 0 or 1)
-`fv=` (the blob feature definition, `BLOB_FEAT_VERSION`).
+`fv=` (the blob feature definition, `BLOB_FEAT_VERSION`) `flip=` (`!flip`, 0 or 1).
 
 ## Output format
 
