@@ -140,10 +140,13 @@ class ConnectionBar(QWidget):
         self.pill = StatusPill("neutral", "Not connected")
         flow.addWidget(self._group(self.connect_btn, self.pill))
 
+        # Straight into the flow, not in a group: the flow skips a hidden
+        # widget, but a group around a hidden label is an empty widget that
+        # still takes a place, and at 1024 px it wrapped onto a blank line.
         self.offline_note = QLabel("Labelling works offline")
         theme.set_prop(self.offline_note, "muted", True)
         self.offline_note.hide()
-        flow.addWidget(self._group(self.offline_note))
+        flow.addWidget(self.offline_note)
 
     @staticmethod
     def _caption(text: str) -> QLabel:
@@ -309,7 +312,7 @@ class ConsoleDock(QDockWidget):
         self.entry = CommandLine()
         self.entry.setFont(theme.mono_font())
         self.entry.setPlaceholderText("camera command, e.g.  ?  m  H350  p red  !save   "
-                                      "(Up/Down: previous commands)")
+                                      "(Up/Down: previous commands · Ctrl+L: here)")
         row.addWidget(self.entry, 1)
         self.send_btn = QPushButton("Send")
         row.addWidget(self.send_btn)
@@ -366,6 +369,22 @@ class ConsoleDock(QDockWidget):
 
     def set_expanded(self, on: bool):
         self.header.setChecked(on)
+
+    def open_height(self) -> int:
+        """The dock's height when open: now, or before it was folded."""
+        return self.height() if self.is_expanded() else self._open_h
+
+    def restore(self, expanded: bool, height: int):
+        """Open or folded as last time, and `height` tall whenever open."""
+        self._open_h = height
+        if expanded:
+            self.set_expanded(True)
+            mw = self.parent()
+            if isinstance(mw, QMainWindow):
+                mw.resizeDocks([self], [height], Qt.Orientation.Vertical)
+        else:
+            self.set_expanded(False)
+            self._open_h = height       # folding records the height it had
 
     def _apply(self, on: bool):
         self.chevron.setText("▾" if on else "▸")

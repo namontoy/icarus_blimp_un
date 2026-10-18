@@ -40,7 +40,7 @@ from pathlib import Path
 
 import numpy as np
 from PyQt6.QtCore import QSize, Qt
-from PyQt6.QtGui import QFont, QFontMetrics, QKeySequence, QShortcut
+from PyQt6.QtGui import QFont, QFontMetrics
 from PyQt6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog, QFrame,
                              QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
                              QListWidgetItem, QPushButton, QScrollArea, QStyle,
@@ -50,7 +50,8 @@ from PyQt6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog, QF
 from . import detector as D
 from . import labels as L
 from .calib_tab import BOX_COLOURS, DATA_DIR, STAGE_NAMES, _key, _row
-from .ui import theme
+from .ui import persist, theme
+from .ui.keys import HintButton, add_shortcut
 from .ui.widgets import (Bar, CollapsibleSection, ElidedLabel, GripSplitter, PixelImageView,
                          ReadoutCard, ReadoutStrip, SegmentedButtons, StackedBar,
                          StatusPill, StripSplitter, value_label)
@@ -212,11 +213,7 @@ class LabelTab(QWidget):
                          ("Ctrl+Z", self.do_undo), ("Ctrl+S", self.save),
                          ("PgDown", lambda: self.step(1)), ("PgUp", lambda: self.step(-1)),
                          ("Right", lambda: self.step(1)), ("Left", lambda: self.step(-1))):
-            sc = QShortcut(QKeySequence(keys), self)
-            # A text field that has focus takes its own keys first (Qt's
-            # ShortcutOverride), so typing "1" in the filter types a 1.
-            sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-            sc.activated.connect(fn)
+            add_shortcut(self, keys, fn)
 
         self._paint_changed()
         self._show_changed()
@@ -476,14 +473,14 @@ class LabelTab(QWidget):
         self.band.setSuffix(" px")
         self.band.setToolTip("Rim width left unlabelled round each balloon")
         s.add_layout(_row(b, _key("band"), self.band))
-        b_undo = QPushButton("Undo")
+        b_undo = HintButton("Undo", "Ctrl+Z")
         b_undo.setToolTip("Take back the last stroke or action (Ctrl+Z)")
         b_undo.clicked.connect(self.do_undo)
         b_clear = QPushButton("Clear all")
         theme.set_role(b_clear, "danger")
         b_clear.setToolTip("Every pixel back to unlabelled (Undo brings them back)")
         b_clear.clicked.connect(self.clear)
-        self.save_btn = QPushButton("Save")
+        self.save_btn = HintButton("Save", "Ctrl+S")
         theme.set_role(self.save_btn, "primary")
         self.save_btn.setToolTip("Write <frame>.labels.png now (Ctrl+S); moving to another "
                                  "frame saves too")
@@ -543,6 +540,29 @@ class LabelTab(QWidget):
             self.stage_combo.currentIndex()))
 
     # ---- frames ------------------------------------------------------------------
+
+    # ---- remembered layout (§9) --------------------------------------------------
+
+    def save_state(self, store):
+        persist.save_splitter(store, "split", self.split)
+        persist.save_splitter(store, "vsplit", self.vsplit)
+        persist.save_sections(store, self.sections)
+        persist.save_zoom(store, self.view)
+        store.setValue("opacity", self.opacity.value())
+        store.setValue("folder", str(self.folder))
+
+    def restore_state(self, store, folder: bool = True):
+        """folder=False keeps the folder the tab was opened on (--label DIR)."""
+        persist.restore_splitter(store, "split", self.split)
+        persist.restore_splitter(store, "vsplit", self.vsplit)
+        persist.restore_sections(store, self.sections)
+        persist.restore_zoom(store, self.zoom_seg)
+        v = persist.read_int(store, "opacity", self.opacity.minimum(), self.opacity.maximum())
+        if v is not None:
+            self.opacity.setValue(v)
+        d = persist.read(store, "folder", str, lambda v: bool(v) and Path(v).is_dir())
+        if folder and d is not None and Path(d) != self.folder:
+            self.open_folder(Path(d))
 
     def entered(self):
         """The tab was shown: pick up frames saved meanwhile in the Calib tab."""

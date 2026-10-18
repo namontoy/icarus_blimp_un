@@ -37,7 +37,7 @@ from PyQt6.QtWidgets import (QAbstractItemView, QFrame, QGridLayout, QHBoxLayout
 
 from . import protocol as P
 from .calib_tab import DATA_DIR
-from .ui import theme
+from .ui import persist, theme
 from .ui.widgets import (Bar, Banner, CopyButton, GripSplitter, ReadoutCard, ReadoutTable,
                          value_label)
 
@@ -454,6 +454,16 @@ class FlightTab(QWidget):
         s.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         h.addWidget(s, 1)
         return w
+
+    # ---- remembered layout (§9) --------------------------------------------------
+
+    def save_state(self, store):
+        persist.save_splitter(store, "split", self.split)
+        persist.save_splitter(store, "vsplit", self.vsplit)
+
+    def restore_state(self, store):
+        persist.restore_splitter(store, "split", self.split)
+        persist.restore_splitter(store, "vsplit", self.vsplit)
 
     # ---- from the main window ------------------------------------------------
 

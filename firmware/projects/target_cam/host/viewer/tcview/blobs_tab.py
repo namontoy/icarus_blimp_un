@@ -27,7 +27,7 @@ from pathlib import Path
 
 import numpy as np
 from PyQt6.QtCore import QRectF, QSize, Qt
-from PyQt6.QtGui import QFont, QFontMetrics, QImage, QKeySequence, QPainter, QPixmap, QShortcut
+from PyQt6.QtGui import QFont, QFontMetrics, QImage, QPainter, QPixmap
 from PyQt6.QtWidgets import (QAbstractItemView, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
                              QHeaderView, QLabel, QListView, QListWidget, QListWidgetItem,
                              QMessageBox, QPushButton, QScrollArea, QStyle,
@@ -37,7 +37,8 @@ from . import blobset as B
 from . import detector as D
 from . import protocol as P
 from .calib_tab import DATA_DIR, _group, _key
-from .ui import theme
+from .ui import persist, theme
+from .ui.keys import add_shortcut
 from .ui.widgets import (Banner, CopyButton, FlowLayout, GripSplitter, ReadoutCard, Segment,
                          SegmentedButtons, StackedBar, StatusPill, ToggleSwitch, value_label)
 from .widgets import _Slider
@@ -161,9 +162,7 @@ class BlobsTab(QWidget):
         self.split.setSizes([900, 440])
 
         for key, lab in (("B", B.BALLOON), ("N", B.NOT_BALLOON), ("U", B.UNLABELLED)):
-            sc = QShortcut(QKeySequence(key), self)
-            sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-            sc.activated.connect(lambda lab=lab: self.set_label(self.selected(), lab))
+            add_shortcut(self, key, lambda lab=lab: self.set_label(self.selected(), lab))
         self._refresh_counts()
         self._refresh_agreement()
         self._refresh_collect()
@@ -521,6 +520,18 @@ class BlobsTab(QWidget):
         self.clear()
 
     # ---- grid -----------------------------------------------------------------
+
+    # ---- remembered layout (§9) --------------------------------------------------
+
+    def save_state(self, store):
+        persist.save_splitter(store, "split", self.split)
+        store.setValue("thumb", self.size_slider.value())
+
+    def restore_state(self, store):
+        persist.restore_splitter(store, "split", self.split)
+        px = persist.read_int(store, "thumb", THUMB_MIN, THUMB_MAX)
+        if px is not None:
+            self.set_thumb_size(px)
 
     def set_thumb_size(self, px: int):
         self.delegate.size = int(px)

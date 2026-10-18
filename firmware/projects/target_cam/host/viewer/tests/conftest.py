@@ -32,3 +32,14 @@ QSettings.setPath(QSettings.Format.NativeFormat, QSettings.Scope.UserScope, _set
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
 _app = QApplication.instance() or QApplication([])
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def fresh_settings():
+    """Every test starts from an empty store. A window saves its layout
+    (§9) when it closes, and the next test's window would open on it: a
+    different tab, the console folded, a remembered folder."""
+    QSettings("icarus_blimp", "tcview").clear()
+    yield

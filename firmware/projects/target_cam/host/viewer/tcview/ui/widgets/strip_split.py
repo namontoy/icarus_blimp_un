@@ -36,6 +36,16 @@ class StripSplitter(GripSplitter):
         self.setCollapsible(1, False)
         self.splitterMoved.connect(self._dragged)
 
+    @property
+    def strip_height(self) -> int:
+        """The height the user dragged the strip to, 0 if they never did."""
+        return self._strip_h
+
+    @strip_height.setter
+    def strip_height(self, h: int):
+        self._strip_h = max(0, int(h))
+        self.size_strip()
+
     def resizeEvent(self, e):
         super().resizeEvent(e)
         QTimer.singleShot(0, self.size_strip)       # once the sizes have settled

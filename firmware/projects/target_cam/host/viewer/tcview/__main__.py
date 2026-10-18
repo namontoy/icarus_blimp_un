@@ -30,7 +30,8 @@ from .calib_tab import CalibTab
 from .flight_tab import FlightTab
 from .label_tab import LabelTab
 from .link import CLOSE_S, LOST, OPEN_FAILED, REVERT_S, SerialLink, open_error
-from .ui import theme
+from .ui import persist, theme
+from .ui.keys import add_shortcut
 from .ui.shell import (ConnectionBar, ConsoleDock, PageTabs, StatsBar,
                        counter_segments)
 
@@ -100,18 +101,66 @@ class MainWindow(QMainWindow):
         self._t10.timeout.connect(self.flight.tick)
         self._t10.start()
         self._last_rows = (time.monotonic(), 0)
+        add_shortcut(self, "Ctrl+L", self.focus_command, while_typing=True)
         self._set_conn("off")
         self._tick1()
         self._sized_console = False
+        self.restore_layout()
 
     def showEvent(self, e):
         super().showEvent(e)
         if not self._sized_console:
-            # A dock starts at its content's size hint, which is half the
-            # window here. A quarter of it leaves the tabs their room.
             self._sized_console = True
-            QTimer.singleShot(0, lambda: self.resizeDocks(
-                [self.console], [max(150, self.height() // 4)], Qt.Orientation.Vertical))
+            QTimer.singleShot(0, self._size_console)
+
+    def _size_console(self):
+        # A dock starts at its content's size hint, which is half the window
+        # here. Unless a height was saved, a quarter of it leaves the tabs
+        # their room; a saved one may come from a taller window.
+        h = self._console_h or max(150, self.height() // 4)
+        self.console.restore(self._console_open, max(80, min(h, self.height() * 3 // 5)))
+
+    def focus_command(self):
+        """Ctrl+L: to the command line, whatever has focus."""
+        self.entry.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        self.entry.selectAll()
+
+    # ---- remembered layout (§9) ------------------------------------------------
+
+    def _tab_groups(self):
+        return (("calib", self.calib), ("flight", self.flight), ("label", self.label),
+                ("blobs", self.blobs))
+
+    def restore_layout(self):
+        """Everything but the window's size and place: main() sets those,
+        after the default size, with restore_geometry()."""
+        s = self.store
+        for group, tab in self._tab_groups():
+            s.beginGroup(group)
+            tab.restore_state(s)
+            s.endGroup()
+        i = persist.read_int(s, "window/tab", 0, self.tabs.count() - 1)
+        if i is not None:
+            self.tabs.setCurrentIndex(i)
+        on = persist.read_bool(s, "console/open")
+        self._console_open = True if on is None else on
+        self._console_h = persist.read_int(s, "console/height", 60, 5000) or 0
+
+    def restore_geometry(self, w: int, h: int) -> bool:
+        return persist.restore_geometry(self.store, "window/geometry", self, w, h)
+
+    def save_layout(self):
+        s = self.store
+        persist.save_geometry(s, "window/geometry", self)
+        s.setValue("window/tab", self.tabs.currentIndex())
+        s.setValue("console/open", self.console.is_expanded())
+        s.setValue("console/height", self.console.open_height())
+        for group, tab in self._tab_groups():
+            s.beginGroup(group)
+            tab.save_state(s)
+            s.endGroup()
+        s.remove("calib/show")          # the old panel toggles (§13.3), gone with them
+        s.sync()
 
     # ---- link ----------------------------------------------------------------
 
@@ -297,6 +346,7 @@ class MainWindow(QMainWindow):
         self.stats.set_segments(counter_segments(self.link, rps))
 
     def closeEvent(self, e):
+        self.save_layout()
         link, self.link = self.link, None
         if link is not None:
             # As Disconnect: the camera back to 115200 first, or the next
@@ -320,10 +370,24 @@ class LabelWindow(QMainWindow):
     def __init__(self, folder):
         super().__init__()
         self.setWindowTitle("target_cam viewer - label frames")
+        self.store = QSettings("icarus_blimp", "tcview")
         self.label = LabelTab(folder)
         self.setCentralWidget(self.label)
+        # The Label frames tab's own settings, shared with the full viewer;
+        # a folder named on the command line wins over the remembered one.
+        self.store.beginGroup("label")
+        self.label.restore_state(self.store, folder=folder is None)
+        self.store.endGroup()
+
+    def restore_geometry(self, w: int, h: int) -> bool:
+        return persist.restore_geometry(self.store, "labelwin/geometry", self, w, h)
 
     def closeEvent(self, e):
+        persist.save_geometry(self.store, "labelwin/geometry", self)
+        self.store.beginGroup("label")
+        self.label.save_state(self.store)
+        self.store.endGroup()
+        self.store.sync()
         self.label.save_if_dirty()
         super().closeEvent(e)
 
@@ -347,7 +411,7 @@ def main(argv=None):
     if args.label is not None and not args.port and not args.fake:
         from pathlib import Path
         win = LabelWindow(Path(args.label) if args.label else None)
-        win.resize(1300, 800)
+        win.restore_geometry(1300, 800)
         win.show()
         if args.quit_after:
             QTimer.singleShot(int(args.quit_after * 1000), win.close)
@@ -360,10 +424,10 @@ def main(argv=None):
         fake = FakeCamera(corrupt_every=args.fake_corrupt).start()
         port, note = fake.port, " (FAKE camera)"
     win = MainWindow(port, note, fake=fake is not None)
-    # 1450 x 1000 shows the Calib tab with every panel open; on a smaller
-    # screen take what there is (the controls column scrolls).
-    avail = app.primaryScreen().availableGeometry()
-    win.resize(min(1450, avail.width()), min(1000, avail.height()))
+    # Last run's size and place; else 1450 x 1000, which shows the Calib tab
+    # with every panel open, or what a smaller screen has (the inspector
+    # scrolls).
+    win.restore_geometry(1450, 1000)
     win.show()
     if port:                # --port or --fake; with neither, the window opens disconnected
         win.connect_link()

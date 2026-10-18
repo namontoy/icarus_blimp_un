@@ -39,7 +39,8 @@ from PyQt6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QFrame,
 
 from . import detector as D
 from . import protocol as P
-from .ui import theme
+from .ui import persist, theme
+from .ui.keys import HintButton, add_shortcut
 from .ui.widgets import (Banner, CollapsibleSection, FlowLayout, GripSplitter,
                          PixelImageView, ReadoutCard, ReadoutStrip, SegmentedButtons,
                          StripSplitter, ToggleSwitch, value_label)
@@ -146,9 +147,25 @@ class CalibTab(QWidget):
         for key, ctl in self.p.items():
             ctl.changed.connect(lambda _v: self._redraw())
             ctl.commit.connect(lambda v, k=key: self._commit(k, v))
+        add_shortcut(self, "G", self._grab)
+        add_shortcut(self, "C", self.cal_btn.click)
         self._show_settings()
         self._show_hover()
         self._redraw()
+
+    # ---- remembered layout (§9) --------------------------------------------------
+
+    def save_state(self, store):
+        persist.save_splitter(store, "split", self.split)
+        persist.save_splitter(store, "vsplit", self.vsplit)
+        persist.save_sections(store, self.sections)
+        persist.save_zoom(store, self.view)
+
+    def restore_state(self, store):
+        persist.restore_splitter(store, "split", self.split)
+        persist.restore_splitter(store, "vsplit", self.vsplit)
+        persist.restore_sections(store, self.sections)
+        persist.restore_zoom(store, self.zoom_seg)
 
     # ---- building ---------------------------------------------------------------
 
@@ -161,7 +178,7 @@ class CalibTab(QWidget):
         tb = QWidget()
         flow = FlowLayout(tb, hspacing=16, vspacing=6)
         flow.setContentsMargins(0, 0, 0, 0)
-        self.grab_btn = QPushButton("Grab frame")
+        self.grab_btn = HintButton("Grab frame", "G")
         theme.set_role(self.grab_btn, "primary")
         self.grab_btn.clicked.connect(self._grab)
         self.live_chk = ToggleSwitch("Live")
@@ -416,8 +433,9 @@ class CalibTab(QWidget):
         self._dim.setEnabled(False)
         self.hsv_box.setGraphicsEffect(self._dim)
 
-        cal = QPushButton("Calibrate on centre (c)")
-        cal.setToolTip("The camera samples the dashed 16x16 centre patch of its NEXT frame.")
+        self.cal_btn = cal = HintButton("Calibrate on centre", "C")
+        cal.setToolTip("Sends 'c': the camera samples the dashed 16x16 centre patch of "
+                       "its NEXT frame.")
         cal.clicked.connect(lambda: self.main.send("c"))
         s.add_layout(_row(cal))
         self.cal_lbl = _chip_label(wrap=True)
