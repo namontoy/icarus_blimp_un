@@ -264,7 +264,9 @@ class MainWindow(QMainWindow):
     def _baud_changed(self, b: int):
         self._say("# [viewer] port now at %d baud" % b)
         self.bar.set_baud(b)                # the combo shows the speed in use
-        if self.conn == "on":
+        # closeEvent lets the link go at once, and its last change, back to
+        # 115200 on the way out, arrives queued after that.
+        if self.conn == "on" and self.link is not None:
             self._show_connected()
 
     def send(self, cmd: str) -> bool:

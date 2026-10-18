@@ -50,22 +50,37 @@ def baud_label(b: int) -> str:
 class PortCombo(QComboBox):
     """Editable, so a path that is not listed (/dev/serial/by-id/..., a pty)
     can be typed. The list is read again every time it opens, so a camera
-    plugged in after the viewer started shows up without a restart."""
+    plugged in after the viewer started shows up without a restart.
+
+    The list shows each port's full name ("/dev/ttyUSB0 — CP2102 USB to UART
+    Bridge Controller"); the box shows only the device path, so the box can be
+    narrow and the connection bar fits one line at 1024 px."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setEditable(True)
         self.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-        self.setMinimumContentsLength(30)
+        self.setMinimumContentsLength(13)     # "/dev/ttyUSB0" and a little room
         self.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self.lineEdit().setPlaceholderText("no serial port found: plug the camera in")
+        self.lineEdit().setPlaceholderText("no port found")
         self.extra: list[tuple[str, str]] = []      # always offered first, e.g. the fake
         self.usb: list[str] = []
+        self.currentIndexChanged.connect(self._short)
+        self.activated.connect(self._short)
         self.refresh()
 
     def showPopup(self):
         self.refresh()
+        # The list may be wider than the box, so the full names show there.
+        v = self.view()
+        v.setMinimumWidth(v.sizeHintForColumn(0) + v.verticalScrollBar().sizeHint().width() + 12)
         super().showPopup()
+
+    def _short(self, *_):
+        """A listed port's full name in the box becomes its device path."""
+        i = self.findText(self.currentText())
+        if i >= 0:
+            self.setEditText(self.itemData(i))
 
     def refresh(self):
         keep = self.port()
@@ -82,6 +97,7 @@ class PortCombo(QComboBox):
         self.blockSignals(False)
         if keep:
             self.set_port(keep)
+        self._short()
 
     def add_extra(self, dev: str, label: str):
         self.extra.append((dev, label))
@@ -103,6 +119,7 @@ class PortCombo(QComboBox):
         i = self.findData(dev)
         if i >= 0:
             self.setCurrentIndex(i)
+            self._short()
         else:
             self.setEditText(dev)
 
@@ -115,7 +132,7 @@ class ConnectionBar(QWidget):
         super().__init__(parent)
         self.setObjectName("ConnBar")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
-        flow = FlowLayout(self, hspacing=18, vspacing=6)
+        flow = FlowLayout(self, hspacing=14, vspacing=6)
         flow.setContentsMargins(12, 8, 12, 8)
 
         mark = QLabel("target_cam")
@@ -124,7 +141,8 @@ class ConnectionBar(QWidget):
 
         self.port_combo = PortCombo()
         self.port_combo.setToolTip("Serial port of the camera's programmer. The list is read "
-                                   "again when it opens; a path can also be typed.")
+                                   "again when it opens, so plug the camera in and open it; "
+                                   "a path can also be typed.")
         flow.addWidget(self._group(self._caption("Port"), self.port_combo))
 
         self.baud_combo = QComboBox()

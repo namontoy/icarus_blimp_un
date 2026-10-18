@@ -232,7 +232,8 @@ def test_connect_from_the_gui_and_back(app, tmp_path, monkeypatch):
         assert disconnected(win) and bar.connect_btn.text() == "Connect"
         assert bar.connect_btn.property("role") == "primary"
         assert bar.port_combo.port() == cam.port
-        assert bar.port_combo.currentText() == "FAKE camera (%s)" % cam.port
+        assert bar.port_combo.currentText() == cam.port       # the full name is in the list
+        assert bar.port_combo.itemText(0) == "FAKE camera (%s)" % cam.port
         assert win.stats.copy_text().startswith("baud — | kB/s — |")
         win.tabs.setCurrentWidget(win.label)
         assert not bar.offline_note.isHidden()
