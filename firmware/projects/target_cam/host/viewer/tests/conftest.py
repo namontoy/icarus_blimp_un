@@ -17,3 +17,18 @@ _settings_dir = tempfile.mkdtemp(prefix="tcview-test-settings-")
 atexit.register(shutil.rmtree, _settings_dir, True)
 # QSettings(org, app) always uses NativeFormat, an .ini file on Linux.
 QSettings.setPath(QSettings.Format.NativeFormat, QSettings.Scope.UserScope, _settings_dir)
+
+# One QApplication for the whole session, held here. Each module's `app`
+# fixture finds it with QApplication.instance(); when a module-scoped fixture
+# held the only reference, pytest dropped it at the module's end, and sip
+# destroyed the QApplication with the module's closed (not yet collected)
+# windows still alive. Qt then deleted those windows from C++, and sip never
+# learned that their C++-made children - pyqtgraph's sub-menus, viewports,
+# status bars - had died with them. Their wrappers stayed in sip's address
+# map, where QWidget is also listed at +16 (its QPaintDevice part), so a later
+# object allocated at that address came back as a dead wrapper pointing 16
+# bytes too low: the intermittent segfault in pyqtgraph's menu set-up. The
+# viewer itself makes one QApplication and keeps it until exit.
+from PyQt6.QtWidgets import QApplication  # noqa: E402
+
+_app = QApplication.instance() or QApplication([])
