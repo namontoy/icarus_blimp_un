@@ -626,3 +626,125 @@ other as noise. A replug recovers, because every boot starts at 115200.
 Not established: whether the bridge, the USB host or the ESP32 side corrupts
 the fast link, and whether the `B115200` request gets through on the real
 bridge.
+
+### 10.6 Board check (2026-10-18)
+
+**Measured** on the ESP32-CAM-MB at 115200, after the GUI redesign:
+`!collect 1`, then 3 × `g` with the balloon in view.
+
+- **Agreement:** 4 records were checked against the PC library. Features
+  were equal in 4 of 4 and crops identical in 4 of 4. The worst feature
+  difference was 4×10⁻⁶ (relative, `hue_spread`), against the 2×10⁻⁵
+  threshold.
+- **Reading (reasoned):** the crops are integer-only, so they are expected
+  to match exactly, and they do. The features differ only in the final
+  float steps: the libm calls on two machines, and the 6-digit `%.6g` print.
+  At 4×10⁻⁶ a classifier trained on PC-computed features sees the same
+  numbers the camera computes.
+- **Crops by eye:** the user opened new tiles; the big crop shows the
+  balloon.
+
+**Collection rate (measured, pill on the Blobs tab, 10 s average).** With
+the balloon in view: 2.6–2.7 blobs/s at 115200, and 3.1–3.5 blobs/s at
+460800 (the user raised the speed to compare; the link held).
+
+- **Reading (reasoned, not measured):** records go out every 4th frame, so
+  one blob per frame at 12.5 FPS gives about 3.1/s. At 115200 one 1.44 kB
+  record takes about 125 ms on the wire, longer than the 80 ms frame, so
+  the loop most likely waits on the UART and frames are lost; at 460800 it
+  takes about 31 ms and fits. Rates above 3.1/s mean some sampled frames
+  held a second red blob, since each blob gets its own record. The cause of
+  the 115200 loss was not confirmed with a dt reading while collecting.
+- **Consequence:** 115200 is enough for collecting (a few hundred blobs per
+  scene in a couple of minutes) at about 20 % lower rate. Flight is not
+  affected, since the Flight data tab turns collection off.
+
+**Check 2 (measured).** Collection off, `!stage 2`, 115200, balloon in
+view. The camera reports `stage 1 running (requested 2; clf none)`: with no
+classifier yet the stage falls back, but the features are computed on
+every frame, so this measures what stage 2 will cost before B2.
+
+| Reading (Link health card, 60 s after Reset counts) | Value |
+|---|---|
+| rows/s | 12.5 |
+| dt_ms mean / sd / max | 80.0 / 0.0 / 80.0 |
+| dt ≠ 80 | **0 of 860 rows** |
+| `t_px_us` p50 | 4706 |
+| `t_b_us` p50 / max | 1864 / 1922 |
+| `loop_us` p50 / max | 14062 / 14191 (budget 80000) |
+| wire | 1864 B/s, 16.2 % of 115200 |
+
+- The blob features cost about 1.9 ms per frame, and the whole loop uses
+  about 18 % of the 80 ms period, so stage 2 keeps every row on time.
+- A first reading without the reset showed 2891 late rows of 13009, worst
+  3493 ms. That counter ran since connection and so included the collection
+  period at 115200 and the baud changes (a 3.5 s gap is the length of a
+  speed handshake); it is not a stage 2 result. The counter is cumulative by
+  design (`flight_tab.py` header: one late frame in ten minutes must still
+  show), which is why it needs **Reset counts** before a check.
+
+**B1 board checks are complete.** Next is B2, the blob classifier.
+
+### 10.7 First blob sets: a trial, and the white-balance finding (2026-10-18)
+
+Three live sets were collected and labelled by hand (`target_cam/data/`,
+untracked), stage 1, firmware `ea19ecb-dirty`. Each was saved as its own
+file and is treated as one session.
+
+| Set (saved) | Blobs | balloon | not | The "not" blobs (seen on contact sheets) |
+|---|---|---|---|---|
+| `blobs_20261018_154233` | 491 | 486 | 5 | fragments split off the balloon |
+| `blobs_20261018_221652` | 589 | 332 | 257 | mostly a pink balloon; dark fabric patches, edge pieces |
+| `blobs_20261018_222513` | 487 | 295 | 192 | mostly an orange balloon; dark patches, edge pieces |
+
+The last two come from one power-up of the camera (its clock runs on from
+one to the next) but show different rooms.
+
+**Trial (measured, scratch script, not committed).** Logistic regression
+on the 12 features, standardised, class-weighted, trained on two sets and
+scored on the third:
+
+| Held out | Average precision | At p ≥ 0.5 |
+|---|---|---|
+| 15:42 | 1.000 | 0 of 5 negatives pass (too few to mean much) |
+| 22:16 | 0.684 | P 0.59, R 0.20 |
+| 22:25 | 0.617 | P 0.65, R 0.99; 160 of 192 negatives pass |
+
+In the 22:25 set the orange balloon was the **largest** blob 140 times, so
+stage 1 would have steered to it. Inside one set (trained on one half in
+time, scored on the other) average precision is 0.70–0.99, so the features
+do separate within a scene and fail across scenes.
+
+**Why (measured, then reasoned).** The features describe shape and
+surface, and another balloon has the same ones. Only colour differs, and
+the set has no colour-position feature (hue_spread is a spread, not a
+mean). Adding the saturation-weighted mean hue of the crop's centre did not
+help, because the red balloon's own hue moves more between scenes than the
+gap to the other balloon:
+
+| Set | Red balloon, median hue | Other balloon |
+|---|---|---|
+| 15:42 | −2° | — |
+| 22:16 | −23° | −20° (pink) |
+| 22:25 | +3° | +10° (orange) |
+
+The ~25° drift of one balloon between rooms is most likely white balance
+(reasoned, not shown). `w0` freezes whatever gains the camera holds at that
+moment, those gains were never recorded, and in these three sessions it is
+not known whether AWB was frozen at all.
+
+**Decision (user, 2026-10-18).** Only red balloons are expected in the
+flying area, but the user chose to fix the camera's colour rather than
+leave the other balloons out of the training. The reason is that fixed
+white-balance gains make the colours comparable between cameras and rooms.
+Consequences, in order:
+
+1. Firmware: fixed white-balance gains, recorded with every frame, CSV
+   header and blob record.
+2. Score the **current** table on new labelled frames taken with the fixed
+   gains (`eval_frames.py`). Retrain it only if it falls short.
+3. Collect B2's blob sets again. Features are computed on the pixels the
+   table accepts, so these three sets do not carry over. They stay as a
+   trial batch.
+
+The commit before this change is recorded in the next section.
