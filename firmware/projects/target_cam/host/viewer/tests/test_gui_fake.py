@@ -171,6 +171,35 @@ def test_rotate_180_turns_the_image_in_the_camera(app, rig):
     assert not cal.flip_btn.isEnabled()
 
 
+def test_white_balance_session(app, rig):
+    """w2, W<r>,<g>,<b> and Wc against the fake: the gains reach #!CFG, the
+    controls and the blob records' fields."""
+    win, cam = rig
+    cal = win.calib
+    assert wait(app, lambda: cal.cfg.get("wb") == "auto")
+    assert cal.cfg["wb_gain"] == "0,0,0" and cal.wbcal_btn.isEnabled()
+    win.send("B921600")                 # see test_rotate_180: replies keep up
+    assert wait(app, lambda: win.link.baud == 921600 and win.link.pending() == 0)
+    for sp, g in zip(cal.wb_spin, (97, 64, 58)):
+        sp.setValue(g)
+    cal.wb_set_btn.click()
+    assert wait(app, lambda: cal.cfg.get("wb_gain") == "97,64,58")
+    assert cal.cfg["wb"] == "fixed" and cal.wb_seg.value() == "fixed"
+    assert cam._wb_gain() == (97, 64, 58)
+    naks = win.link.counters.naks
+    win.send("W300,64,64")
+    assert wait(app, lambda: win.link.counters.naks > naks)
+    assert cam.cfg["wb_fixed"] == (97, 64, 58)
+    cal.wb_seg.buttons["auto"].click()
+    assert wait(app, lambda: cal.cfg.get("wb") == "auto")
+    assert cal.cfg["wb_fixed"] == "97,64,58"            # kept for the next w2
+    cal.wbcal_btn.click()
+    assert wait(app, lambda: cal.cfg.get("wb") == "fixed"
+                and cal.cfg.get("wb_fixed") != "97,64,58")
+    r, g, b = cam.cfg["wb_fixed"]
+    assert g == 64 and b > r                            # the fake wall is warm
+
+
 def test_camera_revert_when_pc_never_confirms(app):
     """Firmware side of the handshake, on the fake: no command at the new
     speed within 3 s -> back to 115200."""

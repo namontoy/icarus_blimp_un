@@ -162,6 +162,24 @@ def test_npz_round_trip(tmp_path):
     assert B.load(tmp_path / "empty.npz") == []
 
 
+def test_npz_keeps_the_white_balance(tmp_path):
+    """Fixed gains travel into the set; a set saved before the column existed
+    loads as unrecorded rather than as some guess."""
+    make_set(tmp_path)
+    s = B.from_folder(tmp_path, stage=0, m=D.NO_MODELS, labelled_only=False)
+    s[0].wb, s[0].wb_gain = "fixed", (97, 64, 58)
+    path = tmp_path / "set.npz"
+    B.save(path, s)
+    back = B.load(path)
+    assert (back[0].wb, back[0].wb_gain) == ("fixed", (97, 64, 58))
+    assert all(b.wb == a.wb and b.wb_gain == a.wb_gain for a, b in zip(s, back))
+    z = dict(np.load(path, allow_pickle=False))
+    del z["wb"], z["wb_gain"]
+    np.savez(tmp_path / "old.npz", **z)
+    old = B.load(tmp_path / "old.npz")
+    assert {(o.wb, o.wb_gain) for o in old} == {("unrecorded", P.UNKNOWN_GAIN)}
+
+
 def test_mixed_feature_versions_refuse_to_save(tmp_path):
     make_set(tmp_path)
     s = B.from_folder(tmp_path, stage=0, m=D.NO_MODELS)

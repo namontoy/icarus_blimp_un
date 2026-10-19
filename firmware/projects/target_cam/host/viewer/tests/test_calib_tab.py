@@ -131,6 +131,29 @@ def test_stage_banner_and_faded_hsv_controls(app, win):
     assert cal._settings_text() == "Camera settings: no camera"
 
 
+def test_white_balance_controls(app, win):
+    """The segment and the gains follow the camera; the fixed-gain controls
+    wait for firmware that reports wb=, and a refused white card says why."""
+    cal = win.calib
+    assert not cal.wbcal_btn.isEnabled() and cal.wb_lbl.isHidden()
+    cal.on_cfg(cfg(awb=0))                                  # older firmware
+    assert cal.wb_seg.value() == "frozen" and not cal.wbcal_btn.isEnabled()
+    assert cal.wb_lbl.text().startswith("Frozen: gains not known")
+    cal.on_cfg(cfg(awb=2, wb="fixed", wb_gain="97,64,58", wb_fixed="97,64,58"))
+    assert cal.wb_seg.value() == "fixed" and cal.wbcal_btn.isEnabled()
+    assert [sp.value() for sp in cal.wb_spin] == [97, 64, 58]
+    assert cal.wb_lbl.text().startswith("Fixed gains 97,64,58")
+    assert "WB fixed 97,64,58" in cal.sections["sensor"].summary()
+    # A gain typed but not sent survives a #!CFG with the same stored gains.
+    cal.wb_spin[0].setValue(120)
+    cal.on_cfg(cfg(awb=1, wb="auto", wb_gain="0,0,0", wb_fixed="97,64,58"))
+    assert cal.wb_spin[0].value() == 120 and cal.wb_seg.value() == "auto"
+    cal.on_wbcal(P.WbCal("refused", {"reason": "dark", "R": 12, "G": 20, "B": 9}))
+    assert cal.wb_lbl.text().startswith("White card REFUSED: the centre is too dark")
+    cal.on_disconnected()
+    assert cal.wb_lbl.isHidden() and not cal.wb_set_btn.isEnabled()
+
+
 def test_frame_and_link_card(app, win):
     cal = win.calib
     assert cal._frame_link_text() == "no frame yet: press Grab frame\nnot connected"

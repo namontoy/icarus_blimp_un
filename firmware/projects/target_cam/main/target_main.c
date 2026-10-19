@@ -73,6 +73,44 @@ static const char *TAG = "target";
    at QQVGA: a 300 mm balloon fills it out to about 3 m. */
 #define CAL_PATCH       16
 
+/* White balance, 'w' and 'W'. AUTO is the OV2640's own AWB, which re-solves
+   the gains on every frame from whatever is in view. FROZEN stops it where it
+   is, at gains nobody knows. FIXED loads gains we chose, so they can be
+   written down next to every frame and record. The numbers are those 'w'
+   takes, and 0 and 1 mean what they meant before v5. */
+#define WB_FROZEN       0
+#define WB_AUTO         1
+#define WB_FIXED        2
+
+/* The OV2640's DSP-bank registers for white balance. get_reg()/set_reg()
+   take the bank in bit 8, and the DSP bank is 0, so these are plain. The
+   driver's presets (ov2640.c set_wb_mode) set bit 6 of 0xC7 to select manual
+   gains and then write 0xCC, 0xCD, 0xCE as R, G, B. In all of its presets G is
+   0x3F-0x41 (sunny 5E,41,54; home 42,3F,71), which is why 64 is taken here as
+   a gain of 1.0. That is inferred, not from a datasheet. */
+#define DSP_CTRL1       0xC3    /* bit 3 AWB on, bit 2 AWB gains applied     */
+#define DSP_AWB_CTRL    0xC7    /* bit 6: manual gains (0xCC-0xCE)            */
+#define DSP_AWB_GAIN_R  0xCC    /* then G at 0xCD and B at 0xCE              */
+
+/* 'Wc' (white card): find the R and B gains at which the centre patch reads
+   R = G = B. Each gain is searched for on its own, assuming only that a
+   larger register value gives a stronger channel. The first version scaled
+   each gain by G/R as if the register were a plain multiplier, and on the
+   bench (2026-10-19) it overshot and then oscillated: from 64,64,64 (R/G
+   0.53) to 120,64,105 (R/G 2.6) to 46,64,44 (R/G 0.07, B 0). The response is
+   much steeper than proportional; fitted to those three points it looks like
+   a multiplier with an offset near 44, but three points do not establish a
+   law. So: small damped steps until the answer is bracketed, then the
+   secant between the two closest readings on either side. G stays where it
+   is: exposure control already sets the brightness, and leaving one gain
+   alone keeps the answer unique. */
+#define WBCAL_STEPS     16      /* steps before giving up                    */
+#define WBCAL_SETTLE    3       /* frames from a register write to its frame */
+#define WBCAL_TOL       0.03f   /* R/G and B/G within 3 %                    */
+#define WBCAL_MIN_G     40.0f   /* 0..255; darker and noise sets the answer  */
+#define WBCAL_GAIN_MIN  16      /* lowest register value tried               */
+#define WBCAL_CLIP      (CAL_PATCH * CAL_PATCH / 10)  /* 10 % of the patch    */
+
 /* Kconfig bools are undefined when off; turn them into 0/1 for the sensor. */
 #ifdef CONFIG_TARGETCAM_VFLIP
 #define CAM_VFLIP       1
@@ -92,7 +130,17 @@ static float s_target_mm  = (float)CONFIG_TARGETCAM_TARGET_MM;
 static bool  s_streaming  = true;
 static bool  s_dump_mask;           /* set by 'm', served on the next frame */
 static bool  s_calibrate;           /* set by 'c', served on the next frame */
-static bool  s_awb        = true;
+static int   s_wb         = 1;      /* WB_AUTO; see set_wb()               */
+static uint8_t s_wb_gain[3] = {64, 64, 64};  /* fixed R, G, B ('W')         */
+static int   s_wbcal;               /* 'Wc': steps left, 0 = not running   */
+static int   s_wbcal_wait;          /* frames until a gain change shows    */
+static int   s_wbcal_prev;          /* the mode and gains to restore if    */
+static uint8_t s_wbcal_prev_gain[3]; /* the calibration is refused          */
+/* The search for one gain (R or B): the register values known to read too
+   weak (lo) and too strong (hi), -1 until seen, with their errors (channel/G
+   - 1), and whether this gain is settled. */
+typedef struct { int lo, hi; float elo, ehi; bool done; } wbcal_ch_t;
+static wbcal_ch_t s_wbcal_ch[2];
 static bool  s_flip;                /* '!flip': image turned 180 deg       */
 static bool  s_image;               /* 'v1': send every frame to the PC viewer */
 static bool  s_grab;                /* 'g': send the next frame only */
@@ -286,7 +334,7 @@ static esp_err_t camera_init_at(camera_fb_location_t where)
    student's board with the same parts delivered its image upside down, and a
    flip in the sensor (rather than on the PC) is what keeps everything after it
    right: +el above the nose, +az right of it, and the frames, labels and blob
-   crops the same way up as every other camera's. Like set_awb(), before the
+   crops the same way up as every other camera's. Like set_wb(), before the
    sensor is up this only records the wish; camera_start() applies it. */
 static void set_flip(bool on)
 {
@@ -345,11 +393,75 @@ static esp_err_t camera_start(void)
     return ESP_OK;
 }
 
-static void set_awb(bool on)
+static const char *wb_name(int m)
+{
+    return m == WB_FIXED ? "fixed" : m == WB_FROZEN ? "frozen" : "auto";
+}
+
+/* The gains every frame is made with, for #!CFG and the blob records:
+   0,0,0 means not known, which is what auto and frozen are. A fixed gain is
+   never 0, so the two cannot be confused. */
+static void wb_gain_in_use(uint8_t g[3])
+{
+    for (int i = 0; i < 3; i++) g[i] = s_wb == WB_FIXED ? s_wb_gain[i] : 0;
+}
+
+/* The gains into 0xCC-0xCE, then manual mode on or off. The gains go first,
+   so no frame is made with manual mode and the previous gains. */
+static void wb_write(sensor_t *s, int m)
+{
+    if (s->set_reg == NULL) {
+        return;
+    }
+    if (m == WB_FIXED) {
+        for (int i = 0; i < 3; i++) {
+            s->set_reg(s, DSP_AWB_GAIN_R + i, 0xFF, s_wb_gain[i]);
+        }
+    }
+    s->set_reg(s, DSP_AWB_CTRL, 0x40, m == WB_FIXED ? 0x40 : 0);
+}
+
+/* Fixed sets AWB on as well as manual gains, the combination the driver's
+   presets use (and so the one known to work); auto and frozen leave manual
+   mode off, which is exactly what they were before v5. Any change of mode
+   ends a 'Wc' that is running. Like set_flip(), before the sensor is up this
+   only records the wish. */
+static void set_wb(int m)
+{
+    if (s_wbcal > 0) {
+        s_wbcal = 0;
+        printf("# wb cal       cancelled\n#!WBCAL cancelled\n");
+    }
+    sensor_t *s = esp_camera_sensor_get();
+    if (s) {
+        wb_write(s, m);
+        if (s->set_whitebal) { s->set_whitebal(s, m == WB_FROZEN ? 0 : 1); }
+    }
+    s_wb = m;
+}
+
+/* 'W': what the sensor really holds. Whether 0xCC-0xCE follow the AWB's own
+   gains while it runs is not documented; reading them in a warm scene and
+   then a cool one answers it. If they do, frozen gains could be recorded
+   too. */
+static void print_wb_regs(void)
 {
     sensor_t *s = esp_camera_sensor_get();
-    if (s && s->set_whitebal) { s->set_whitebal(s, on ? 1 : 0); }
-    s_awb = on;
+    if (s == NULL || s->get_reg == NULL) {
+        printf("# wb           no sensor to read\n");
+        return;
+    }
+    int ctrl1 = s->get_reg(s, DSP_CTRL1, 0xFF);
+    int c7 = s->get_reg(s, DSP_AWB_CTRL, 0xFF);
+    int g[3];
+    for (int i = 0; i < 3; i++) g[i] = s->get_reg(s, DSP_AWB_GAIN_R + i, 0xFF);
+    printf("# wb           %s; sensor holds CTRL1 0x%02x (AWB %s, gains %s), "
+           "C7 0x%02x (manual %s), CC CD CE = %d %d %d\n",
+           wb_name(s_wb), ctrl1 & 0xFF, (ctrl1 & 0x08) ? "on" : "off",
+           (ctrl1 & 0x04) ? "applied" : "off", c7 & 0xFF, (c7 & 0x40) ? "on" : "off",
+           g[0], g[1], g[2]);
+    printf("#!WB mode=%s ctrl1=%d c7=%d cc=%d cd=%d ce=%d\n", wb_name(s_wb),
+           ctrl1, c7, g[0], g[1], g[2]);
 }
 
 /* ------------------------------------------------------------------ */
@@ -367,9 +479,10 @@ static void live_defaults(void)
     s_cnn_k          = 2;
     set_flip(false);
     blob_preset_apply(&s_cfg, s_preset);
-    /* Before the camera starts there is no sensor yet; set_awb() then only
+    /* Before the camera starts there is no sensor yet; set_wb() then only
        records the wish, and app_main() applies it once the sensor is up. */
-    set_awb(true);
+    s_wb_gain[0] = s_wb_gain[1] = s_wb_gain[2] = 64;
+    set_wb(WB_AUTO);
 }
 
 /* Zeroed first, so the struct's padding is zero too and two captures of the
@@ -386,12 +499,13 @@ static tc_settings_t live_capture(void)
     t.target_mm  = (int32_t)s_target_mm;
     t.hfov_deg   = s_hfov_deg;
     t.period_ms  = (int16_t)lround(period_ms());
-    t.awb        = s_awb ? 1 : 0;
+    t.awb        = (int8_t)s_wb;
     t.big_endian = (int8_t)s_cfg.big_endian;
     t.preset     = (int8_t)s_preset;
     t.stage      = (int8_t)s_stage_req;
     t.cnn_k      = (int8_t)s_cnn_k;
     t.flip       = s_flip ? 1 : 0;
+    memcpy(t.wb_gain, s_wb_gain, sizeof t.wb_gain);
     return t;
 }
 
@@ -406,7 +520,9 @@ static bool live_apply(const tc_settings_t *t)
         t->target_mm < 0 || t->target_mm > 5000 ||
         !(t->hfov_deg >= 10.0f && t->hfov_deg <= 150.0f) ||
         t->period_ms < 33 || t->period_ms > 1000 ||
-        (t->awb != 0 && t->awb != 1) || (t->big_endian != 0 && t->big_endian != 1) ||
+        t->awb < WB_FROZEN || t->awb > WB_FIXED ||
+        t->wb_gain[0] == 0 || t->wb_gain[1] == 0 || t->wb_gain[2] == 0 ||
+        (t->big_endian != 0 && t->big_endian != 1) ||
         t->preset < -1 || t->preset >= BLOB_PRESET_COUNT ||
         t->stage < 0 || t->stage > TC_STAGE_MAX ||
         t->cnn_k < 1 || t->cnn_k > BLOB_MAX_REPORT ||
@@ -435,7 +551,8 @@ static bool live_apply(const tc_settings_t *t)
             s_preset = -1;
         }
     }
-    set_awb(t->awb != 0);
+    memcpy(s_wb_gain, t->wb_gain, sizeof s_wb_gain);
+    set_wb(t->awb);
     set_flip(t->flip != 0);
     return true;
 }
@@ -453,16 +570,22 @@ static const char *settings_state(void)
 
 /* The machine-readable config. Printed after every accepted command, so the
    viewer's controls always show what the camera really uses rather than what
-   the PC last asked for. */
+   the PC last asked for. awb is the 'w' mode number (0 frozen, 1 auto, 2
+   fixed) and wb its name; wb_gain is the gains the frames are made with
+   (0,0,0 = not known) and wb_fixed the ones 'w2' would load. A saved frame's
+   .json carries this line, so every frame says how its colour was made. */
 static void print_cfg(void)
 {
+    uint8_t g[3];
+    wb_gain_in_use(g);
     printf("#!CFG w=%d h=%d cell=%d hue=%d tol=%d sat=%d val=%d area=%d mm=%.0f "
-           "fov=%.1f fps=%.3g period_ms=%.1f sensor_us=%.0f awb=%d be=%d preset=%s "
-           "baud=%d image=%d stream=%d settings=%s stage=%d stage_eff=%d lut=%s lut_id=%u "
+           "fov=%.1f fps=%.3g period_ms=%.1f sensor_us=%.0f awb=%d wb=%s "
+           "wb_gain=%d,%d,%d wb_fixed=%d,%d,%d be=%d preset=%s baud=%d image=%d stream=%d settings=%s stage=%d stage_eff=%d lut=%s lut_id=%u "
            "clf=%s cnn=%s cnn_k=%d csv=%d fw=%s collect=%d fv=%d flip=%d\n",
            FRAME_W, FRAME_H, s_cfg.cell, s_cfg.hue, s_cfg.hue_tol, s_cfg.sat_min,
            s_cfg.val_min, s_cfg.min_area, s_target_mm, s_hfov_deg, frame_fps(),
-           period_ms(), s_sensor_us, s_awb ? 1 : 0, s_cfg.big_endian,
+           period_ms(), s_sensor_us, s_wb, wb_name(s_wb), g[0], g[1], g[2],
+           s_wb_gain[0], s_wb_gain[1], s_wb_gain[2], s_cfg.big_endian,
            s_preset >= 0 ? blob_preset_name(s_preset) : "custom",
            link_baud(), s_image ? 1 : 0, s_streaming ? 1 : 0, settings_state(),
            s_stage_req, tc_stage_effective(s_stage_req, &s_models),
@@ -483,10 +606,17 @@ static void print_banner(void)
            s_flip ? ", turned 180 deg" : "",
            CONFIG_TARGETCAM_XCLK_MHZ, s_sensor_us / 1000.0, s_every_n, frame_fps(),
            period_ms());
-    printf("# colour       %s: hue %d +/-%d deg, sat >= %d, val >= %d, AWB %s\n",
+    printf("# colour       %s: hue %d +/-%d deg, sat >= %d, val >= %d\n",
            s_preset >= 0 ? blob_preset_name(s_preset) : "custom",
-           s_cfg.hue, s_cfg.hue_tol, s_cfg.sat_min, s_cfg.val_min,
-           s_awb ? "auto" : "frozen");
+           s_cfg.hue, s_cfg.hue_tol, s_cfg.sat_min, s_cfg.val_min);
+    if (s_wb == WB_FIXED) {
+        printf("# white bal.   fixed: gains R %d G %d B %d (64 = 1.0)\n",
+               s_wb_gain[0], s_wb_gain[1], s_wb_gain[2]);
+    } else {
+        printf("# white bal.   %s (gains not known; fixed would use %d,%d,%d)\n",
+               s_wb == WB_AUTO ? "auto" : "frozen", s_wb_gain[0], s_wb_gain[1],
+               s_wb_gain[2]);
+    }
     printf("# blobs        %dx%d cells, min area %d px, up to %d reported\n",
            s_cfg.cell, s_cfg.cell, s_cfg.min_area, BLOB_MAX_REPORT);
     printf("# geometry     h-FOV %.1f deg -> f %.1f px, %.3f deg/px at centre\n",
@@ -510,8 +640,9 @@ static void print_banner(void)
     printf("# commands     p<red|blue|green|orange> preset | c calibrate on centre | "
            "H<deg> hue | T<deg> tol | S<0-255> sat | V<0-255> val\n");
     printf("#              a<px> area | d<mm> size | F<deg> h-FOV |");
-    printf(" f<fps> rate (f12.5 ok) | w<0|1> AWB | o byte order | m mask | "
-           "s stream | ? info\n");
+    printf(" f<fps> rate (f12.5 ok) | o byte order | m mask | s stream | ? info\n");
+    printf("#              w<0|1|2> white balance frozen|auto|fixed | W<r>,<g>,<b> fixed "
+           "gains | Wc gains from a white card | W sensor registers\n");
     printf("#              k config | g grab frame | v<0|1> every frame | "
            "B<baud> link speed | !save | !load | !reset\n");
     printf("#              !stage <0-3> detector level | "
@@ -662,6 +793,57 @@ static cmd_res_t run_flip_command(const char *line)
     return CMD_OK;
 }
 
+/* 'W' alone reads the registers back; 'Wc' starts a white-card calibration;
+   'W<r>,<g>,<b>' sets fixed gains and switches to them. */
+static cmd_res_t run_wb_command(const char *line)
+{
+    const char *a = line + 1;
+    if (*a == '\0') {
+        print_wb_regs();
+        return CMD_OK;
+    }
+    if (strcmp(a, "c") == 0) {
+        if (s_wbcal > 0) {
+            snprintf(s_why, sizeof s_why, "a white-card calibration is already running");
+            return CMD_NAK;
+        }
+        s_wbcal_prev = s_wb;
+        memcpy(s_wbcal_prev_gain, s_wb_gain, sizeof s_wb_gain);
+        set_wb(WB_FIXED);
+        s_wbcal = WBCAL_STEPS;
+        s_wbcal_wait = WBCAL_SETTLE;
+        for (int i = 0; i < 2; i++) {
+            s_wbcal_ch[i] = (wbcal_ch_t){ .lo = -1, .hi = -1 };
+        }
+        printf("# wb cal       hold a white card over the centre; starting from "
+               "%d,%d,%d\n", s_wb_gain[0], s_wb_gain[1], s_wb_gain[2]);
+        return CMD_LATER;               /* #!WBCAL, then #!CFG, when it ends */
+    }
+    /* Three integers, strictly: as with arg_in(), trailing junk is refused. */
+    long g[3];
+    bool ok = true;
+    for (int i = 0; i < 3 && ok; i++) {
+        char *end;
+        g[i] = strtol(a, &end, 10);
+        ok = end != a && g[i] >= 1 && g[i] <= 255;
+        if (ok && i < 2) {
+            ok = *end == ',';
+            end++;
+        }
+        a = end;
+    }
+    while (ok && *a == ' ') a++;
+    if (!ok || *a != '\0') {
+        snprintf(s_why, sizeof s_why, "usage: W | Wc | W<r>,<g>,<b> (1..255, 64 = 1.0)");
+        return CMD_NAK;
+    }
+    for (int i = 0; i < 3; i++) s_wb_gain[i] = (uint8_t)g[i];
+    set_wb(WB_FIXED);
+    printf("# white balance fixed: gains %d,%d,%d\n",
+           s_wb_gain[0], s_wb_gain[1], s_wb_gain[2]);
+    return CMD_OK;
+}
+
 static cmd_res_t run_command(const char *line)
 {
     int v;
@@ -762,10 +944,17 @@ static cmd_res_t run_command(const char *line)
         return CMD_OK;
     }
     case 'w':
-        if (!arg_in(line + 1, 0, 1, &v)) return CMD_NAK;
-        set_awb(v != 0);
-        printf("# AWB %s\n", s_awb ? "auto" : "frozen at current gains");
+        if (!arg_in(line + 1, WB_FROZEN, WB_FIXED, &v)) return CMD_NAK;
+        set_wb(v);
+        if (v == WB_FIXED) {
+            printf("# white balance fixed: gains %d,%d,%d\n",
+                   s_wb_gain[0], s_wb_gain[1], s_wb_gain[2]);
+        } else {
+            printf("# white balance %s\n", v == WB_AUTO ? "auto" : "frozen at current gains");
+        }
         return CMD_OK;
+    case 'W':
+        return run_wb_command(line);
     case 'o':
         s_cfg.big_endian = !s_cfg.big_endian;
         printf("# RGB565 byte order now %s-endian\n",
@@ -914,6 +1103,135 @@ static void calibrate(const uint8_t *frame)
            s_cfg.sat_min, s_cfg.val_min);
 }
 
+/* Mean R, G, B of the centre patch on a 0..255 scale, and how many of its
+   pixels have each channel at full scale (a clipped channel reads low, not
+   true, so it would pull the gains wrong). */
+static void patch_rgb(const uint8_t *frame, float m[3], int clipped[3])
+{
+    int x0 = (FRAME_W - CAL_PATCH) / 2, y0 = (FRAME_H - CAL_PATCH) / 2;
+    long sum[3] = {0, 0, 0};
+    clipped[0] = clipped[1] = clipped[2] = 0;
+    for (int y = y0; y < y0 + CAL_PATCH; y++) {
+        for (int x = x0; x < x0 + CAL_PATCH; x++) {
+            uint16_t p = blob_pixel(&s_cfg, frame, x, y);
+            int r = p >> 11, g = (p >> 5) & 0x3F, b = p & 0x1F;
+            sum[0] += r; sum[1] += g; sum[2] += b;
+            clipped[0] += r == 0x1F;
+            clipped[1] += g == 0x3F;
+            clipped[2] += b == 0x1F;
+        }
+    }
+    const float n = (float)(CAL_PATCH * CAL_PATCH);
+    m[0] = (float)sum[0] * 255.0f / 31.0f / n;
+    m[1] = (float)sum[1] * 255.0f / 63.0f / n;
+    m[2] = (float)sum[2] * 255.0f / 31.0f / n;
+}
+
+/* The next register value for one gain, from its reading e = channel/G - 1
+   at value v. Returns -1 if it needs more than 16..255 can give. */
+static int wbcal_next(wbcal_ch_t *c, int v, float e)
+{
+    if (fabsf(e) <= WBCAL_TOL) {
+        c->done = true;
+        return v;
+    }
+    if (e < 0) { c->lo = v; c->elo = e; } else { c->hi = v; c->ehi = e; }
+    if (c->lo >= 0 && c->hi >= 0) {
+        if (c->hi - c->lo <= 1) {
+            /* The register cannot land between them: take the closer. */
+            c->done = true;
+            return fabsf(c->elo) <= fabsf(c->ehi) ? c->lo : c->hi;
+        }
+        int n = (int)lroundf((float)c->lo
+                             + (float)(c->hi - c->lo) * -c->elo / (c->ehi - c->elo));
+        return n <= c->lo ? c->lo + 1 : n >= c->hi ? c->hi - 1 : n;
+    }
+    /* Not bracketed yet: half the proportional step (in log), because the
+       measured response is steeper than proportional, and at least 1. */
+    int n = (int)lroundf((float)v / sqrtf(1.0f + e));
+    if (n == v) {
+        n += e < 0 ? 1 : -1;
+    }
+    if (n < WBCAL_GAIN_MIN) n = WBCAL_GAIN_MIN;
+    if (n > 255) n = 255;
+    return n == v ? -1 : n;             /* at a limit and still short: refuse */
+}
+
+/* One step of 'Wc', on a frame made WBCAL_SETTLE frames after the last
+   change. Every step is printed, so a calibration that does not converge
+   shows on the bench how it failed. A refused one puts the mode and gains
+   back as they were. */
+static void wb_cal_step(const uint8_t *frame)
+{
+    if (s_wbcal_wait > 0) {
+        s_wbcal_wait--;
+        return;
+    }
+    float m[3];
+    int clip[3];
+    patch_rgb(frame, m, clip);
+    int step = WBCAL_STEPS - s_wbcal + 1;
+    printf("# wb cal %2d    centre R %.0f G %.0f B %.0f (clipped px R %d G %d B %d) with "
+           "gains %d,%d,%d\n", step, m[0], m[1], m[2], clip[0], clip[1], clip[2],
+           s_wb_gain[0], s_wb_gain[1], s_wb_gain[2]);
+    const char *why = NULL, *tag = NULL;
+    if (m[1] < WBCAL_MIN_G) {
+        tag = "dark";
+        why = "the centre is too dark: fill it with the white card, and light it";
+    } else if (clip[1] > WBCAL_CLIP || (step == 1 && (clip[0] > WBCAL_CLIP
+                                                      || clip[2] > WBCAL_CLIP))) {
+        /* G is never changed here, and at the start nothing has been: the
+           card itself is too bright. Later, R or B clipping is a trial gain
+           too strong, which the search handles. */
+        tag = "clipped";
+        why = "the card is overexposed: move it away from the lamp";
+    } else {
+        int next[2];
+        for (int i = 0; i < 2; i++) {
+            int ch = i ? 2 : 0;
+            /* A clipped channel reads low; it is at least "too strong". */
+            float e = m[ch] / m[1] - 1.0f;
+            if (clip[ch] > WBCAL_CLIP) {
+                e = fmaxf(e, 2 * WBCAL_TOL);
+            }
+            next[i] = s_wbcal_ch[i].done ? s_wb_gain[ch]
+                                         : wbcal_next(&s_wbcal_ch[i], s_wb_gain[ch], e);
+        }
+        if (next[0] < 0 || next[1] < 0) {
+            tag = "range";
+            why = "it needs a gain beyond what the register gives: is the card really white?";
+        } else if (s_wbcal_ch[0].done && s_wbcal_ch[1].done) {
+            s_wbcal = 0;
+            s_wb_gain[0] = (uint8_t)next[0];
+            s_wb_gain[2] = (uint8_t)next[1];
+            sensor_t *s = esp_camera_sensor_get();
+            if (s) wb_write(s, WB_FIXED);
+            printf("# wb cal       done in %d steps: gains %d,%d,%d (!save keeps them)\n",
+                   step, s_wb_gain[0], s_wb_gain[1], s_wb_gain[2]);
+            printf("#!WBCAL ok r=%d g=%d b=%d R=%.0f G=%.0f B=%.0f steps=%d\n",
+                   s_wb_gain[0], s_wb_gain[1], s_wb_gain[2], m[0], m[1], m[2], step);
+            return;
+        } else if (--s_wbcal == 0) {
+            tag = "converge";
+            why = "it did not settle within the steps allowed";
+        } else {
+            s_wb_gain[0] = (uint8_t)next[0];
+            s_wb_gain[2] = (uint8_t)next[1];
+            sensor_t *s = esp_camera_sensor_get();
+            if (s) wb_write(s, WB_FIXED);
+            s_wbcal_wait = WBCAL_SETTLE;
+            return;
+        }
+    }
+    s_wbcal = 0;
+    memcpy(s_wb_gain, s_wbcal_prev_gain, sizeof s_wb_gain);
+    set_wb(s_wbcal_prev);
+    printf("# wb cal       REFUSED: %s. Back to %s, gains %d,%d,%d\n", why,
+           wb_name(s_wb), s_wb_gain[0], s_wb_gain[1], s_wb_gain[2]);
+    printf("#!WBCAL refused reason=%s R=%.0f G=%.0f B=%.0f steps=%d\n",
+           tag, m[0], m[1], m[2], step);
+}
+
 /* 'm': the mask exactly as the detector sees it at the running stage, 4x4
    pixels per character.
    '#' at least half the pixels match, '+' some do, '.' none; 'X' marks the
@@ -928,7 +1246,8 @@ static void calibrate(const uint8_t *frame)
  * firmware, so a dataset row can always be traced to the code that made it;
  * the blob's centroid, area and box; the crop's source square; the stage's
  * confidence (-1 until stage 2 has a classifier); the features, %.6g, which
- * is float precision.
+ * is float precision; and the white balance the pixels were made with, since
+ * colour features from different gains are not comparable (report §10.7).
  */
 static void send_blob_records(const tc_result_t *tr, int n, int64_t t_ms)
 {
@@ -940,14 +1259,17 @@ static void send_blob_records(const tc_result_t *tr, int n, int64_t t_ms)
         for (int i = 0; i < BLOB_FEAT_N && at < sizeof feat; i++)
             at += (size_t)snprintf(feat + at, sizeof feat - at, "%s%.6g", i ? "," : "",
                                    (double)tr->feat[k].v[i]);
-        char fields[448];
+        uint8_t g[3];
+        wb_gain_in_use(g);
+        char fields[512];
         snprintf(fields, sizeof fields,
                  "t_ms=%lld k=%d n=%d stage=%d csv=%d fv=%d fw=%s c=%.2f,%.2f area=%d "
-                 "box=%d,%d,%d,%d crop=%d,%d,%d conf=%.3g feat=%s cw=%d fmt=rgb565le",
+                 "box=%d,%d,%d,%d crop=%d,%d,%d conf=%.3g feat=%s wb=%s wb_gain=%d,%d,%d "
+                 "cw=%d fmt=rgb565le",
                  (long long)t_ms, k, n, tr->stage, CSV_VERSION, BLOB_FEAT_VERSION,
                  esp_app_get_description()->version, b->cx, b->cy, b->area,
                  b->x0, b->y0, b->x1, b->y1, cb->xs, cb->ys, cb->side,
-                 (double)tr->conf[k], feat, BLOB_CROP);
+                 (double)tr->conf[k], feat, wb_name(s_wb), g[0], g[1], g[2], BLOB_CROP);
         /* The ESP32 is little-endian, so the uint16 array in memory is
            already rgb565le on the wire. */
         link_send_packet("BLOB", fields, (const uint8_t *)s_crops[k],
@@ -1161,9 +1483,10 @@ void app_main(void)
         }
         vTaskDelay(pdMS_TO_TICKS(50));
     }
-    /* A saved "AWB frozen" freezes here, at the gains the settle just found -
-       the camera had no sensor to talk to when the settings were loaded. */
-    set_awb(s_awb);
+    /* A saved "frozen" freezes here, at the gains the settle just found, and
+       a saved "fixed" loads its gains - the camera had no sensor to talk to
+       when the settings were loaded. */
+    set_wb(s_wb);
 
     print_banner();
     print_cfg();
@@ -1242,6 +1565,13 @@ void app_main(void)
             s_calibrate = false;
             calibrate(fb->buf);
             print_cfg();
+            fflush(stdout);
+        }
+        if (s_wbcal > 0) {
+            wb_cal_step(fb->buf);
+            if (s_wbcal == 0) {
+                print_cfg();
+            }
             fflush(stdout);
         }
 

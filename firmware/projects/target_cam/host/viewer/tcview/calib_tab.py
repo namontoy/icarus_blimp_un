@@ -44,7 +44,7 @@ from .ui.keys import HintButton, add_shortcut
 from .ui.widgets import (Banner, CollapsibleSection, FlowLayout, GripSplitter,
                          PixelImageView, ReadoutCard, ReadoutStrip, SegmentedButtons,
                          StripSplitter, ToggleSwitch, value_label)
-from .widgets import AMBER, GREEN, GREY, RED, HueBar, ParamControl, chip
+from .widgets import AMBER, GREEN, GREY, RED, HueBar, ParamControl, _SpinBox, chip
 
 DATA_DIR = Path(__file__).resolve().parents[3] / "data"      # target_cam/data
 W, H = 160, 120
@@ -467,15 +467,54 @@ class CalibTab(QWidget):
 
     def _build_sensor(self) -> CollapsibleSection:
         s = CollapsibleSection("Sensor")
-        self.awb_chk = QCheckBox("Auto white balance")
-        self.awb_chk.clicked.connect(lambda on: self.main.send("w1" if on else "w0"))
-        self.awb_chk.setToolTip("Unticked = white balance frozen at the gains it has now.")
+        # White balance (report §10.7): auto re-solves the gains from every
+        # scene, so one balloon's hue drifted ~25° between rooms; fixed gains,
+        # set once from a white card, make colour comparable and are recorded
+        # with every frame and blob.
+        # A segment's third field is a hint painted inside it, so the
+        # explanations go in tooltips and the segments carry only names.
+        self.wb_seg = SegmentedButtons([("auto", "Auto"), ("frozen", "Frozen"),
+                                        ("fixed", "Fixed")])
+        for key, tip in (
+                ("auto", "w1: the sensor re-solves the gains from each scene. Gains "
+                 "not known, so colour drifts with what is in view."),
+                ("frozen", "w0: auto stopped where it is now. Gains not known."),
+                ("fixed", "w2: the R, G, B gains below, recorded with every frame "
+                 "and blob.")):
+            self.wb_seg.buttons[key].setToolTip(tip)
+        self.wb_seg.changed.connect(
+            lambda k: self.main.send({"auto": "w1", "frozen": "w0", "fixed": "w2"}[k]))
+        s.add_layout(_row(_key("White balance"), self.wb_seg))
+        self.wb_spin = []
+        for ch in "RGB":
+            sp = _SpinBox()
+            sp.setRange(1, 255)
+            sp.setValue(64)
+            sp.setPrefix(ch + " ")
+            sp.setToolTip("64 = gain 1.0 (inferred from the driver's presets)")
+            self.wb_spin.append(sp)
+        self.wb_set_btn = set_btn = QPushButton("Set")
+        set_btn.setToolTip("W<r>,<g>,<b>: load these gains and switch to Fixed.")
+        set_btn.clicked.connect(lambda: self.main.send(
+            "W%d,%d,%d" % tuple(sp.value() for sp in self.wb_spin)))
+        s.add_layout(_row(_key("Gains"), *self.wb_spin, set_btn))
+        self.wbcal_btn = QPushButton("From white card")
+        self.wbcal_btn.setToolTip("Wc: hold a white card over the dashed centre patch. The "
+                                  "camera adjusts R and B until the card reads grey (about "
+                                  "1-4 s), then runs Fixed. Save to camera keeps the gains.")
+        self.wbcal_btn.clicked.connect(lambda: self.main.send("Wc"))
+        self.wb_lbl = _chip_label(wrap=True)
+        self.wb_lbl.hide()
+        self._wb_fixed_seen = None
+        self._wb_enable(False)
+        s.add_layout(_row(self.wbcal_btn))
+        s.add_widget(self.wb_lbl)
         self.order_btn = QPushButton("Byte order: ?")
         self.order_btn.setToolTip("Flips how the camera reads RGB565 ('o'). Big-endian was "
                                   "confirmed correct on 2026-10-13; the wrong one looks like "
                                   "speckle everywhere.")
         self.order_btn.clicked.connect(lambda: self.main.send("o"))
-        s.add_layout(_row(self.awb_chk, self.order_btn))
+        s.add_layout(_row(self.order_btn))
         return s
 
     def _build_flash(self) -> CollapsibleSection:
@@ -548,7 +587,7 @@ class CalibTab(QWidget):
             if ck in v:
                 self.p[key].set_camera(v[ck])
         self.live_chk.setChecked(v.get("image") == 1)
-        self.awb_chk.setChecked(v.get("awb") == 1)
+        self._show_wb(v)
         self.flip_btn.setEnabled("flip" in v)
         self.flip_btn.setChecked(v.get("flip") == 1)
         self.order_btn.setText("Byte order: %s-endian" % ("big" if v.get("be") == 1 else "LITTLE"))
@@ -574,6 +613,9 @@ class CalibTab(QWidget):
         self.flip_btn.setChecked(False)
         self.flip_btn.setEnabled(False)
         self.order_btn.setText("Byte order: ?")
+        self.wb_lbl.hide()
+        self._wb_fixed_seen = None
+        self._wb_enable(False)
         self._show_settings()
         self._redraw()
 
@@ -595,6 +637,53 @@ class CalibTab(QWidget):
         ctl = self.pending_cmds.pop(cmd, None)
         if ctl is not None:
             ctl.done(ok)
+
+    def _show_wb(self, v: dict):
+        mode, gain = P.wb_of(v)
+        self.wb_seg.set_value(mode, emit=False)
+        # Firmware before fixed gains sends awb= but no wb=, and would refuse
+        # 'w2' and 'W': those controls wait for a camera that has them.
+        self._wb_enable("wb" in v)
+        try:
+            fixed = P._ints(str(v.get("wb_fixed", "")), 3)
+        except ValueError:
+            fixed = None
+        # Follow the camera's stored gains only when they change (a 'Wc', a
+        # !load), so a #!CFG for some other command does not undo gains
+        # typed here but not yet sent.
+        if fixed is not None and fixed != self._wb_fixed_seen:
+            self._wb_fixed_seen = fixed
+            for sp, g in zip(self.wb_spin, fixed):
+                sp.setValue(g)
+        if mode == "fixed":
+            chip(self.wb_lbl, "Fixed gains %d,%d,%d: recorded with every frame and blob."
+                 % gain, GREEN)
+        elif mode in ("auto", "frozen"):
+            chip(self.wb_lbl, "%s: gains not known, so colour is not comparable between "
+                 "scenes. Calibrate from a white card to fix them." % mode.capitalize(), AMBER)
+        else:
+            chip(self.wb_lbl, "This firmware does not report its white balance.", GREY)
+        self.wb_lbl.show()
+
+    def _wb_enable(self, on: bool):
+        for w in (self.wb_seg.buttons["fixed"], *self.wb_spin, self.wb_set_btn,
+                  self.wbcal_btn):
+            w.setEnabled(on)
+
+    def on_wbcal(self, cal: P.WbCal):
+        """The end of 'Wc'. Only a refusal needs saying here: success shows
+        as the new gains in the #!CFG that follows it."""
+        v = cal.v
+        if cal.status == "refused":
+            why = {"dark": "the centre is too dark (fill it with the card, light it)",
+                   "clipped": "the card is overexposed",
+                   "range": "it needs a gain beyond what the sensor allows (is the card white?)",
+                   "converge": "it did not settle"}.get(v.get("reason"), v.get("reason"))
+            chip(self.wb_lbl, "White card REFUSED: %s. Camera read R %s G %s B %s; white "
+                 "balance put back as it was." % (why, v.get("R"), v.get("G"), v.get("B")), RED)
+        elif cal.status == "cancelled":
+            chip(self.wb_lbl, "White card cancelled by another white-balance command.", AMBER)
+        self.wb_lbl.show()
 
     def on_cal(self, cal: P.Cal):
         v = cal.v
@@ -838,8 +927,8 @@ class CalibTab(QWidget):
         sec["blobs"].set_summary("area ≥ %d px · %d mm · FOV %.1f°" % (
             self.p["area"].local, self.p["mm"].local, self.p["fov"].local))
         if v:
-            sec["sensor"].set_summary("AWB %s · %s-endian%s" % (
-                "on" if v.get("awb") == 1 else "off", "big" if v.get("be") == 1 else "LITTLE",
+            sec["sensor"].set_summary("WB %s · %s-endian%s" % (
+                P.wb_text(*P.wb_of(v)), "big" if v.get("be") == 1 else "LITTLE",
                 " · turned 180°" if v.get("flip") == 1 else ""))
             sec["flash"].set_summary({"saved": "● saved", "defaults": "● defaults"}.get(
                 v.get("settings"), "● unsaved"))

@@ -748,3 +748,145 @@ Consequences, in order:
    trial batch.
 
 The commit before this change is recorded in the next section.
+
+### 10.8 Fixed white-balance gains (2026-10-18)
+
+**Commit before the change: `5dff256`** ("B1 board check done, first blob
+sets and the white-balance finding"). Everything after it on this branch
+belongs to the fixed-gain camera.
+
+**A finding from the saved frames (measured).** Every saved frame in
+`red_s1`–`red_s5` (58 frames) and `orange_s3`–`orange_s5` (10) has
+`"awb": 0` in its `camera_cfg`. The colour table was therefore trained on
+frozen gains, but the gains themselves are not recorded and differed from
+session to session. Whatever gains a session froze cannot be recovered.
+
+**What was built.**
+
+- **`w2`, fixed.** `w0` (frozen) and `w1` (auto) keep their meaning. `w2`
+  writes the R, G, B gains to the OV2640 DSP registers 0xCC, 0xCD and 0xCE,
+  then sets manual-gain mode (0xC7 bit 6) with AWB on. That is the
+  combination the driver's light presets use, so it is the one known to
+  work.
+- **`W<r>,<g>,<b>`** loads gains by hand.
+- **`Wc`** derives gains from a white card held over the centre 16×16
+  patch. As first built, each step scaled R by G/R and B by G/B, then waited
+  3 frames for the sensor to apply the change. That failed on the board and
+  was replaced by a bracketed search (see "First board run" below). G stays where it is, so overall brightness is
+  not touched. It stops when both ratios are within 3 % of 1. It refuses
+  when:
+  - G is below 40 (dark);
+  - more than 10 % of the patch is clipped;
+  - a gain would leave 16–255 (0.25×–4×);
+  - it has not converged within 12 steps.
+
+  A refusal puts the previous mode and gains back. Every step is printed,
+  so a calibration that fails shows how it failed.
+- **`W` alone** reads the registers back (`#!WB`).
+- **NVS settings v5.** The struct grew from 28 to 32 B, with the gains
+  appended. A v1–v4 record is read as the first 28 B of a v5 record and
+  gains unity gains; its awb (0 or 1) is kept.
+
+**Where the gains are recorded.** The aim is that no pixel used for training
+is again of unknown colour:
+
+- `#!CFG` carries `wb=` (mode), `wb_gain=` (the gains in use, `0,0,0` in auto
+  and frozen, where they are not known) and `wb_fixed=` (the gains `w2`
+  would use). The viewer's saved frames keep `#!CFG` in `camera_cfg`, so
+  they carry the gains too.
+- Each `#!BLOB` record carries `wb=` and `wb_gain=`.
+- Blob sets (`.npz`) get `wb` and `wb_gain` columns. Older sets load as
+  `unrecorded`.
+- The viewer's flight CSV gets a `# !CFG k=v ...` line at the start and at
+  every change while recording.
+- The boot banner says which mode is in use and with which gains.
+
+**Reasoned, not measured.**
+
+- **64 = gain 1.0** is inferred: in every one of the driver's presets G is
+  0x3F–0x41. The OV2640 datasheet available here does not document these
+  registers.
+- **It is not known whether 0xCC–0xCE follow the AWB's own gains while it
+  runs.** If they do, a `W` read in auto mode would show different values in
+  a warm scene and a cool one. Frozen gains could then be recorded too, and
+  `Wc` could start from them. Until that is measured, auto and frozen report
+  `0,0,0`.
+- A white card under the flying light is assumed to be a fair grey
+  reference for that light. A card that is not neutral (e.g. bluish office
+  paper) shifts all colours by its tint. It does so consistently, though, so
+  sessions calibrated with the same card remain comparable.
+
+**Tests (PC, measured).** 212 viewer tests pass, 6 of them new: blob-record
+and `#!CFG` round trips with gains, `#!WBCAL` parsing, the `.npz` column
+including an old file without it, the Calib tab's controls, and a fake-camera
+session through `W<r>,<g>,<b>`, a refused `W300,…`, auto, and `Wc`. The C host
+suite passes, and the firmware builds without warnings. **Nothing has been
+run on the board yet.**
+
+**Next (the order in §10.7).** On the board:
+
+1. Check `W` in auto mode, in a warm scene and then a cool one.
+2. Run `Wc` in the flying light and `!save`.
+3. Collect labelled frames with the fixed gains, and score the **current**
+   table on them (`eval_frames.py`) before deciding whether to retrain.
+
+**First board run (measured, 2026-10-19).** White printer paper filled the
+centre patch. `Wc` started from 64,64,64 in the frozen mode, and the patch
+read as below (0–255 means):
+
+| Step | Gains R,G,B | R | G | B | R/G | B/G |
+|---|---|---|---|---|---|---|
+| 1 | 64,64,64 | 61 | 115 | 70 | 0.53 | 0.61 |
+| 2 | 120,64,105 | 172 | 66 | 158 | 2.61 | 2.39 |
+| 3 | 46,64,44 | 10 | 147 | 0 | 0.07 | 0.00 |
+
+After step 3 the proportional correction asked for an R gain of about 676
+(46 / 0.068). It also asked for an unbounded B gain, because B read 0. Both
+are outside 16–255, so the calibration was refused as `range`. Two things are measured here:
+
+- **Unity gains are not neutral.** With all three registers at 64, white
+  paper reads green (R/G 0.53, B/G 0.61). The OV2640's raw green channel is
+  more sensitive, and the presets' larger R and B values fit this (§10.8
+  inferred 64 = 1.0 from them; this does not contradict it).
+- **The response is much steeper than proportional.** R/G rose 4.9× for a
+  1.9× gain, and fell 8× for a 0.72× gain. G also moved (115 → 66 → 147).
+  That is most likely auto exposure answering the brightness change
+  (reasoned, not shown).
+
+Fitted to these three points, R/G ≈ 0.026·(v − 43) and B/G ≈ 0.031·(v − 44).
+That is a multiplier with an offset near 44, perhaps a black level
+subtracted after the gain. Three points cannot establish that law, so the
+fit was not built into the firmware.
+
+**What changed.** `Wc` now searches each gain on its own, assuming only that
+a larger register value gives a stronger channel:
+
+- Until the answer is bracketed, it takes half the proportional step (in
+  log).
+- Once bracketed, it uses the secant between the closest readings on either
+  side.
+- When the two sides are 1 register step apart, it takes the closer of the
+  two.
+- A clipped R or B counts as too strong. Only clipping of G, or clipping on
+  the first reading, refuses as `clipped`.
+- It allows at most 16 steps.
+
+A Python copy of the search reached R/G and B/G within 3 % in 3–4 steps on
+the offset fit and on a power law of exponent 2.5, and in 5–7 steps on a
+plain multiplier, with or without 2 % reading noise (scratch script, not
+committed). It has not been run on the board yet.
+
+
+**Second board run, with the search (measured, 2026-10-19).** Same paper,
+started from `w2` at 64,64,64:
+
+| Step | Gains R,G,B | R | G | B | R/G | B/G |
+|---|---|---|---|---|---|---|
+| 1 | 64,64,64 | 71 | 125 | 82 | 0.57 | 0.66 |
+| 2 | 85,64,79 | 115 | 99 | 108 | 1.16 | 1.09 |
+| 3 | 79,64,76 | 92 | 98 | 98 | 0.94 | 1.00 |
+| 4 | 81,64,76 | 97 | 96 | 96 | 1.01 | 1.00 |
+
+It converged in 4 steps to **81,64,76**. The offset fit from the first run
+had predicted 82,77 (§10.8 simulation). That agreement supports the fit but
+does not prove it: it is one more scene under the same light.

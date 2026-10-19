@@ -334,9 +334,9 @@ class BlobsTab(QWidget):
         kv.setVerticalSpacing(3)
         kv.setColumnStretch(1, 1)
         self.rec = {}
-        for r, name in enumerate(("source", "blob", "stage", "fw", "centroid", "area", "box",
-                                  "crop")):
-            k = _key(name)
+        for r, name in enumerate(("source", "blob", "stage", "fw", "wb", "centroid", "area",
+                                  "box", "crop")):
+            k = _key("white bal." if name == "wb" else name)
             k.setContentsMargins(0, 1, 0, 0)
             val = value_label(wrap=True)
             kv.addWidget(k, r, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
@@ -649,6 +649,7 @@ class BlobsTab(QWidget):
         self.rec["blob"].setText("%d" % s.k)
         self.rec["stage"].setText("%d · conf %.3g" % (s.stage, s.conf))
         self.rec["fw"].setText("%s · fv %d" % (s.fw, s.fv))
+        self.rec["wb"].setText(P.wb_text(s.wb, s.wb_gain))
         self.rec["centroid"].setText("%.1f, %.1f" % (s.cx, s.cy))
         self.rec["area"].setText("%d px" % s.area)
         self.rec["box"].setText("%d,%d - %d,%d" % s.box)
@@ -669,13 +670,15 @@ class BlobsTab(QWidget):
         return "%s\n%s" % (self.agree_chip.text(), self.agree_lbl.text())
 
     def record_text(self) -> str:
-        """The old side panel's record block, line for line."""
+        """The old side panel's record block, line for line, plus the white
+        balance (firmware with fixed gains records it)."""
         if self._shown is None:
             return ""
         s = self.samples[self._shown]
         return "\n".join(["%s  %s  blob %d" % (s.source, s.ref, s.k),
                           "label     %s" % LABEL_TEXT[s.label],
                           "stage %d   conf %.3g   fw %s   fv %d" % (s.stage, s.conf, s.fw, s.fv),
+                          "white bal. %s" % P.wb_text(s.wb, s.wb_gain),
                           "centroid  %.1f, %.1f   area %d" % (s.cx, s.cy, s.area),
                           "box       %d,%d - %d,%d" % s.box,
                           "crop      x %d  y %d  side %d" % s.crop_box])

@@ -183,7 +183,7 @@ class FlightTab(QWidget):
         self.rec_btn = QPushButton("Record")
         self.rec_btn.setIcon(_dot_icon("err_dot"))
         self.rec_btn.setCheckable(True)
-        self.rec_btn.setToolTip("Write every row verbatim to a new CSV file")
+        self.rec_btn.setToolTip("Write every row verbatim, with the camera's settings, to a new CSV file")
         self.rec_btn.toggled.connect(self._record)
         row.addWidget(self.rec_btn)
         self.path_lbl = value_label("rows → target_cam/data/", mono=False)
@@ -479,7 +479,16 @@ class FlightTab(QWidget):
         self.main.send("k")
 
     def on_cfg(self, v: dict):
+        if self.rec and v != self.cfg:
+            self._record_cfg(v)
         self.cfg = v
+
+    def _record_cfg(self, v: dict):
+        """The camera's settings into the recording as a '# !CFG' comment line,
+        the form tools/csv_report.py writes and reads back, so a file always
+        says what produced its rows - the white balance above all, since
+        colour from different gains is not comparable."""
+        self.rec.write("# !CFG %s\n" % " ".join("%s=%s" % kv for kv in v.items()))
 
     def on_disconnected(self):
         """The link is gone: no #!CFG any more, and a recording ends here,
@@ -844,6 +853,8 @@ class FlightTab(QWidget):
             self.rec_path = DATA_DIR / time.strftime("flight_%Y%m%d_%H%M%S.csv")
             self.rec = open(self.rec_path, "w")
             self.rec_n = 0                  # the header goes in with the first row
+            if self.cfg:
+                self._record_cfg(self.cfg)
             self.rec_btn.setText("Recording…")
             self.rec_btn.setToolTip("Recording to %s - click to stop" % self.rec_path)
             theme.set_role(self.rec_btn, "danger")
@@ -854,5 +865,5 @@ class FlightTab(QWidget):
                 self.rec_lbl.setText("saved %s (%d rows)" % (self.rec_path, self.rec_n))
             self.rec = None
             self.rec_btn.setText("Record")
-            self.rec_btn.setToolTip("Write every row verbatim to a new CSV file")
+            self.rec_btn.setToolTip("Write every row verbatim, with the camera's settings, to a new CSV file")
             theme.set_role(self.rec_btn, "")

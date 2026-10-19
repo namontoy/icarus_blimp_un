@@ -3,6 +3,9 @@
  */
 #include "settings.h"
 
+#include <stddef.h>
+#include <string.h>
+
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
@@ -16,13 +19,20 @@
    v3: 'stage' and 'cnn_k' (the learned detector). They sit in what was the
        struct's tail padding, so all three versions have the same size, and
        only the version tells them apart.
-   v4: 'flip' (!flip), in the last byte of that padding. */
-#define VERSION     4
+   v4: 'flip' (!flip), in the last byte of that padding.
+   v5: fixed white-balance gains (awb 2, 'W'). There was no padding left, so
+       the struct grew to 32 B. The new fields are appended, so a v1-v4
+       record is the first 28 B of a v5 one, and settings_load() reads it by
+       its size. */
+#define VERSION     5
 
-/* The migration below relies on the size staying 28 B; adding a field that
-   grows it makes every older record fail the size check instead. */
-_Static_assert(sizeof(tc_settings_t) == 28, "tc_settings_t changed size: "
-               "older records will no longer migrate; review settings_load()");
+/* The size of tc_settings_t in v1-v4: the part of a v5 record they share. */
+#define OLD_SIZE    28
+
+_Static_assert(sizeof(tc_settings_t) == 32, "tc_settings_t changed size: "
+               "review settings_load() and add a migration");
+_Static_assert(offsetof(tc_settings_t, wb_gain) == OLD_SIZE, "the v5 fields must "
+               "follow the v1-v4 ones, or an old record cannot be read as a prefix");
 
 typedef struct {
     uint16_t      version;
@@ -47,12 +57,25 @@ bool settings_load(tc_settings_t *out, bool *migrated)
     if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) {
         return false;                       /* never saved */
     }
+    /* Zeroed, so the tail an old, shorter record does not fill is zero. */
     record_t r;
+    memset(&r, 0, sizeof r);
     size_t len = sizeof r;
     esp_err_t err = nvs_get_blob(h, KEY, &r, &len);
     nvs_close(h);
-    if (err != ESP_OK || len != sizeof r || r.size != sizeof r.s) {
+    if (err != ESP_OK) {
         return false;
+    }
+    bool old = r.version >= 1 && r.version <= 4;
+    size_t want = old ? OLD_SIZE : sizeof r.s;
+    if (len != offsetof(record_t, s) + want || r.size != want) {
+        return false;
+    }
+    if (old) {
+        /* No v1-v4 build could set fixed gains. Unity, so that 'w2' on a
+           board that was never calibrated gives the sensor's plain response
+           rather than a stranger's correction. awb stays 0 or 1. */
+        r.s.wb_gain[0] = r.s.wb_gain[1] = r.s.wb_gain[2] = 64;
     }
     if (r.version == 1 || r.version == 2) {
         /* v1 and v2 had no learned stages: they ran the HSV detector. Their
@@ -72,7 +95,7 @@ bool settings_load(tc_settings_t *out, bool *migrated)
            default, and the caller says so. */
         r.s.period_ms = CONFIG_TARGETCAM_FRAME_PERIOD_MS;
         *migrated = true;
-    } else if (r.version != 2 && r.version != 3 && r.version != VERSION) {
+    } else if (!old && r.version != VERSION) {
         return false;
     }
     *out = r.s;

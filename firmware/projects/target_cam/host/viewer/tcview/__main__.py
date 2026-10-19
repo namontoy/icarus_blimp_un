@@ -307,6 +307,8 @@ class MainWindow(QMainWindow):
             self.blobs.on_cfg(ev.v)
         elif isinstance(ev, P.Cal):
             self.calib.on_cal(ev)
+        elif isinstance(ev, P.WbCal):
+            self.calib.on_wbcal(ev)
         elif isinstance(ev, P.Comment):
             self._say(ev.text)
         elif isinstance(ev, P.Nak):

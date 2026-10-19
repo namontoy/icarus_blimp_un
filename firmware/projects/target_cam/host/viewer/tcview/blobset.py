@@ -37,6 +37,13 @@ The .npz holds only plain arrays (np.load(..., allow_pickle=False) reads it):
   box         (N, 4) int32        x0, y0, x1, y1 inclusive
   crop_box    (N, 3) int32        xs, ys, side
   fw          (N,) str            firmware version ("pc" for frame samples)
+  wb          (N,) str            white balance the pixels were made with: auto,
+                                  frozen, fixed, or unrecorded (older firmware; files
+                                  without the column load as unrecorded)
+  wb_gain     (N, 3) uint8        its R, G, B gains (64 = 1.0); 0,0,0 = not known.
+                                  Colour from different gains is not comparable
+                                  (learned-detector report §10.7), so a training
+                                  set should not mix them blindly
   feat_version, csv_version, crop_size   scalars
   feat_names  (F,) str
 """
@@ -73,6 +80,8 @@ class Sample:
     conf: float
     fw: str
     fv: int = P.FEAT_VERSION
+    wb: str = "unrecorded"
+    wb_gain: tuple = P.UNKNOWN_GAIN
 
     def rgb(self) -> np.ndarray:
         return P.rgb565_to_rgb888(self.crop)
@@ -89,7 +98,8 @@ def verdict(conf: float) -> int:
 def from_record(rec: P.BlobRec) -> Sample:
     return Sample(rec.feat.astype(np.float32), rec.crop.astype(np.uint16), verdict(rec.conf),
                   "live", "t%d" % rec.t_ms, rec.t_ms, rec.k, rec.stage, rec.cx, rec.cy,
-                  rec.area, tuple(rec.box), tuple(rec.crop_box), rec.conf, rec.fw, rec.fv)
+                  rec.area, tuple(rec.box), tuple(rec.crop_box), rec.conf, rec.fw, rec.fv,
+                  rec.wb, tuple(rec.wb_gain))
 
 
 def auto_label(lab: np.ndarray, cx: float, cy: float) -> int:
@@ -113,6 +123,7 @@ def from_frame(sf: L.SavedFrame, lab: np.ndarray | None = None, stage: int = 1,
     if lab is None:
         lab = L.load_labels(sf.label_path, sf.frame.w, sf.frame.h)
     data = sf.frame.data
+    wb, gain = P.wb_of(sf.meta.get("camera_cfg") or {})
     tr = D.pipeline(st, data, stage, m, features=True)
     out = []
     for k in range(tr.n_feat):
@@ -121,7 +132,7 @@ def from_frame(sf: L.SavedFrame, lab: np.ndarray | None = None, stage: int = 1,
         out.append(Sample(np.array(list(tr.feat[k].v), np.float32), D.crop(st, data, box),
                           auto_label(lab, b.cx, b.cy), "frame", frame_ref(sf), sf.frame.t_ms,
                           k, tr.stage, b.cx, b.cy, b.area, (b.x0, b.y0, b.x1, b.y1), box,
-                          float(tr.conf[k]), "pc"))
+                          float(tr.conf[k]), "pc", wb=wb, wb_gain=gain))
     return out
 
 
@@ -168,7 +179,8 @@ def save(path: Path, samples: list[Sample]):
         conf=col(lambda s: s.conf, np.float32),
         box=col(lambda s: s.box, np.int32).reshape(n, 4),
         crop_box=col(lambda s: s.crop_box, np.int32).reshape(n, 3),
-        fw=col(lambda s: s.fw, str),
+        fw=col(lambda s: s.fw, str), wb=col(lambda s: s.wb, str),
+        wb_gain=col(lambda s: s.wb_gain, np.uint8).reshape(n, 3),
         feat_version=np.int32(fvs.pop() if fvs else P.FEAT_VERSION),
         csv_version=np.int32(P.CSV_VERSION), crop_size=np.int32(P.CROP),
         feat_names=np.array(D.feat_names()),
@@ -178,6 +190,7 @@ def save(path: Path, samples: list[Sample]):
 def load(path: Path) -> list[Sample]:
     z = np.load(path, allow_pickle=False)
     fv = int(z["feat_version"])
+    has_wb = "wb" in z.files
     out = []
     for i in range(len(z["label"])):
         out.append(Sample(z["feat"][i], z["crop"][i], int(z["label"][i]), str(z["source"][i]),
@@ -185,7 +198,10 @@ def load(path: Path) -> list[Sample]:
                           int(z["stage"][i]), float(z["cx"][i]), float(z["cy"][i]),
                           int(z["area"][i]), tuple(int(v) for v in z["box"][i]),
                           tuple(int(v) for v in z["crop_box"][i]), float(z["conf"][i]),
-                          str(z["fw"][i]), fv))
+                          str(z["fw"][i]), fv,
+                          str(z["wb"][i]) if has_wb else "unrecorded",
+                          tuple(int(v) for v in z["wb_gain"][i]) if has_wb
+                          else P.UNKNOWN_GAIN))
     return out
 
 

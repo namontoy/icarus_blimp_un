@@ -213,7 +213,8 @@ wait.
 Run everything from `target_cam/` with `conda activate targetcam`.
 
 1. **Collect and label** each session in its own folder under `data/`
-   (`data/red_s3`, `data/venue_s1`, ...), with AWB frozen (`w0`) as in flight.
+   (`data/red_s3`, `data/venue_s1`, ...), with fixed white-balance gains
+   (`Wc` then `!save`, see [White balance](#white-balance)) as in flight.
    Leave out folders whose balloons are not targets, such as `orange_s1`.
 2. **Score the current table on the new session**, before it is trained on,
    and keep the output. It is the only score from frames the table has never
@@ -301,10 +302,10 @@ venue sessions alone and compare that line again.
 5. Move the target across the view and check `az_deg` against a protractor or
    a measured offset at a known distance. That calibrates `TARGETCAM_HFOV_DEG`,
    which scales every angle and every range.
-6. Try **`w0`** (freeze AWB) with the target filling much of the frame. Auto
-   white balance tries to neutralise a dominant colour, which pulls the target
-   toward grey. Whether freezing helps on this airframe is a measurement still
-   to be made.
+6. Set fixed white-balance gains from a white card (**`Wc`**, see
+   [White balance](#white-balance)) and `!save`. Auto white balance tries to
+   neutralise a dominant colour, which pulls the target toward grey, and its
+   gains are never known.
 
 ## Runtime commands
 
@@ -321,7 +322,10 @@ Commands are case-sensitive: `S` is saturation, `s` is the stream.
 | `a<px>` | Smallest blob reported |
 | `d<mm>` | Real target diameter for range (default 550); `d0` turns range off |
 | `f<fps>` | Frame rate, 1–30, decimals allowed (`f12.5`). The sensor is the clock, so this picks every n-th sensor frame: `f12.5` and `f15` give every frame (79.968 ms at XCLK 20 MHz), `f6.25` every second one (159.9 ms), `f10` rounds back to 12.5. The reply and `#!CFG` give what was really set. |
-| `w<0\|1>` | AWB frozen / auto |
+| `w<0\|1\|2>` | White balance: `w0` frozen (auto stopped where it is), `w1` auto, `w2` fixed (the gains below). Only fixed gains are known and recorded; see [White balance](#white-balance). |
+| `W<r>,<g>,<b>` | Load fixed R, G, B gains, 1–255 (64 = 1.0), and switch to `w2` |
+| `Wc` | Fixed gains from a white card over the centre 16×16 patch: R and B are adjusted until it reads grey (up to 16 steps, ~1–6 s), then `#!WBCAL ok\|refused`. A refusal puts the previous mode and gains back. |
+| `W` | Read the sensor's white-balance registers back (`#!WB`) |
 | `F<deg>` | Horizontal FOV, 10–150 (decimals allowed), for angles and range |
 | `o` | Flip RGB565 byte order |
 | `m` | Dump the detection mask once |
@@ -365,6 +369,28 @@ the learned-detector state: `stage=` (requested) `stage_eff=`
 (the colour table's train id, 0 without one) `cnn_k=`
 `csv=2` (the row format) `fw=` (the app version) `collect=` (`!collect`, 0 or 1)
 `fv=` (the blob feature definition, `BLOB_FEAT_VERSION`) `flip=` (`!flip`, 0 or 1).
+After `awb=` (0, 1 or 2) come `wb=` (`frozen`, `auto` or `fixed`) `wb_gain=`
+(the R,G,B gains in use, `0,0,0` when they are not known: in auto and frozen)
+and `wb_fixed=` (the gains `w2` would use, kept while in auto).
+
+### White balance
+
+The OV2640's auto white balance re-solves its R, G, B gains from whatever is
+in view, so one red balloon read about 25° apart in hue between two rooms
+(`docs/learned-detector-report.md` §10.7). `w0` stops it, but at gains nobody
+knows. **Fixed gains** (`w2`) are set once, from a white card (`Wc`) in the
+flying light, saved with `!save`, and reported in `#!CFG`, in every `#!BLOB`
+record, in the viewer's saved frames and blob sets, and in its flight CSVs.
+Colour is then comparable between sessions with the same gains. The scale
+(64 = 1.0) is inferred from the driver's presets, not documented
+(report §10.8).
+
+To calibrate: in the flying light, hold a matt white card (plain printer
+paper) so that it fills the dashed centre square, not in shadow and not
+shining. Send `Wc` (*From white card* in tcview). Keep it still until
+`#!WBCAL ok`, then `!save`. A refusal says why: `dark` (fill and light the
+patch), `clipped` (overexposed), `range` (a gain beyond what the register gives: is the card
+white?), `converge` (it did not settle within 16 steps).
 
 ## Output format
 
@@ -420,7 +446,8 @@ reported blob:
 ```
 #!BLOB seq=<n> t_ms=<ms> k=<0-3> n=<blobs> stage=<ran> csv=2 fv=1 fw=<version>
        c=<cx>,<cy> area=<px> box=<x0>,<y0>,<x1>,<y1> crop=<xs>,<ys>,<side>
-       conf=<-1|0-1> feat=<12 values, %.6g> cw=24 fmt=rgb565le len=1152 crc=<hex8>\r\n
+       conf=<-1|0-1> feat=<12 values, %.6g> wb=<auto|frozen|fixed> wb_gain=<r>,<g>,<b>
+       cw=24 fmt=rgb565le len=1152 crc=<hex8>\r\n
 <1152 bytes: the 24x24 crop, RGB565 little-endian>
 \r\n#!END seq=<n>\r\n
 ```

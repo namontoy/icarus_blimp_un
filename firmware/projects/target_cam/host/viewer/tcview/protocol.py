@@ -13,6 +13,8 @@ What comes out of the camera on UART0 is one byte stream that mixes:
     #!NAK <cmd> -- <reason>    a command arrived and was refused
     #!BAUD <n>                 the camera is switching to n baud now
     #!CAL ok|refused hue= ...  the result of 'c' (calibrate on centre)
+    #!WBCAL ok|refused|cancelled ...  the result of 'Wc' (white card)
+    #!WB mode= ctrl1= ...      'W': the sensor's white-balance registers
     #!END seq=<n>              closes a binary packet
 
   binary packets: a header line ending in len= crc=, exactly len raw bytes,
@@ -122,6 +124,14 @@ class Cal:
 
 
 @dataclass
+class WbCal:
+    """#!WBCAL: how 'Wc' ended. status is ok, refused or cancelled (a 'w' or
+    'W' arrived while it ran); v holds the gains (ok) or reason= (refused)."""
+    status: str
+    v: dict
+
+
+@dataclass
 class End:
     seq: int
 
@@ -200,9 +210,36 @@ class BlobRec:
     conf: float                 # -1 = no classifier ran
     feat: np.ndarray            # (FEAT_N,) float32
     crop: np.ndarray            # (24, 24) uint16 RGB565 values
+    wb: str = "unrecorded"      # auto | frozen | fixed; older firmware sent none
+    wb_gain: tuple = (0, 0, 0)  # R, G, B in use, 64 = 1.0; 0,0,0 = not known
 
     def rgb(self) -> np.ndarray:
         return rgb565_to_rgb888(self.crop)
+
+
+UNKNOWN_GAIN = (0, 0, 0)
+
+
+def wb_of(cfg: dict) -> tuple:
+    """(mode, (r, g, b)) from a #!CFG dict, or from a saved frame's
+    camera_cfg. Firmware before fixed gains sent only awb (1 auto, 0 frozen), and
+    then the gains are not known; with neither, the mode is "unrecorded"."""
+    if "wb" in cfg:
+        try:
+            gain = _ints(str(cfg.get("wb_gain", "")), 3)
+        except ValueError:
+            gain = UNKNOWN_GAIN
+        return str(cfg["wb"]), gain
+    if "awb" in cfg:
+        return ("auto" if cfg["awb"] == 1 else "frozen"), UNKNOWN_GAIN
+    return "unrecorded", UNKNOWN_GAIN
+
+
+def wb_text(mode: str, gain: tuple) -> str:
+    """One way to write a white balance everywhere it is shown."""
+    if mode == "fixed":
+        return "fixed %d,%d,%d" % tuple(gain)
+    return mode
 
 
 def rgb565_to_rgb888(px: np.ndarray) -> np.ndarray:
@@ -283,6 +320,9 @@ def parse_line(line: str):
         if tag == "CAL":
             status, _, kv = rest.partition(" ")
             return Cal(status == "ok", parse_kv(kv))
+        if tag == "WBCAL":
+            status, _, kv = rest.partition(" ")
+            return WbCal(status, parse_kv(kv))
         if tag == "END":
             seq = parse_kv(rest).get("seq")
             return End(seq if isinstance(seq, int) else -1)
@@ -476,9 +516,11 @@ def _blob_event(seq: int, kv: dict, data: bytes) -> BlobRec:
     feat = np.array([float(x) for x in kv["feat"].split(",")], dtype=np.float32)
     cx, cy = (float(x) for x in kv["c"].split(","))
     crop = np.frombuffer(data, dtype="<u2").reshape(CROP, CROP).astype(np.uint16)
+    wb, gain = wb_of(kv) if "wb" in kv else ("unrecorded", UNKNOWN_GAIN)
     return BlobRec(seq, int(kv["t_ms"]), int(kv["k"]), int(kv["n"]), int(kv["stage"]),
                    int(kv["csv"]), int(kv["fv"]), kv["fw"], cx, cy, int(kv["area"]),
-                   _ints(kv["box"], 4), _ints(kv["crop"], 3), float(kv["conf"]), feat, crop)
+                   _ints(kv["box"], 4), _ints(kv["crop"], 3), float(kv["conf"]), feat, crop,
+                   wb, gain)
 
 
 PACKETS = {"FRAME": (_frame_ok, _frame_event), "BLOB": (_blob_ok, _blob_event)}
@@ -486,15 +528,16 @@ PACKETS = {"FRAME": (_frame_ok, _frame_event), "BLOB": (_blob_ok, _blob_event)}
 
 def encode_blob(seq: int, t_ms: int, k: int, n: int, feat, crop: np.ndarray,
                 cx: float, cy: float, area: int, box, crop_box, stage: int = 1,
-                conf: float = -1.0, fw: str = "fake", fv: int = FEAT_VERSION) -> bytes:
+                conf: float = -1.0, fw: str = "fake", fv: int = FEAT_VERSION,
+                wb: str = "auto", wb_gain=UNKNOWN_GAIN) -> bytes:
     """A blob packet exactly as the firmware's send_blob_records() puts it on
     the wire. Used by the fake camera and the tests."""
     data = np.ascontiguousarray(crop, dtype="<u2").tobytes()
     head = ("#!BLOB seq=%d t_ms=%d k=%d n=%d stage=%d csv=%d fv=%d fw=%s c=%.2f,%.2f "
-            "area=%d box=%d,%d,%d,%d crop=%d,%d,%d conf=%.3g feat=%s cw=%d fmt=rgb565le "
-            "len=%d crc=%08x\r\n") % (
+            "area=%d box=%d,%d,%d,%d crop=%d,%d,%d conf=%.3g feat=%s wb=%s wb_gain=%d,%d,%d "
+            "cw=%d fmt=rgb565le len=%d crc=%08x\r\n") % (
         seq, t_ms, k, n, stage, CSV_VERSION, fv, fw, cx, cy, area, *box, *crop_box, conf,
-        ",".join("%.6g" % float(v) for v in feat), CROP, len(data), crc32(data))
+        ",".join("%.6g" % float(v) for v in feat), wb, *wb_gain, CROP, len(data), crc32(data))
     return head.encode() + data + ("\r\n#!END seq=%d\r\n" % seq).encode()
 
 

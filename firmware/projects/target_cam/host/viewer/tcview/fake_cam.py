@@ -32,7 +32,9 @@ W, H = 160, 120
 SENSOR_US = 1599360.0 / 20
 COLLECT_EVERY = 4       # target_main.c: records on every 4th frame
 DEFAULT = dict(hue=0, tol=12, sat=110, val=50, area=25, mm=550, fov=54.0,
-               every=1, awb=1, be=1, preset="red", stage=0, cnn_k=2, flip=0)
+               every=1, awb=1, be=1, preset="red", stage=0, cnn_k=2, flip=0,
+               wb_fixed=(64, 64, 64))
+WB_NAMES = {0: "frozen", 1: "auto", 2: "fixed"}     # target_main.c wb_name()
 
 
 def _rgb565(r, g, b) -> np.ndarray:
@@ -85,6 +87,7 @@ class FakeCamera:
         self.grab = False
         self.stream = True
         self.calibrate = False
+        self.wbcal = False
         self.collect = False
         self.collect_n = 0
         self.revert_at = 0.0
@@ -132,17 +135,22 @@ class FakeCamera:
     def _print_cfg(self):
         c = self.cfg
         self._print("#!CFG w=%d h=%d cell=2 hue=%d tol=%d sat=%d val=%d area=%d mm=%d "
-                    "fov=%.1f fps=%.3g period_ms=%.1f sensor_us=%.0f awb=%d be=%d preset=%s baud=%d "
+                    "fov=%.1f fps=%.3g period_ms=%.1f sensor_us=%.0f awb=%d wb=%s "
+                    "wb_gain=%d,%d,%d wb_fixed=%d,%d,%d be=%d preset=%s baud=%d "
                     "image=%d stream=%d settings=%s stage=%d stage_eff=%d lut=%s lut_id=%d "
                     "clf=none cnn=none cnn_k=%d csv=%d fw=fake collect=%d fv=%d flip=%d\n"
                     % (W, H, c["hue"], c["tol"], c["sat"], c["val"], c["area"], c["mm"],
                        c["fov"], 1000.0 / self._period_ms(), self._period_ms(), SENSOR_US,
-                       c["awb"],
+                       c["awb"], WB_NAMES[c["awb"]], *self._wb_gain(), *c["wb_fixed"],
                        c["be"], c["preset"], self.baud, int(self.image),
                        int(self.stream), self._settings_state(), c["stage"],
                        self._stage_eff(), "ok" if D.models().lut else "none",
                        D.models().lut_id, c["cnn_k"], CSV_VERSION, int(self.collect),
                        FEAT_VERSION, c["flip"]))
+
+    def _wb_gain(self) -> tuple:
+        """The gains in use, 0,0,0 = not known: as wb_gain_in_use()."""
+        return tuple(self.cfg["wb_fixed"]) if self.cfg["awb"] == 2 else (0, 0, 0)
 
     def _period_ms(self) -> float:
         return self.cfg["every"] * SENSOR_US / 1000.0
@@ -227,7 +235,27 @@ class FakeCamera:
             except (ValueError, AssertionError):
                 err = "out of range (1..30)"
         elif c == "w":
-            err = self._set_int("awb", arg, 0, 1)
+            err = self._set_int("awb", arg, 0, 2)
+        elif c == "W":
+            # The real gains change the sensor's colour; the synthetic scene
+            # does not model that, only the protocol around it.
+            if arg == "":
+                self._print("#!WB mode=%s ctrl1=253 c7=%d cc=%d cd=%d ce=%d\n" % (
+                    WB_NAMES[self.cfg["awb"]], 64 if self.cfg["awb"] == 2 else 0,
+                    *self.cfg["wb_fixed"]))
+            elif arg == "c":
+                if self.wbcal:
+                    err = "a white-card calibration is already running"
+                else:
+                    self.wbcal = True
+                    later = True
+            else:
+                try:
+                    g = tuple(int(x) for x in arg.split(","))
+                    assert len(g) == 3 and all(1 <= x <= 255 for x in g)
+                    self.cfg.update(wb_fixed=g, awb=2)
+                except (ValueError, AssertionError):
+                    err = "usage: W | Wc | W<r>,<g>,<b> (1..255, 64 = 1.0)"
         elif c == "F":
             try:
                 v = float(arg)
@@ -362,6 +390,19 @@ class FakeCamera:
                     self.cfg.update(hue=cal.hue, tol=cal.tol, sat=cal.sat, val=cal.val,
                                     preset="custom")
                 self._print_cfg()
+            if self.wbcal:
+                # One step, from the centre's mean: the synthetic wall is grey
+                # with a slight warm cast, so the answer is a little more blue.
+                self.wbcal = False
+                c = px[(H - D.CAL_PATCH) // 2:(H + D.CAL_PATCH) // 2,
+                       (W - D.CAL_PATCH) // 2:(W + D.CAL_PATCH) // 2].astype(np.float64)
+                m = ((c // 2048).mean() * 255 / 31, ((c // 32) % 64).mean() * 255 / 63,
+                     (c % 32).mean() * 255 / 31)
+                g = (int(round(64 * m[1] / m[0])), 64, int(round(64 * m[1] / m[2])))
+                self.cfg.update(wb_fixed=g, awb=2)
+                self._print("#!WBCAL ok r=%d g=%d b=%d R=%.0f G=%.0f B=%.0f steps=1\n"
+                            % (*g, *m))
+                self._print_cfg()
             t1 = time.perf_counter()
             tr = D.pipeline(st, frame, self.cfg["stage"], timed=True,
                             features=self.collect or self.cfg["stage"] >= 2)
@@ -402,7 +443,8 @@ class FakeCamera:
             out.append(encode_blob(self.seq, t_ms, k, tr.n_feat, list(tr.feat[k].v),
                                    D.crop(st, frame, box), b.cx, b.cy, b.area,
                                    (b.x0, b.y0, b.x1, b.y1), box, stage=tr.stage,
-                                   conf=tr.conf[k]))
+                                   conf=tr.conf[k], wb=WB_NAMES[self.cfg["awb"]],
+                                   wb_gain=self._wb_gain()))
             self.seq += 1
         return out
 

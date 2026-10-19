@@ -241,3 +241,36 @@ def test_blob_header_with_the_wrong_crop_size_is_not_a_record():
     pkt, _, _ = blob_packet()
     ev = P.StreamParser().feed(pkt.replace(b"cw=24", b"cw=16", 1))
     assert not any(isinstance(e, P.BlobRec) for e in ev)
+
+
+# ---- white balance (report §10.8) --------------------------------------------
+
+def test_blob_record_carries_its_white_balance():
+    pkt, _, _ = blob_packet()
+    assert P.StreamParser().feed(pkt)[0].wb == "auto"
+    _, crop, feat = blob_packet()
+    pkt = P.encode_blob(9, 12345, 1, 2, feat, crop, 80.5, 60.25, 1282, (60, 40, 101, 80),
+                        (49, 28, 63), wb="fixed", wb_gain=(97, 64, 58))
+    r = P.StreamParser().feed(pkt)[0]
+    assert (r.wb, r.wb_gain) == ("fixed", (97, 64, 58))
+    assert P.wb_text(r.wb, r.wb_gain) == "fixed 97,64,58"
+
+
+def test_wb_of_reads_new_and_old_configs():
+    """Firmware with fixed gains sends wb=; older firmware only awb=, whose
+    gains were never known; a saved frame from before either has neither."""
+    assert P.wb_of({"awb": 2, "wb": "fixed", "wb_gain": "97,64,58"}) == ("fixed", (97, 64, 58))
+    assert P.wb_of({"awb": 1, "wb": "auto", "wb_gain": "0,0,0"}) == ("auto", (0, 0, 0))
+    assert P.wb_of({"awb": 0}) == ("frozen", P.UNKNOWN_GAIN)
+    assert P.wb_of({"awb": 1}) == ("auto", P.UNKNOWN_GAIN)
+    assert P.wb_of({}) == ("unrecorded", P.UNKNOWN_GAIN)
+
+
+def test_wbcal_lines():
+    ok, bad, cfg = P.StreamParser().feed(
+        b"#!WBCAL ok r=97 g=64 b=58 R=181 G=180 B=182 steps=4\r\n"
+        b"#!WBCAL refused reason=clipped R=255 G=255 B=250 steps=0\r\n"
+        b"#!CFG w=160 h=120 awb=2 wb=fixed wb_gain=97,64,58 wb_fixed=97,64,58\r\n")
+    assert isinstance(ok, P.WbCal) and ok.status == "ok" and ok.v["r"] == 97
+    assert bad.status == "refused" and bad.v["reason"] == "clipped"
+    assert P.wb_of(cfg.v) == ("fixed", (97, 64, 58))

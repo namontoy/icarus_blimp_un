@@ -97,7 +97,8 @@ see a dropped frame and the resync.
    out the right way up, not just the picture on screen. **Save to camera**
    keeps it. The button stays greyed out with a firmware that has no `!flip`.
 
-Other controls: the preset menu, AWB auto/frozen, the RGB565 byte order, and
+Other controls: the preset menu, white balance (Auto / Frozen / Fixed, the
+fixed R G B gains, and *From white card*, which sends `Wc`), the RGB565 byte order, and
 `c` (calibrate on the centre 16×16 patch, shown dashed on the image).
 
 ## Flight data screen
@@ -202,11 +203,13 @@ The machine lines all start with `#!`:
 | Line | Meaning |
 |---|---|
 | `#!ACK <cmd>` / `#!NAK <cmd> -- <reason>` | Every command line gets one or the other, so a command garbled on the wire is caught instead of assumed. The viewer retries once. |
-| `#!CFG w= h= cell= hue= tol= sat= val= area= mm= fov= fps= period_ms= awb= be= preset= baud= image= stream= settings=saved\|defaults\|modified` | The camera's live state. It is printed after every change and on `k`. `fps` can be fractional (`12.5`). `period_ms` is what the camera's loop actually waits on. |
+| `#!CFG w= h= cell= hue= tol= sat= val= area= mm= fov= fps= period_ms= awb= wb= wb_gain= wb_fixed= be= preset= baud= image= stream= settings=saved\|defaults\|modified` | The camera's live state. It is printed after every change and on `k`. `fps` can be fractional (`12.5`). `period_ms` is what the camera's loop actually waits on. |
 | `#!CAL ok\|refused hue= spread= sat= val=` | The result of `c`. |
+| `#!WBCAL ok\|refused\|cancelled r= g= b= R= G= B= steps=` / `reason=` | The end of `Wc`: the gains and the patch's last R, G, B means, or why it was refused. |
+| `#!WB mode= ctrl1= c7= cc= cd= ce=` | `W`: the sensor's white-balance registers, as read back. |
 | `#!BAUD <n>` | Printed just before the camera changes speed (and on the 3 s revert). |
 | `#!FRAME seq= t_ms= w=160 h=120 fmt=rgb565be len=38400 crc=<hex>` | Followed by exactly `len` raw bytes, then `\n#!END seq=`. The CSV row for the same frame comes next. |
-| `#!BLOB seq= t_ms= k= n= stage= csv= fv= fw= c= area= box= crop= conf= feat= cw=24 fmt=rgb565le len=1152 crc=<hex>` | `!collect 1`: blob *k* of the row with the same `t_ms`, after that row. 1152 bytes of 24×24 crop, then `\n#!END seq=`. Framed and checked like a frame; frames and records share `seq`. The format is in the target_cam README. |
+| `#!BLOB seq= t_ms= k= n= stage= csv= fv= fw= c= area= box= crop= conf= feat= wb= wb_gain= cw=24 fmt=rgb565le len=1152 crc=<hex>` | `!collect 1`: blob *k* of the row with the same `t_ms`, after that row. 1152 bytes of 24×24 crop, then `\n#!END seq=`. Framed and checked like a frame; frames and records share `seq`. The format is in the target_cam README. |
 
 - The payload is written with `uart_write_bytes()`, bypassing the console's
   `\n`→`\r\n` translation.
