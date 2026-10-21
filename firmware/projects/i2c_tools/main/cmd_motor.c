@@ -290,6 +290,17 @@ bool motors_failsafe_tripped(void)
     return s_fs_tripped;
 }
 
+motor_failsafe_state_t motors_failsafe_state(void)
+{
+    if (s_fs_timeout_ms <= 0) {
+        return MOTOR_FAILSAFE_OFF;
+    }
+    if (s_fs_tripped) {
+        return MOTOR_FAILSAFE_TRIPPED;
+    }
+    return s_fs_armed ? MOTOR_FAILSAFE_ARMED : MOTOR_FAILSAFE_IDLE;
+}
+
 esp_err_t motors_failsafe_set_timeout_ms(int timeout_ms)
 {
     if (timeout_ms < 0) {

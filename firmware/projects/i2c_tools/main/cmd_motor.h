@@ -119,6 +119,21 @@ void motors_failsafe_feed(void);
 /** True if the failsafe has fired and not yet been cleared by a new command. */
 bool motors_failsafe_tripped(void);
 
+/*
+ * What the failsafe is doing right now, as one value for status lines and
+ * telemetry. OFF: disabled by a 0 timeout. IDLE: nothing driven, nothing to
+ * guard. ARMED: a motor is driven and the clock is running. TRIPPED: it
+ * fired and no command has come since.
+ */
+typedef enum {
+    MOTOR_FAILSAFE_OFF = 0,
+    MOTOR_FAILSAFE_IDLE,
+    MOTOR_FAILSAFE_ARMED,
+    MOTOR_FAILSAFE_TRIPPED
+} motor_failsafe_state_t;
+
+motor_failsafe_state_t motors_failsafe_state(void);
+
 /** "FL", "RL", "FR", "RR" for logs and console output. */
 const char *motor_name(motor_id_t motor);
 

@@ -19,6 +19,9 @@
 #include "cmd_motor.h"
 #include "driver/i2c_master.h"
 #include "led_blink.h"
+#include "net_wifi.h"
+#include "net_link.h"
+#include "net_console.h"
 
 static const char *TAG = "i2c-tools";
 
@@ -107,6 +110,27 @@ void app_main(void)
     register_baro();
     register_tof();
     register_motor();     /* already initialised above */
+    register_wifi();
+    register_link();
+
+    /*
+     * The wireless link comes up after every command is registered: the
+     * console over UDP runs the same registry as the USB REPL, so the first
+     * datagram can already be 'help'. Nothing here is fatal. A bench
+     * instrument without a radio is still a bench instrument, and the USB
+     * console is how we would find out what went wrong.
+     */
+    esp_err_t net_err = net_wifi_init();
+    if (net_err != ESP_OK) {
+        ESP_LOGE(TAG, "Wi-Fi unavailable: %s - serial console only", esp_err_to_name(net_err));
+    } else {
+        if (net_link_start() != ESP_OK) {
+            ESP_LOGE(TAG, "UDP link unavailable");
+        }
+        if (net_console_start() != ESP_OK) {
+            ESP_LOGE(TAG, "console over UDP unavailable");
+        }
+    }
 
     /* Status LED runs in its own task, so the REPL below stays responsive. */
     led_blink_start();
@@ -125,6 +149,8 @@ void app_main(void)
     printf(" |  9. Try 'baro' for BMP180 pressure and altitude            |\n");
     printf(" | 10. Try 'tof' for VL53L1X time-of-flight range             |\n");
     printf(" | 11. Try 'motor' to drive the DRV8833 thrusters             |\n");
+    printf(" | 12. Try 'wifi' and 'link' for the Wi-Fi ground link        |\n");
+    printf(" |     (software/blimp_link.py runs all of this over the air) |\n");
     printf(" |                                                            |\n");
     printf(" ==============================================================\n\n");
 

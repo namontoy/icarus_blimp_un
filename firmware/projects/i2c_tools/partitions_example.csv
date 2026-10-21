@@ -1,6 +1,9 @@
 # Name,   Type, SubType, Offset,  Size, Flags
 # Note: if you have increased the bootloader size, make sure to update the offsets to avoid overlap
+# factory is 2 MB: the Wi-Fi stack took the debug (-Og) image from 370 KB to 930 KB, which
+# left 11% of the old 1 MB slot. The S3-Zero has 4 MB of flash (sdkconfig.defaults.esp32s3),
+# so there is room; storage (FAT, console history) simply moves up and gets reformatted once.
 nvs,      data, nvs,     0x9000,  0x6000,
 phy_init, data, phy,     0xf000,  0x1000,
-factory,  app,  factory, 0x10000, 1M,
+factory,  app,  factory, 0x10000, 2M,
 storage,  data, fat,     ,        528K,
