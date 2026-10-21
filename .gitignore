@@ -2,11 +2,16 @@
 build/
 build_tmp/
 
-# ESP-IDF build output (firmware/)
+# ESP-IDF build output (firmware/ and the ESP32-CAM bench project)
 firmware/build/
 firmware/sdkconfig
 firmware/sdkconfig.old
 firmware/managed_components/
+tools/lens_test/esp32cam/build/
+tools/lens_test/esp32cam/sdkconfig
+tools/lens_test/esp32cam/sdkconfig.old
+tools/lens_test/esp32cam/managed_components/
+tools/lens_test/esp32cam/dependencies.lock
 
 # Python
 __pycache__/

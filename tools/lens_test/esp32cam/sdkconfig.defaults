@@ -1,0 +1,44 @@
+# tools/lens_test/esp32cam/sdkconfig.defaults - seed values for the ESP32-CAM lens
+# tester. Applied when sdkconfig is first generated; `idf.py menuconfig` afterwards.
+
+CONFIG_IDF_TARGET="esp32"
+
+# AI-Thinker ESP32-CAM: 4 MB flash, 4 MB PSRAM. Wi-Fi + HTTP server + camera driver
+# do not fit the default 1 MB app partition, hence the single large app layout.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+
+# Flash without touching the reset lines. The USB-C ESP32-CAM adapters on the
+# bench have no DTR/RTS wiring, so esptool's automatic entry into download mode
+# does nothing there and only reads the running firmware's output ("Invalid head
+# of packet"). Instead: hold IO0, press RST, release IO0, then `idf.py flash`,
+# then RST once more.
+CONFIG_ESPTOOLPY_BEFORE_NORESET=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# Full-size frame buffers (UXGA JPEG, or QSXGA on an OV5640) only fit in PSRAM.
+# IGNORE_NOTFOUND keeps a board with dead PSRAM booting, so /info can still say
+# what sensor it has even though captures will then fail.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_IGNORE_NOTFOUND=y
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+
+# Let the esp32-camera driver recognise every sensor it knows, not only the
+# OV2640: the whole point of this tool is to find out what an unknown module is.
+CONFIG_OV2640_SUPPORT=y
+CONFIG_OV3640_SUPPORT=y
+CONFIG_OV3660_SUPPORT=y
+CONFIG_OV5640_SUPPORT=y
+CONFIG_OV7670_SUPPORT=y
+CONFIG_OV7725_SUPPORT=y
+CONFIG_NT99141_SUPPORT=y
+CONFIG_GC2145_SUPPORT=y
+CONFIG_GC032A_SUPPORT=y
+CONFIG_GC0308_SUPPORT=y
+CONFIG_BF3005_SUPPORT=y
+CONFIG_BF20A6_SUPPORT=y
+CONFIG_SC101IOT_SUPPORT=y
+CONFIG_SC030IOT_SUPPORT=y
+CONFIG_SC031GS_SUPPORT=y

@@ -54,7 +54,10 @@ if errorlevel 1 (
   exit /b 1
 )
 
-cd /d "%~dp0..\firmware"
+REM Project directory: the flight firmware unless a wrapper points elsewhere
+REM (tools\lens_test\build.bat sets IDF_PROJECT to its ESP32-CAM bench project).
+if not defined IDF_PROJECT set "IDF_PROJECT=%~dp0..\firmware"
+cd /d "%IDF_PROJECT%"
 echo [idf_build] === idf.py %SUBCMD% in %CD% ===
 call idf.py %SUBCMD%
 set "RC=%errorlevel%"

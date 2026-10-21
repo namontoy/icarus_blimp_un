@@ -223,6 +223,7 @@ firmware/           ESP-IDF project for the ESP32-S3
 sim/                Closed-loop MuJoCo simulation that drives the compiled core
   scene/              Course generator and physics checks, from the rulebook geometry
 tools/              Build, verify and environment-setup scripts
+  lens_test/          ESP32-CAM bench firmware + PC tool that measures camera modules (field of view, IR filter, ...)
 docs/               Design, strategy, setup and status documents
 research/           The research behind the docs, with sources and fact-checks
 reference/          Where to download the rulebook and the baseline paper

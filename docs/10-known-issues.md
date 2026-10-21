@@ -62,7 +62,10 @@ floor - which is now also the failsafe.
 - **Perception is synthetic.** The sim's camera has a 90 x 70 degree field of
   view, 2 degrees of bearing noise and 8 % range noise. The XIAO ESP32S3 Sense
   camera is narrower (~50 x 40 degrees). A narrower field of view makes every
-  "balloon not in view" problem below worse.
+  "balloon not in view" problem below worse. The team's OV2640 modules come
+  with unknown lenses (the flex marking does not say); `tools/lens_test/`
+  measures each one, and the measured field belongs in `sim/sim_main.py`'s
+  `FOV_HALF_ANGLE_RAD` constants before the lens is chosen.
 - **The search hint and altitude fix are stand-ins.** In the sim they are true
   values plus noise. On the real system the ground station must compute them
   from the course geometry, the announced order and telemetry (hint), and from
