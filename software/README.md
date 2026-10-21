@@ -1,5 +1,27 @@
 # Bench test tools
 
+## For this repo's firmware: `blimp_link.py`
+
+The S3 bench firmware (`firmware/projects/i2c_tools`) is a Wi-Fi access point; `blimp_link.py`
+is its ground tool, standard library only, any OS. Join the blimp's SSID (`ICARUS-xxxxxx`),
+then:
+
+```
+python software/blimp_link.py selftest                     # no hardware
+python software/blimp_link.py status                       # telemetry
+python software/blimp_link.py console                      # the firmware console, over the air
+python software/blimp_link.py motor 0.2 0 0 0 --seconds 2  # FL RL FR RR, PROPS OFF
+python software/blimp_link.py stop
+```
+
+`mock_blimp.py` serves the same protocol on localhost for development without hardware
+(`--host 127.0.0.1` on the commands above). Protocol, safety timers and the bring-up
+checklist: `docs/wireless-link.md`.
+
+## esp-drone tools (not for this repo's firmware)
+
+Everything below is about the Python tools imported from the esp-drone project.
+
 Python tools for testing the ESP-Drone (ESP32-S3 mini quad) on the bench over its Wi-Fi link, without cfclient:
 
 | File | What it is |
