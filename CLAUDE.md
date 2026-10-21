@@ -8,10 +8,10 @@ An indoor autonomous blimp that has to hover at 2 m (band 1.85–2.25 m). It is 
 
 | Path | Chip | Role |
 |---|---|---|
-| `firmware/projects/i2c_tools/` | ESP32-S3 (Waveshare ESP32-S3-Zero) | The flight-controller-to-be: GY-88 IMU/mag/baro, altimeter, four DRV8833 thrusters. The name comes from the Espressif `i2c_tools` example it grew out of, and the console prompt is still `i2c-tools>`. |
+| `firmware/projects/i2c_tools/` | ESP32-S3 (Waveshare ESP32-S3-Zero) | The flight-controller-to-be: GY-88 IMU/mag/baro, altimeter, four DRV8833 thrusters, and since the `s3-wireless-link` work its own Wi-Fi access point carrying the console and a UDP packet link (`docs/wireless-link.md`). The name comes from the Espressif `i2c_tools` example it grew out of, and the console prompt is still `i2c-tools>`. |
 | `firmware/projects/optflow_cam/` | ESP32-CAM (AI-Thinker, original ESP32) | Downward optical flow. It prints CSV over UART to a laptop. |
 | `firmware/projects/blink/` | — | Stock ESP-IDF example, kept as a toolchain smoke test. |
-| `software/` | host | Python bench tools imported from a **separate quadcopter project (esp-drone)**. They speak CRTP-over-UDP to esp-drone firmware, **not** to anything in this repo. See `docs/esp-drone-tools-report.md` §8 for what would need to change to use them here. |
+| `software/` | host | `blimp_link.py` is the ground tool for this repo's firmware (standard library only; `mock_blimp.py` fakes the firmware on localhost). The other Python tools were imported from a **separate quadcopter project (esp-drone)**: they speak CRTP-over-UDP to esp-drone firmware, **not** to anything in this repo. See `docs/esp-drone-tools-report.md` §8 for what would need to change to use them here. |
 
 The two chips are not linked yet. `docs/inter-board-link-plan.md` (untracked draft) proposes UART links. `docs/sensor-fusion-plan.md` is a proposal (`blimp_ins`) that is **not implemented**. `hardware/`, `scripts/`, `simulation/`, `tests/` and `external/` are empty placeholders, and the top-level `README.md` is empty.
 
@@ -38,6 +38,7 @@ $IDF_PY -C firmware/projects/optflow_cam -p /dev/ttyUSB0 flash
 - `idf.py monitor` fully buffers its output when not on a TTY. To capture logs non-interactively, read the port with pyserial.
 - **ESP32-S3-Zero:** it uses native USB with no UART bridge, so `CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y` is required (it is set in `sdkconfig.defaults.esp32s3`). It flashes without the BOOT button. **Opening `/dev/ttyACM0` resets the chip**, so wait about 3 s and discard the boot log before you send console commands.
 - **ESP32-CAM:** it flashes through an external programmer and has a GPIO0 bootloader trap. Read `docs/esp32-cam-optical-flow-report.md` §7 before flashing it.
+- **Windows:** `scripts\idf.bat i2c_tools build` (or any `idf.py` arguments after the project name). It expects ESP-IDF v5.5.5 at `%USERPROFILE%\esp\esp-idf-v5.5.5` and Python 3.11 at its per-user default, and works around `export.bat` bailing out silently under Git Bash's `MSYSTEM` variable; see `docs/wireless-link.md` §10.
 
 ## Tests
 
@@ -64,12 +65,15 @@ QT_QPA_PLATFORM=offscreen python -c "import sys; sys.path.insert(0, 'software');
 
 The GUI labels are in Spanish. `optflow_cam/host/flow_monitor.py` is a separate serial viewer/logger and needs `pyserial`.
 
+`software/blimp_link.py` and `software/mock_blimp.py` need only the standard library (Python 3.8+), on any OS. `python software/blimp_link.py selftest` checks the packet codec; `python software/mock_blimp.py` in one terminal and `python software/blimp_link.py --host 127.0.0.1 status` in another exercises the link with no hardware.
+
 ## S3 firmware architecture (`i2c_tools`)
 
 - `app_main` (`i2ctools_example_main.c`) creates the one I2C master bus (`tool_bus_handle`, SDA=4, SCL=5) and starts an `esp_console` REPL. Every peripheral is a `cmd_<name>.c` module that exposes `register_<name>()` plus a small C API for other modules to call, e.g. `baro_read_temperature_c()`. To add a module you need to touch four places: `main/CMakeLists.txt` SRCS, the include, the `register_*()` call and the banner line in `app_main`.
 - `motors_init()` runs **first**, before the console. The DRV8833 inputs float from reset while VM is already live, so the driver must claim the pins immediately. A motor init failure is logged, not fatal, so the console survives.
 - The motor driver uses **all eight LEDC channels**, one per DRV8833 input, which gives glitch-free reversal. Nothing else may use LEDC. The status LED is a WS2812 on GPIO21, driven by RMT through `led_strip`.
 - **Motor failsafe** (`CONFIG_MOTOR_FAILSAFE_MS`, default 1000): it is armed only while some motor has a non-zero command. If no thrust command arrives within the window, every motor coasts. Any future controller must keep calling the thrust API (which feeds the failsafe) or the motors will stop.
+- **Wireless link** (`net_wifi.c`, `net_link.c`, `net_console.c`, formats in `link_protocol.h`; design and bring-up checklist in `docs/wireless-link.md`). The S3 is a Wi-Fi access point (`ICARUS-<mac>`, WPA2, settings under "Wireless link" in menuconfig). UDP 7200 carries fixed-size packets: `MOTOR_SET` is a standing command only while the host repeats it, and `net_link.c`'s own timeout (500 ms, any packet) coasts motors that were commanded over the air, independently of the motor failsafe above. UDP 7201 is the same console as USB, one line per datagram, replies closed by a 0x04 byte; it captures output by rebinding its task's per-task `stdout`, so logs from other tasks still go to USB. Run one console at a time: `esp_console_run()` has a static line buffer. `wifi` and `link` are the status commands.
 
 ### Altitude sensing
 
