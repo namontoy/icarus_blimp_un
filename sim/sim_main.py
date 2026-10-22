@@ -62,12 +62,25 @@ CONTROL_HZ = 100.0  # docs/07 sec 4.2: "100-250 Hz class" control tick rate
 CONTROL_DT = 1.0 / CONTROL_HZ
 
 # -- perception (camera-ish bearing/elevation/range to the target balloon) --
-FOV_HALF_ANGLE_RAD = math.radians(45.0)       # horizontal half-angle
-FOV_VERT_HALF_ANGLE_RAD = math.radians(35.0)  # vertical half-angle
+# 58 x 45 degrees: the widest OV2640 lens type the team owns (modules B and N,
+# measured with tools/lens_test on 2026-10-22, docs/10). Until then the sim
+# assumed 90 x 70, a field no lens in the batch comes close to.
+FOV_HALF_ANGLE_RAD = math.radians(29.0)       # horizontal half-angle
+FOV_VERT_HALF_ANGLE_RAD = math.radians(22.5)  # vertical half-angle
+# The detector is planned to run on 240 x 180 frames. The sim has no pixels:
+# it observes angles, so the image size enters only through the noise levels
+# below. At 58 degrees over 240 columns one pixel is 4.2 mrad, a 0.55 m
+# balloon spans about 130 / range_m pixels (22 px at 6 m), and the sigmas
+# below are then ~5 px of centroid error at 0 m growing by ~2.4 px per metre
+# of range, ~5 px vertically, and 8 % of range from the apparent diameter
+# (+/-3.5 px at 3 m). Those are pessimistic for a clean red blob, which is
+# the safe side until the real detector's error is measured.
+IMAGE_WIDTH_PX = 240
+IMAGE_HEIGHT_PX = 180
 MAX_PERCEPTION_RANGE_M = 6.0                  # beyond this, "not visible"
 MIN_PERCEPTION_RANGE_M = 0.05
 PERCEPTION_DROPOUT_PROB = 0.02                # per-tick random vision glitch
-BEARING_NOISE_SIGMA_RAD = 0.02
+BEARING_NOISE_SIGMA_RAD = 0.02                # ~5 px at 240 x 180 / 58 deg
 BEARING_NOISE_PER_M = 0.01                    # extra sigma per metre of range
 ELEV_NOISE_SIGMA_RAD = 0.02
 RANGE_NOISE_FRAC = 0.08                       # "may be crude (apparent size)"

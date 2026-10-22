@@ -6,12 +6,12 @@
 > 6 gf heavy), no altitude sensor unless `--altitude-source` says otherwise, camera on the
 > gondola, an offboard search hint and an any-balloon altitude fix in the observation.
 >
-> | run (all with `--max-time 220`, seed 0) | result |
+> | run (all with `--max-time 220`, seed 0, 58 × 45° camera) | result |
 > |---|---|
-> | `run_course.py --course 1` (no altitude sensor, the real PCB) | 3/3 loops, best 21.6 s |
-> | `run_course.py --course 2` | 2/3 loops, best 54.1 s |
-> | `run_course.py --course 1 --altitude-source tof` | 3/3 loops, best 22.4 s |
-> | `run_course.py --course 2 --altitude-source tof` | 3/3 loops, best 23.6 s |
+> | `run_course.py --course 1` (no altitude sensor, the real PCB) | 3/3 loops, best 19.0 s |
+> | `run_course.py --course 2` | 1/3 loops, best 47.9 s |
+> | `run_course.py --course 1 --altitude-source tof` | 3/3 loops, best 23.0 s |
+> | `run_course.py --course 2 --altitude-source tof` | 3/3 loops, best 23.5 s |
 >
 > The default `--max-time` of 150 s includes the 60 s gyro-bias convergence and usually ends
 > the run before the third loop. Spread across noise seeds 0-4 is in
@@ -131,7 +131,8 @@ harder or easier test without touching `core/`:
 | Accel noise / bias | σ=0.05 / 0.05 m/s² | accelerometer = finite-differenced true CoM acceleration minus gravity, rotated body-frame — not a MuJoCo sensor element, so no assumption about MuJoCo's own accelerometer gravity convention is needed (see §6.2 on why conventions like this get double-checked empirically rather than assumed) |
 | Baro noise / bias / dropout | σ=0.08 m / σ=0.20 m (fixed per run) / 0.5%/tick | docs/07 §5.1's own "~±0.25 m real accuracy" |
 | Range (ToF) noise / max range | σ=0.01 m / 4.0 m | docs/07 §5.1's own "range-limited to ~4 m" |
-| Perception FOV | ±45° horizontal, ±35° vertical | a plausible narrow-ish camera; not sourced from a spec, freely adjustable |
+| Perception FOV | ±29° horizontal, ±22.5° vertical (58 × 45°) | the widest OV2640 lens the team owns (modules B and N), measured with `tools/lens_test/` on 2026-10-22, see docs/10; was ±45° / ±35° before that, which no lens in the batch approaches |
+| Detector image size | 240 × 180 (planned; `IMAGE_WIDTH_PX`, `IMAGE_HEIGHT_PX`) | not modelled: the sim observes angles, so the size only scales the noise rows. At 58° one pixel is 4.2 mrad, a 0.55 m balloon spans ≈130/range px (22 px at 6 m), and the bearing/elevation sigmas below are ≈5 px, pessimistic for a red blob |
 | Perception dropout | 2%/tick | vision glitches, independent of FOV/range gating |
 | Bearing/elevation/range noise | grows with true range | "range: estimated, may be crude (apparent size)" — guidance.h's own phrasing |
 

@@ -28,16 +28,19 @@ race courses, and the analysis behind the design.
 
 ### Simulated lap times
 
-Five runs per cell (sensor-noise seeds 0–4), 0.78 m envelope, up to 3 loops within 220 s of
-simulated time per run:
+Five runs per cell (sensor-noise seeds 0–4), 0.78 m envelope, camera field of view 58 × 45°
+(the measured OV2640 lens, see [docs/10](docs/10-known-issues.md)), up to 3 loops within 220 s
+of simulated time per run:
 
 | Course | Current board (no altitude sensor) | With a downward ToF sensor |
 |---|---|---|
-| 1 · rectangle | 12 of 15 loops completed · best laps 20.0–48.3 s | 15 of 15 loops completed · best laps 22.4–27.0 s |
-| 2 · figure-eight | 7 of 15 loops completed · best laps 33.7–56.9 s | 15 of 15 loops completed · best laps 22.3–27.1 s |
+| 1 · rectangle | 6 of 15 loops completed · best laps 19.0–78.7 s | 15 of 15 loops completed · best laps 21.6–24.0 s |
+| 2 · figure-eight | 8 of 15 loops completed · best laps 25.9–113.4 s | 15 of 15 loops completed · best laps 23.0–24.2 s |
 
 Without an altitude reference the vehicle went into failsafe in all 10 runs; with the ToF sensor,
-in none, and every loop finished. That is why the top hardware recommendation is a **VL53L1X
+in none, and every loop finished. With the earlier, optimistic 90 × 70° camera the sensorless
+board had completed 19 of 30 loops: the real lens loses the balloons more often, and every lost
+sighting is a lost altitude reference, while the ToF rows did not move. That is why the top hardware recommendation is a **VL53L1X
 time-of-flight sensor** (about 2 g) on the existing I²C bus, which the firmware and estimator
 already support.
 Every number here simulates a vehicle that has not been weighed or thrust-tested yet;

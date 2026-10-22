@@ -3,29 +3,34 @@
 Live list of what is wrong, unresolved, or deliberately deferred in the code.
 Everything here was found by building and running, not by inspection.
 
-Status at the current code (closed-loop rows: `run_course.py --max-time 220`, seed 0):
+Status at the current code (closed-loop rows: `run_course.py --max-time 220`, seed 0,
+camera 58 x 45 degrees):
 
 ```
 host unit tests   11,276 checks, 0 failures                    PASS
 libblimp.dll                                                   BUILDS
 droneun_firmware.bin  770 KB, 26% free, 0 warnings             BUILDS AND LINKS (esp32s3)
 MuJoCo scene, two-body vehicle, real course geometry           ALL CHECKS PASS
-closed loop, course 1, NO altitude sensor (the real PCB)       3/3 loops, best 21.6 s
-closed loop, course 2, NO altitude sensor                      2/3 loops, best 54.1 s
-closed loop, course 1, downward ToF fitted                     3/3 loops, best 22.4 s
-closed loop, course 2, downward ToF fitted                     3/3 loops, best 23.6 s
+closed loop, course 1, NO altitude sensor (the real PCB)       3/3 loops, best 19.0 s
+closed loop, course 2, NO altitude sensor                      1/3 loops, best 47.9 s
+closed loop, course 1, downward ToF fitted                     3/3 loops, best 23.0 s
+closed loop, course 2, downward ToF fitted                     3/3 loops, best 23.5 s
 ```
 
 Seed 0 is one draw of the sensor noise. Across seeds 0-4 (same settings):
 
 ```
                      NO altitude sensor                downward ToF
-course 1             12/15 loops, best 20.0-48.3 s     15/15 loops, best 22.4-27.0 s
-course 2              7/15 loops, best 33.7-56.9 s     15/15 loops, best 22.3-27.1 s
+course 1              6/15 loops, best 19.0-78.7 s     15/15 loops, best 21.6-24.0 s
+course 2              8/15 loops, best 25.9-113.4 s    15/15 loops, best 23.0-24.2 s
 failsafe tripped     in 10 of 10 runs                  in 0 of 10 runs
 ```
 
-The vehicle completes both courses in simulation on the confirmed hardware.
+Measured 2026-10-22 after the simulated camera was narrowed from 90 x 70 to the
+lens the team actually owns (58 x 45 degrees, section 2). With the old camera the
+sensorless rows were 12/15 (best 20.0-48.3 s) and 7/15 (33.7-56.9 s); the ToF rows
+did not move. With the ToF sensor the vehicle completes both courses in simulation;
+on the confirmed hardware alone it completes about half the loops.
 Every number above is a simulation of an unmeasured vehicle; see section 2.
 The default `--max-time` (150 s) includes the 60 s gyro-bias convergence, so it
 usually ends a run before the third loop - use 220 s to compare against this table.
@@ -59,14 +64,21 @@ floor - which is now also the failsafe.
   motor.c's thrust-to-duty curve are guesses. Measure both on a thrust stand
   before any flight ([docs/07 section 8](07-control-design.md)). Rule 13
   compliance rests on that number.
-- **Perception is synthetic.** The sim's camera has a 90 x 70 degree field of
-  view, 2 degrees of bearing noise and 8 % range noise. The XIAO ESP32S3 Sense
-  camera is narrower (~50 x 40 degrees). A narrower field of view makes every
-  "balloon not in view" problem below worse. The team's 14 OV2640 modules were
-  measured with `tools/lens_test/` on 2026-10-22 (table at the end of this
-  section): three standard lenses of 44, 54 and 57-59 degrees horizontal, no
-  wide or fisheye lens among them. The chosen lens's field belongs in
-  `sim/sim_main.py`'s `FOV_HALF_ANGLE_RAD` constants before the sweep is rerun.
+- **Perception is synthetic.** The sim's camera has a 58 x 45 degree field of
+  view, 2 degrees of bearing noise and 8 % range noise. That field is the widest
+  lens among the team's 14 OV2640 modules, measured with `tools/lens_test/` on
+  2026-10-22 (table at the end of this section): three standard lenses of 44, 54
+  and 57-59 degrees horizontal, no wide or fisheye lens among them. Until that
+  measurement the sim assumed 90 x 70 degrees; narrowing it to the real lens
+  halved the loops the sensorless board completes on course 1 (12/15 to 6/15)
+  and left the ToF rows unchanged. Every "balloon not in view" problem below is
+  therefore a field-of-view problem too. If a 54-degree module is fitted
+  instead, set `FOV_HALF_ANGLE_RAD` and `FOV_VERT_HALF_ANGLE_RAD` in
+  `sim/sim_main.py` to 27 and 21 degrees and rerun the sweep. The detector is
+  planned to run on 240 x 180 frames. The sim has no pixels, so that size
+  changes none of its numbers; at 58 degrees it means 4.2 mrad per pixel and a
+  0.55 m balloon of 130/range px (22 px at 6 m), against which the simulated
+  2-degree bearing noise is about 5 px, on the safe side.
 - **The search hint and altitude fix are stand-ins.** In the sim they are true
   values plus noise. On the real system the ground station must compute them
   from the course geometry, the announced order and telemetry (hint), and from
@@ -123,7 +135,7 @@ A VL53L1X time-of-flight breakout (~2 g, ~USD 3, I2C, 4 m range) on the same bus
 as the MPU-6050 removes the problem entirely: the estimator already fuses it,
 the firmware already has `BLIMP_BOARD_HAS_TOF` and a reserved address, and the
 sim's `--altitude-source tof` shows the result: across five noise seeds every
-loop completed and the failsafe never tripped, against 19 of 30 loops and a
+loop completed and the failsafe never tripped, against 14 of 30 loops and a
 failsafe in every run without it (status table above). A BMP390 barometer is the weaker alternative
 (+/-0.2 m noise against a 0.55 m balloon).
 
@@ -135,7 +147,7 @@ The core expects, per command packet (`firmware/main/net/protocol.h`, v3):
 
 | Field | What the ground station must compute |
 |---|---|
-| `bearing_rad`, `elevation_rad`, `range_m`, `visible` | the current target balloon in the camera image (red blob, apparent size for range) |
+| `bearing_rad`, `elevation_rad`, `range_m`, `visible` | the current target balloon in the 240 x 180 camera frame (red blob, apparent size for range) |
 | `hint_yaw_rad`, `hint_valid` | expected absolute heading of the current target, from the fixed 4 x 2 m rectangle, the announced order, the last touched balloon and telemetry yaw |
 | `alt_fix_m`, `alt_fix_valid` | vehicle altitude from the NEAREST balloon in view: every balloon sits at 2.0 m, so its elevation and range give our height. This is what keeps altitude alive between target sightings |
 
@@ -167,11 +179,12 @@ real camera's field of view and the real camera stream.
 - The motor-to-GPIO assignment (FL=7, FR=4, RL=3, RR=1) is this project's
   choice. Run the motor identification mode (`BLIMP_BOOT_MOTOR_ID_MODE`) with
   the props off and write down what actually spins.
-- Without an altitude sensor, course 2 is much slower than course 1 (best laps
-  33.7-56.9 s vs 20.0-48.3 s). The figure-eight's diagonal legs are longer and
-  its turns sharper, and every turn costs surge on a unidirectional pair - but
-  with the ToF both courses run at the same pace (22-27 s), so most of the gap
-  looks like altitude handling rather than geometry. Tuning target, not a bug.
+- Without an altitude sensor, course 2 is slower than course 1 (best laps
+  25.9-113.4 s vs 19.0-78.7 s) and neither is reliable (8 and 6 loops of 15).
+  The figure-eight's diagonal legs are longer and its turns sharper, and every
+  turn costs surge on a unidirectional pair - but with the ToF both courses run
+  at the same pace (22-24 s), so most of the gap looks like altitude handling
+  rather than geometry. Tuning target, not a bug.
 - Startup still needs 60 s of stillness for the gyro bias to converge
   (`BLIMP_EST_CONVERGE_S`). Untimed under Rule 4, but plan the pre-run routine
   around it.

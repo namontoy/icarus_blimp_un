@@ -8,7 +8,7 @@ altitude-sensor setups, and print one summary table.
     python tools/sim_sweep.py --markdown               table ready for README.md / docs/10
 
 WHY THIS EXISTS. One run is one draw of the sensor noise. On course 1 with no
-altitude sensor, seeds 0-4 gave best laps from 20.0 s to 48.3 s, so a single
+altitude sensor, seeds 0-4 gave best laps from 19 s to 79 s, so a single
 run cannot show whether a change helped. Judge changes against the spread.
 
 WHY 220 s. The first 60 s of every run are gyro-bias convergence
