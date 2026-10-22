@@ -62,10 +62,11 @@ floor - which is now also the failsafe.
 - **Perception is synthetic.** The sim's camera has a 90 x 70 degree field of
   view, 2 degrees of bearing noise and 8 % range noise. The XIAO ESP32S3 Sense
   camera is narrower (~50 x 40 degrees). A narrower field of view makes every
-  "balloon not in view" problem below worse. The team's OV2640 modules come
-  with unknown lenses (the flex marking does not say); `tools/lens_test/`
-  measures each one, and the measured field belongs in `sim/sim_main.py`'s
-  `FOV_HALF_ANGLE_RAD` constants before the lens is chosen.
+  "balloon not in view" problem below worse. The team's 14 OV2640 modules were
+  measured with `tools/lens_test/` on 2026-10-22 (table at the end of this
+  section): three standard lenses of 44, 54 and 57-59 degrees horizontal, no
+  wide or fisheye lens among them. The chosen lens's field belongs in
+  `sim/sim_main.py`'s `FOV_HALF_ANGLE_RAD` constants before the sweep is rerun.
 - **The search hint and altitude fix are stand-ins.** In the sim they are true
   values plus noise. On the real system the ground station must compute them
   from the course geometry, the announced order and telemetry (hint), and from
@@ -75,6 +76,39 @@ floor - which is now also the failsafe.
   Weigh the gondola and re-run.
 
 ---
+
+### Measured camera modules (2026-10-22)
+
+All 14 modules are OV2640 (PID 0x26). Lens-to-wall 0.90 m, 1600 x 1200 stills,
+four handwritten marks 25 cm apart on a tape measure clicked by hand, pinhole fit
+over all marks (`lens_test.py --port COM3 live`, key `a`). Sharpness is the
+Laplacian variance on the tape print at 0.9 m, comparable only within this table.
+"Rotated" means the picture comes out upside down relative to the flex, so that
+module type needs the driver's flip and mirror settings. Lens cards and stills are
+in `build/lens_test/<letter>/` on the bench laptop (not committed).
+
+| Module | HFOV x VFOV (deg) | Line fit (px) | Sharpness 0.9 m | Picture | Group |
+|---|---|---|---|---|---|
+| A (DCX-OV2640-V2, metal housing) | 44.5 x 34.1 | 0.0 | 235 | upright | narrow |
+| C | 53.6 x 41.5 | 0.9 | 169 | upright | 54 deg |
+| F | 53.1 x 41.1 | 1.2 | 114 | upright | 54 deg |
+| H | 53.5 x 41.4 | 1.7 | 469 | upright | 54 deg |
+| L | 54.6 x 42.3 | 2.1 | 226 | upright | 54 deg |
+| M | 54.0 x 41.9 | 1.4 | 114 | upright | 54 deg |
+| B | 58.7 x 45.8 | 0.9 | 899 | rotated | 58 deg |
+| D | 56.8 x 44.2 | 1.6 | 195 | rotated | 58 deg |
+| E | 56.8 x 44.1 | 2.8 | 80 | rotated | 58 deg |
+| G | 57.3 x 44.5 | 4.8 | 159 | rotated | 58 deg (IR test: filter present) |
+| I | 56.5 x 43.9 | 0.6 | 395 | rotated | 58 deg |
+| J | 57.0 x 44.3 | 4.8 | 106 | rotated | 58 deg |
+| K | 56.8 x 44.2 | 1.5 | 337 | rotated | 58 deg |
+| N | 59.3 x 46.2 | 0.8 | 565 | rotated | 58 deg |
+
+The groups are module types, not individual lenses: every rotated module is in the
+58-degree group and every upright compact one in the 54-degree group. Sharpness
+varies tenfold inside a group (focus differences), so the pick is B or N for the
+widest sharp view, or H in the 54-degree group. Not measured yet: sharpness at
+3 m, mass, and the IR filter on all but G.
 
 ## 3. THE hardware decision: add a downward ToF sensor
 
