@@ -85,6 +85,7 @@ Hotkeys:
 
 | Key | Does |
 |---|---|
+| `a` | one shot: field of view, distortion, vignetting and sharpness from one full-size still (three clicks on the tape) |
 | `n` | start a new card (asks for the label); `t` adds a free-text note |
 | `s` | save a full-size still to the card folder |
 | `f` | field of view: one full-size still, two clicks, two numbers typed |
@@ -97,7 +98,22 @@ Hotkeys:
 | `c` | toggle the sensor's colour-bar test pattern |
 | `h`, `q` | help, quit (the card is saved after every change) |
 
-## Measuring protocol, about five minutes per module
+## Measuring protocol
+
+**Fast path, about a minute per module, the board never moves.** Put the board on a
+marked spot facing the wall so the tape runs along the *bottom* edge of the
+picture with blank wall above it, big marks readable. Per module: `a` (Enter
+accepts the remembered distance, click the tape at its left end, middle and
+right end, Enter accepts the remembered marks difference), `i` (keep the remote
+off until the band says to press it, then hold a button 20 cm from the lens;
+the lights can stay on), `q`. The IR test compares frames with the remote off
+and on at a locked exposure, so a bright room does not matter.
+
+The detailed path below measures the same things one at a time, with the
+vignetting on a clean white wall and the sharpness on a text sheet; use it for
+the modules that make the shortlist.
+
+### Detailed path, about five minutes per module
 
 Set the bench up once: a plain white wall at a measured distance (1.00 m is
 convenient), a tape measure stuck horizontally across it, a printed text sheet

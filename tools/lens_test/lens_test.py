@@ -31,7 +31,13 @@ apart. Five numbers do it:
 Everything is filed as a lens card, build/lens_test/<label>/card.json, next to
 the images it came from, so the physical module can be tagged with its label.
 
+The fast path, with the board never moving: tape along the BOTTOM edge of the
+picture, blank wall above it, board on a marked spot. Per module: `a` (one still,
+three clicks, two numbers: field of view, distortion, vignetting and sharpness
+all from that still), `i` (remote off, then on), `q`. About a minute each.
+
 Hotkeys in the live view:
+  a  one-shot: everything but IR from one still (3 clicks)
   n  new module (asks for a label)     t  add a note
   s  save a full-size still            f  field of view (2 clicks)
   d  distortion (3 clicks)             v  record vignetting (white wall)
@@ -72,6 +78,7 @@ WINDOW = "lens_test"
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 
 HELP = """
+  a ONE-SHOT (field of view + distortion + vignetting + sharpness from one still)
   n new module    t note    s still    f field of view    d distortion
   v vignetting    k sharpness    i IR peak    l LENC    e AE lock    c colour bars
   h this help     q quit
@@ -363,6 +370,29 @@ def vignetting(gray, frac: float = 0.10) -> tuple[float, float, float]:
     return ratio, centre_mean, corner_mean
 
 
+def vignetting_band(gray, frac: float = 0.10) -> tuple[float, float]:
+    """Corner/centre along the TOP band of the frame: left and right patches against
+    the centre patch on the same rows. Same rows means the horizontal flicker
+    bands of mains lighting cancel, and a tape along the bottom edge stays out.
+    Returns (ratio, centre mean)."""
+    h, w = gray.shape
+    ph, pw = max(2, int(h * frac)), max(2, int(w * frac))
+    band = gray[:ph]
+    left = float(band[:, :pw].mean())
+    right = float(band[:, w - pw:].mean())
+    centre = float(band[:, w // 2 - pw // 2:w // 2 + pw // 2].mean())
+    return ((left + right) / 2 / centre if centre > 0 else 0.0), centre
+
+
+def sharpness_at(gray, x: float, y: float, w_frac: float = 0.25, h_frac: float = 0.08) -> float:
+    """Laplacian variance in a box around (x, y): the tape print under the middle click."""
+    h, w = gray.shape
+    rw, rh = max(4, int(w * w_frac / 2)), max(4, int(h * h_frac / 2))
+    x0, x1 = max(0, int(x) - rw), min(w, int(x) + rw)
+    y0, y1 = max(0, int(y) - rh), min(h, int(y) + rh)
+    return float(cv2.Laplacian(gray[y0:y1, x0:x1], cv2.CV_64F).var())
+
+
 def peak(gray) -> int:
     """Brightest 5x5 spot, which is what an IR remote's LED becomes."""
     return int(cv2.blur(gray, (5, 5)).max())
@@ -487,6 +517,18 @@ def save_card(out: Path, card: Card) -> Path:
     return path
 
 
+def load_settings(out: Path) -> dict:
+    try:
+        return json.loads((out / "settings.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_settings(out: Path, settings: dict) -> None:
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "settings.json").write_text(json.dumps(settings, indent=2), encoding="utf-8")
+
+
 def lens_class(card: Card) -> str:
     if not card.fov:
         return "?"
@@ -607,8 +649,9 @@ class Session:
         # though the bars are off; force a known state instead of trusting it.
         self.colorbar = False
         board.set("colorbar", 0)
-        self.last_distance = 1.0
-        self.last_width = 1.0
+        settings = load_settings(out)   # the bench does not change between modules
+        self.last_distance = float(settings.get("distance_m", 1.0))
+        self.last_width = float(settings.get("width_m", 1.0))
         self.reader = None
         self.last_view = None
         self.start_stream()
@@ -653,6 +696,7 @@ class Session:
 
     def save(self) -> None:
         save_card(self.out, self.card)
+        save_settings(self.out, {"distance_m": self.last_distance, "width_m": self.last_width})
 
     def folder(self) -> Path:
         folder = card_dir(self.out, self.card.label)
@@ -683,6 +727,58 @@ class Session:
         self.card.stills.append({"file": name, "size": [img.shape[1], img.shape[0]], "when": now()})
         self.save()
         print(f"  saved {name} ({img.shape[1]}x{img.shape[0]})")
+
+    def act_all(self) -> None:
+        """Field of view, distortion, vignetting and sharpness from ONE still: the
+        tape runs along the bottom edge, so its two ends give the field, its
+        middle the bow, the blank wall above it the vignetting and its print the
+        sharpness. The board never moves between modules."""
+        print("\nOne shot. Board on its mark, tape running along the BOTTOM edge of the"
+              " picture, blank wall above it.")
+        self.banner("One shot: type the distance to the wall")
+        distance = ask_float("distance from the lens to the wall [m]", self.last_distance)
+        print("  taking a full-size still ...")
+        jpg, img = self.capture()
+        pts = pick_points(img, 3, "Click the tape at its LEFT end, its MIDDLE, then its RIGHT end (on the tape line)")
+        if not pts:
+            print("  cancelled")
+            return
+        self.banner("Now type the metres of tape between the LEFT and RIGHT clicks")
+        width = ask_float("tape reading difference between the LEFT and RIGHT clicks [m]", self.last_width)
+        self.last_distance, self.last_width = distance, width
+        w, h = img.shape[1], img.shape[0]
+        try:
+            fov = solve_fov(pts[0][0], pts[2][0], w, h, distance, width)
+            bow = solve_distortion(pts, w, h)
+        except ValueError as exc:
+            print(f"  {exc}")
+            return
+        gray = gray_of(img)
+        vig, centre = vignetting_band(gray)
+        sharp = sharpness_at(gray, pts[1][0], pts[1][1])
+        stamp = now()
+        marks = [[round(x, 1), round(y, 1)] for x, y in pts]
+        fov.update({"distance_m": distance, "width_m": width, "points": [marks[0], marks[2]],
+                    "image": "oneshot.jpg", "image_size": [w, h], "when": stamp})
+        bow.update({"points": marks, "image": "oneshot.jpg", "when": stamp})
+        self.card.fov = fov
+        self.card.distortion = bow
+        self.card.vignetting["still_top_band"] = {"corner_over_centre": round(vig, 3), "centre_mean": round(centre, 1),
+                                                  "lenc": self.lenc, "when": stamp,
+                                                  "note": "left/right vs centre over the top 10 % rows of the one-shot still"}
+        entry = {"distance_m": distance, "value": round(sharp, 1), "stream_size": f"{w}x{h} still, tape print", "when": stamp}
+        self.card.sharpness = [s for s in self.card.sharpness if "still" not in str(s.get("stream_size"))] + [entry]
+        self.card.sharpness.sort(key=lambda s: s["distance_m"])
+        cv2.imwrite(str(self.folder() / "oneshot.jpg"), draw_points(img, pts))
+        self.save()
+        print(f"  field of view {fov['hfov_pinhole_deg']} x {fov['vfov_pinhole_deg']} deg pinhole"
+              f" ({fov['hfov_equidistant_deg']} deg equidistant) -> {lens_class(self.card)};"
+              f" bow {bow['sag_pct']} % {bow['kind']}; top-band corner/centre {vig:.2f};"
+              f" tape sharpness {sharp:.0f}; clicks cover {fov['coverage'] * 100:.0f} % of the width")
+        if fov["coverage"] < 0.5:
+            print("  tip: click the outermost marks you can see, so the models agree better")
+        if bow["radius_frac"] < 0.4:
+            print("  tip: the tape sits near the middle; the bow is only telling near a border")
 
     def act_fov(self) -> None:
         print("\nField of view. Board square to a wall with a tape measure stuck across it,"
@@ -776,24 +872,48 @@ class Session:
         print(f"  sharpness {value:.1f} at {distance:g} m (compare only with the same sheet and distance)")
 
     def act_ir(self) -> None:
-        if not self.ae_locked:
-            print("  tip: lock exposure first (e) so modules are compared at the same gain")
-        print("\nIR response. In a dim room, press a TV remote's button with the LED 20 cm"
-              " from the lens, and keep it pressed ...")
-        time.sleep(1.5)
-        frames = self.frames()
-        if not frames:
-            print("  no frames")
-            return
-        peaks = [peak(gray_of(f)) for f in frames]
-        value = int(max(peaks))
-        mean = float(np.mean([gray_of(f).mean() for f in frames]))
-        self.card.ir = {"peak": value, "frame_mean": round(mean, 1), "ae_locked": self.ae_locked,
-                        "stream_size": self.size_str(frames[0]), "when": now()}
+        """Remote OFF frames, then remote ON frames, at a locked exposure: the LED is
+        whatever appears only in the ON frames. Works with the room lights on, so
+        the board does not have to move or the room go dark."""
+        print("\nIR filter test. Keep the remote OFF for a moment ...")
+        self.banner("IR test: keep the remote OFF for 2 seconds")
+        was_locked = self.ae_locked
+        if not was_locked:
+            self.board.set("aec", 0)
+            self.board.set("agc", 0)
+            time.sleep(0.5)
+        try:
+            off = self.frames(5)
+            if not off:
+                print("  no frames")
+                return
+            bg = np.mean([gray_of(f).astype(np.float32) for f in off], axis=0)
+            print("  now press and HOLD a button on the remote, 20 cm in front of the lens ...")
+            self.banner("IR test: press and HOLD the remote button NOW")
+            time.sleep(2.0)
+            on = [f for f in self.frames(8) if gray_of(f).shape == bg.shape]
+            if not on:
+                print("  no frames")
+                return
+            delta = np.zeros_like(bg)
+            for f in on:
+                delta = np.maximum(delta, gray_of(f).astype(np.float32) - bg)
+            delta = cv2.blur(delta, (5, 5))
+            peak_delta = float(delta.max())
+            y, x = np.unravel_index(int(delta.argmax()), delta.shape)
+            bg_at = float(bg[y, x])
+        finally:
+            if not was_locked:
+                self.board.set("aec", 1)
+                self.board.set("agc", 1)
+        verdict = ("bright spot: NO IR-cut filter (night version)" if peak_delta >= 60 else
+                   "weak spot: repeat with the remote closer, against a darker patch" if peak_delta >= 20 else
+                   "nothing seen: an IR-cut filter is in place")
+        self.card.ir = {"peak_delta": round(peak_delta, 1), "background_at_spot": round(bg_at, 1),
+                        "method": "remote on minus off, exposure locked", "stream_size": self.size_str(on[0]),
+                        "when": now()}
         self.save()
-        verdict = ("saturated: no IR-cut filter, or the remote is too close" if value >= 250 else
-                   "visible but not saturated" if value >= 120 else "faint: an IR-cut filter is in place")
-        print(f"  peak {value} (frame mean {mean:.0f}) -> {verdict}")
+        print(f"  IR response {peak_delta:.0f} above a background of {bg_at:.0f} -> {verdict}")
 
     def act_lenc(self) -> None:
         self.lenc = not self.lenc
@@ -857,7 +977,7 @@ class Session:
         if self.card.distortion:
             tail.append(f"bow {self.card.distortion['sag_pct']:+.1f} %")
         if self.card.ir:
-            tail.append(f"IR peak {self.card.ir['peak']}")
+            tail.append(f"IR {self.card.ir.get('peak_delta', self.card.ir.get('peak'))}")
         if self.card.sharpness:
             tail.append("sharp " + ", ".join(f"{s['distance_m']:g}m:{s['value']:.0f}" for s in self.card.sharpness))
         if tail:
@@ -873,6 +993,7 @@ class Session:
         shown = None
         fps, fps_n, fps_t = 0.0, 0, time.time()
         actions = {
+            ord("a"): self.act_all,
             ord("n"): self.act_new, ord("t"): self.act_note, ord("s"): self.act_still,
             ord("f"): self.act_fov, ord("d"): self.act_distortion, ord("v"): self.act_vignetting,
             ord("k"): self.act_sharpness, ord("i"): self.act_ir, ord("l"): self.act_lenc,
@@ -976,18 +1097,18 @@ def cmd_table(args) -> int:
         print(f"no lens cards under {out}")
         return 1
     header = ["label", "sensor", "HFOV pin", "HFOV eq", "VFOV pin", "class", "bow %",
-              "corner/centre", "IR peak", "sharpness", "notes"]
+              "corner/centre", "IR", "sharpness", "notes"]
     rows = []
     for c in cards:
         fov = c.fov or {}
-        vig = c.vignetting.get("lenc_on") or c.vignetting.get("lenc_off") or {}
+        vig = c.vignetting.get("lenc_on") or c.vignetting.get("still_top_band") or c.vignetting.get("lenc_off") or {}
         rows.append([
             c.label, f"{c.sensor.get('sensor', '?')} {c.sensor.get('pid', '')}".strip(),
             fmt(fov.get("hfov_pinhole_deg")), fmt(fov.get("hfov_equidistant_deg")),
             fmt(fov.get("vfov_pinhole_deg")), lens_class(c),
             fmt(c.distortion.get("sag_pct")) if c.distortion else "-",
             fmt(vig.get("corner_over_centre"), 2) if vig else "-",
-            str(c.ir["peak"]) if c.ir else "-",
+            fmt(c.ir.get("peak_delta", c.ir.get("peak")), 0) if c.ir else "-",
             " ".join(f"{s['distance_m']:g}m:{s['value']:.0f}" for s in c.sharpness) or "-",
             "; ".join(n["text"] for n in c.notes) or "-",
         ])
