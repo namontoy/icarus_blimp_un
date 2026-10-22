@@ -148,7 +148,7 @@ class MjpegReader(threading.Thread):
         self._lock = threading.Lock()
         self._jpg: bytes | None = None
         self._count = 0
-        self._stop = threading.Event()
+        self._stop_flag = threading.Event()
         self._resp = None
 
     def run(self) -> None:
@@ -159,7 +159,7 @@ class MjpegReader(threading.Thread):
             return
         buf = b""
         try:
-            while not self._stop.is_set():
+            while not self._stop_flag.is_set():
                 chunk = self._resp.read(16384)
                 if not chunk:
                     break
@@ -179,7 +179,7 @@ class MjpegReader(threading.Thread):
                         self._jpg = jpg
                         self._count += 1
         except Exception as exc:  # noqa: BLE001
-            if not self._stop.is_set():
+            if not self._stop_flag.is_set():
                 self.error = exc
         finally:
             try:
@@ -192,7 +192,7 @@ class MjpegReader(threading.Thread):
             return self._jpg, self._count
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_flag.set()
         try:
             if self._resp is not None:
                 self._resp.close()
@@ -309,11 +309,11 @@ class SerialFrames(threading.Thread):
         self._lock = threading.Lock()
         self._jpg: bytes | None = None
         self._count = 0
-        self._stop = threading.Event()
+        self._stop_flag = threading.Event()
 
     def run(self) -> None:
         failures = 0
-        while not self._stop.is_set():
+        while not self._stop_flag.is_set():
             try:
                 jpg = self.board.frame(self.size)
             except (RuntimeError, TimeoutError, OSError) as exc:
@@ -335,7 +335,7 @@ class SerialFrames(threading.Thread):
             return self._jpg, self._count
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_flag.set()
         self.join(timeout=20.0)
 
 
