@@ -965,21 +965,9 @@ class Session:
             yg = int(h * 0.92)
             cv2.line(view, (0, yg), (w, yg), (0, 200, 255), 1)
             cv2.putText(view, "tape along here", (8, yg - 6), FONT, 0.5, (0, 200, 255), 1, cv2.LINE_AA)
-            lines = [label, "a: measure    q: quit    o: details    h: help"]
-            if self.card.fov:
-                f = self.card.fov
-                res = f"FOV {f['hfov_pinhole_deg']:.0f}x{f['vfov_pinhole_deg']:.0f} deg -> {lens_class(self.card)}"
-                if self.card.distortion:
-                    res += f"   bow {self.card.distortion['sag_pct']:+.1f} %"
-                band = self.card.vignetting.get("still_top_band")
-                if band:
-                    res += f"   corner/centre {band['corner_over_centre']:.2f}"
-                if self.card.sharpness:
-                    res += f"   sharp {self.card.sharpness[-1]['value']:.0f}"
-                lines.append(res)
-            if self.card.ir:
-                lines.append(f"IR {self.card.ir.get('peak_delta', self.card.ir.get('peak'))}")
-            put_lines(view, lines)
+            # Nothing else on screen: the results go to the terminal, so the picture
+            # stays clear for lining up the tape.
+            cv2.putText(view, self.card.label, (8, 18), FONT, 0.55, (0, 220, 255), 1, cv2.LINE_AA)
             return view
         gray = gray_of(img)
         sharp = sharpness(gray)
