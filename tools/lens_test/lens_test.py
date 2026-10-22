@@ -610,6 +610,7 @@ class Session:
         self.last_distance = 1.0
         self.last_width = 1.0
         self.reader = None
+        self.last_view = None
         self.start_stream()
         print(f"sensor {self.info.get('sensor')} PID {self.info.get('pid')}, "
               f"max {self.info.get('max_width')}x{self.info.get('max_height')}; card: {self.card.label}")
@@ -662,13 +663,15 @@ class Session:
 
     def act_new(self) -> None:
         self.save()
+        self.banner("New module: type its label")
         label = clean_label(ask_text("label for the next module (write it on the module too)"))
         self.card = load_card(self.out, label, self.info)
         self.save()
         print(f"  card: {card_dir(self.out, label) / 'card.json'}")
 
     def act_note(self) -> None:
-        note = ask_text("note (marking on the flex, housing, where it came from)")
+        self.banner("Note: type it")
+        note = ask_text("note (housing, lens shape, where it came from)")
         if note:
             self.card.notes.append({"when": now(), "text": note})
             self.save()
@@ -684,6 +687,7 @@ class Session:
     def act_fov(self) -> None:
         print("\nField of view. Board square to a wall with a tape measure stuck across it,"
               " at a measured distance from the lens.")
+        self.banner("Field of view: type the distance to the wall")
         distance = ask_float("distance from the lens to the wall [m]", self.last_distance)
         print("  taking a full-size still ...")
         jpg, img = self.capture()
@@ -691,6 +695,7 @@ class Session:
         if not pts:
             print("  cancelled")
             return
+        self.banner("Now type the metres of tape between your two clicks")
         width = ask_float("tape reading difference between the two clicks [m]", self.last_width)
         self.last_distance, self.last_width = distance, width
         try:
@@ -756,6 +761,7 @@ class Session:
 
     def act_sharpness(self) -> None:
         print("\nSharpness. A printed text sheet filling the centre of the picture.")
+        self.banner("Sharpness: type the distance to the sheet")
         distance = ask_float("distance from the lens to the sheet [m]", self.last_distance)
         frames = self.frames()
         if not frames:
@@ -807,6 +813,18 @@ class Session:
     @staticmethod
     def size_str(img) -> str:
         return f"{img.shape[1]}x{img.shape[0]}"
+
+    def banner(self, text: str) -> None:
+        """Tell the person looking at the video window that the next step happens
+        in the terminal (input() blocks, so the window would otherwise just freeze)."""
+        view = self.last_view.copy() if self.last_view is not None else np.zeros((240, 640, 3), np.uint8)
+        h, w = view.shape[:2]
+        cv2.rectangle(view, (0, h // 2 - 40), (w, h // 2 + 40), (0, 0, 0), -1)
+        cv2.putText(view, text, (16, h // 2 - 6), FONT, 0.8, (0, 220, 255), 2, cv2.LINE_AA)
+        cv2.putText(view, "look at the TERMINAL window and type the answer there", (16, h // 2 + 26),
+                    FONT, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
+        cv2.imshow(WINDOW, view)
+        cv2.waitKey(1)
 
     # -- main loop --------------------------------------------------------- #
 
@@ -874,6 +892,7 @@ class Session:
                         last_count = count
                         fps_n += 1
                         shown = self.overlay(img, fps)
+                        self.last_view = shown
                 t = time.time()
                 if t - fps_t >= 1.0:
                     fps, fps_n, fps_t = fps_n / (t - fps_t), 0, t
