@@ -85,7 +85,7 @@ Hotkeys:
 
 | Key | Does |
 |---|---|
-| `a` | one shot: field of view, distortion, vignetting and sharpness from one full-size still (three clicks on the tape) |
+| `a` | measure: one full-size still; printed markers are found by themselves, handwritten marks are clicked left to right; field of view, distortion verdict, vignetting and sharpness all from that still |
 | `n` | start a new card (asks for the label); `t` adds a free-text note |
 | `s` | save a full-size still to the card folder |
 | `f` | field of view: one full-size still, two clicks, two numbers typed |
@@ -100,117 +100,15 @@ Hotkeys:
 
 ## Measuring protocol
 
-**Fast path, about a minute per module, the board never moves.** Put the board on a
-marked spot facing the wall so the tape runs along the *bottom* edge of the
-picture with blank wall above it, big marks readable. Per module: `a` (Enter
-accepts the remembered distance, click the tape at its left end, middle and
-right end, Enter accepts the remembered marks difference), `i` (keep the remote
-off until the band says to press it, then hold a button 20 cm from the lens;
-the lights can stay on), `q`. The IR test compares frames with the remote off
-and on at a locked exposure, so a bright room does not matter.
+**Fast path, about a minute per module, the board never moves.** Big marks on
+the wall every 25 cm: either the printed ArUco pages from `lens_test.py markers`
+(taped above the tape measure, then nothing is clicked at all) or big handwritten
+numbers on the tape's 0, 25, 50 ... cm marks. Board on a marked spot, facing the
+wall, blank wall above the marks. Per module: `a`; the first time, type the
+lens-to-wall distance (remembered from then on); with handwritten marks click
+every big mark you can see from left to right and press Enter; read the one-line
+result; `q`. The field of view is fitted to all the marks (pinhole and
+fisheye models), the straight-line residual is the distortion verdict, the blank
+wall above gives the vignetting and the marks' print the sharpness. `i` with a
+TV remote adds the IR-filter answer when wanted (lights can stay on).
 
-The detailed path below measures the same things one at a time, with the
-vignetting on a clean white wall and the sharpness on a text sheet; use it for
-the modules that make the shortlist.
-
-### Detailed path, about five minutes per module
-
-Set the bench up once: a plain white wall at a measured distance (1.00 m is
-convenient), a tape measure stuck horizontally across it, a printed text sheet
-you can hold at the wall, a TV remote, and a door frame or table edge in reach.
-
-1. `n`: label the card, then `t`: note the flex marking and the housing
-   (for example "DCX-OV2640-V2, metal housing").
-2. **Field of view** (`f`). Board square to the wall, lens at the measured
-   distance. Type the distance, click the tape near the left and right edges of
-   the picture, type the difference between the two tape readings. The tool
-   reports the horizontal and vertical fields under two lens models: pinhole
-   (right for the standard lens) and equidistant (right for fisheyes). The
-   closer the clicks are to the edges, the less the model matters.
-3. **Distortion** (`d`). Aim so a straight edge runs close to one border. Click
-   one end, the middle, the other end. Barrel distortion is positive.
-4. **Vignetting** (`v`). Fill the frame with the white wall, press `v`, press
-   `l` to toggle LENC, press `v` again. Both states are kept.
-5. **Sharpness** (`k`). Text sheet in the centre at 1 m, press `k`; repeat at
-   3 m and 5 m if the module is a candidate. Only compare modules on the same
-   sheet at the same distance and stream size.
-6. **IR response** (`i`). Dim the room, press `e` to lock exposure, hold the
-   remote 20 cm from the lens with a button pressed, press `i`. A peak of 250 or
-   more means no IR-cut filter: a "night" module, which turns red balloons pink
-   in daylight.
-7. `s` for a reference still, then power off, swap modules, reset, `n`.
-
-When all modules are done:
-
-```
-.venv\Scripts\python tools\lens_test\lens_test.py table --markdown
-```
-
-## Reading the numbers
-
-| Lens class | Horizontal field | Bow of a straight edge | Corner/centre |
-|---|---|---|---|
-| standard ("66°/68°") | about 52° | under 1 % | above 0.7 |
-| wide ("120°") | about 105° | a few % | roughly 0.4 to 0.7 |
-| fisheye ("160°") | 130° and more (equidistant) | large, corners may be black | low or zero in the corners |
-
-The class column in `table` applies these thresholds. Field of view and the
-pixel focal length `f_px` go straight into the perception calibration; the
-simulator's camera is set by `FOV_HALF_ANGLE_RAD` and `FOV_VERT_HALF_ANGLE_RAD`
-in `sim/sim_main.py` (half of the measured fields).
-
-## Files
-
-```
-build/lens_test/<label>/card.json     the lens card (JSON, one per module)
-build/lens_test/<label>/fov.jpg       the still the field of view was clicked on, with the clicks
-build/lens_test/<label>/distortion.jpg
-build/lens_test/<label>/still_N.jpg
-```
-
-`build/` is gitignored. Paste the `table --markdown` output into
-`docs/10-known-issues.md` when the choice is made, with the distance and
-stream size used.
-
-## Firmware protocol
-
-Over serial (UART0 at the configured rate), one text command per line:
-
-| Command | Reply |
-|---|---|
-| `ping` | `PONG` |
-| `quiet` | `OK`; silences the board's log output (the tool sends it first) |
-| `info`, `status` | `JSON {...}` |
-| `set lenc 0` | `OK` or `ERR <why>`; same variables as `/set` below |
-| `cap MAX` | `FRM <bytes> <w> <h>`, then the JPEG bytes, then `END` |
-
-Over HTTP:
-
-| URL | Returns |
-|---|---|
-| `/` | browser page: stream, LENC and AE buttons, full-size still link |
-| `/info` | JSON: sensor name, PID/VER/MIDH/MIDL, max size, hardware JPEG or not |
-| `/status` | JSON: every sensor setting |
-| `/set?var=lenc&val=0` | any esp32-camera setter: `framesize`, `quality`, `brightness`, `contrast`, `saturation`, `awb`, `aec`, `agc`, `aec_value`, `agc_gain`, `gainceiling`, `lenc`, `hmirror`, `vflip`, `colorbar`, ... |
-| `/capture?size=MAX` | one JPEG; `size` is `MAX`, a name (`VGA`, `UXGA`) or `WxH` |
-| `:81/stream?size=VGA` | MJPEG stream (its own server, so the others keep answering) |
-
-Any sensor the esp32-camera driver knows is accepted (OV2640, OV3660, OV5640,
-OV7670, OV7725, GC-series, ...). Sensors without a JPEG encoder are served
-through a software conversion, slowly.
-
-## Troubleshooting
-
-- **The board resets with "Brownout detector was triggered"**: the USB supply
-  sags when Wi-Fi transmits. Use a shorter, thicker cable or a powered hub.
-- **"Detected camera not supported" / `camera_ok: false`**: the module is not
-  seated, is in backwards, or is a sensor the driver does not know. Reseat it
-  with power off.
-- **Full-size stills fail or time out** (large sensors, low quality numbers):
-  the JPEG outgrew its buffer and the frame was dropped. Ask for less data with a
-  larger quality number, which is worse quality in esp32-camera's inverted
-  scale, for example `/set?var=quality&val=12`.
-- **The live view stalls after a still**: the board switches the sensor to full
-  size and back; a second or two of freeze is normal. Press `q` and restart if
-  it does not recover.
-- **Numbers jump between frames**: lock exposure (`e`) and keep the light steady.
