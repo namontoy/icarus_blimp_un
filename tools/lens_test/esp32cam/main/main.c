@@ -29,8 +29,8 @@
  *
  * WHY SERIAL AS WELL: the laptop's only uplink is usually its Wi-Fi card, so
  * joining the board's access point cuts it off from everything else. The USB
- * cable is already there for flashing and carries ~90 kB/s at 921600 baud,
- * enough for a QVGA live view and full-size stills in a couple of seconds.
+ * cable is already there for flashing and carries ~45 kB/s at 460800 baud,
+ * enough for a QVGA live view and a full-size still in a few seconds.
  *
  * WHY TWO HTTP SERVERS: esp_http_server runs handlers one at a time per server
  * and a stream handler never returns while a client watches. Putting the stream

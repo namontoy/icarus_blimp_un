@@ -52,9 +52,9 @@ a USB cable that can carry 500 mA, and the modules to sort.
 
 Two ways to reach the board. **Serial** (recommended): the same USB cable used
 for flashing, `--port COM3`; the laptop keeps its own Wi-Fi and internet. The
-firmware prints its boot log at 115200 baud and then switches UART0 to 921600
-for the tool (the "Lens test" menu sets the rate; `idf.py monitor -b 921600`
-still shows the log). **Wi-Fi**: join the network **lens-test**, password
+firmware prints its boot log at 115200 baud and then switches UART0 to 460800
+for the tool (the "Lens test" menu sets the rate; `idf.py monitor -b 460800`
+still shows the log). The generic USB-C adapter on the bench cannot do 921600. **Wi-Fi**: join the network **lens-test**, password
 **lenstest1**, and use `--host 192.168.4.1` (the default). `http://192.168.4.1/`
 also shows the live stream in a browser or on a phone, handy for aiming.
 

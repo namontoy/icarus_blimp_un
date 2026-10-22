@@ -25,11 +25,12 @@ menu "Lens test"
 
     config LENS_TEST_SERIAL_BAUD
         int "Serial rate for the PC tool on UART0 (after the boot log)"
-        default 921600
+        default 460800
         help
             The boot log stays at 115200 baud; the firmware then switches UART0
-            to this rate for lens_test.py --port. Lower it to 460800 if the USB
-            adapter drops bytes (frames fail to decode).
+            to this rate for lens_test.py --port. 460800 is what the generic
+            USB-C adapters on the bench are known to handle (esptool flashes at
+            it); the one tried could not do 921600 at all.
 
     config LENS_TEST_JPEG_QUALITY
         int "JPEG quality for stills and stream (0 best .. 63 worst)"

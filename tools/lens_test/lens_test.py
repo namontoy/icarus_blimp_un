@@ -920,7 +920,7 @@ def cmd_info(args) -> int:
 
 
 def cmd_live(args) -> int:
-    size = args.stream_size or ("QVGA" if args.port else "VGA")   # serial carries ~90 kB/s
+    size = args.stream_size or ("QVGA" if args.port else "VGA")   # serial carries ~45 kB/s
     Session(make_board(args), Path(args.out), clean_label(args.label), size).run()
     return 0
 
@@ -994,8 +994,8 @@ def fmt(value, digits: int = 1) -> str:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--port", help="serial port of the board (COM3): use the USB cable instead of Wi-Fi")
-    ap.add_argument("--baud", type=int, default=921600,
-                    help="serial rate; must match the firmware's 'Lens test' menu (default 921600)")
+    ap.add_argument("--baud", type=int, default=460800,
+                    help="serial rate; must match the firmware's 'Lens test' menu (default 460800)")
     ap.add_argument("--host", default=DEFAULT_HOST, help="board address over Wi-Fi (default: its own access point)")
     ap.add_argument("--out", default=str(DEFAULT_OUT), help="where lens cards go (default build/lens_test)")
     sub = ap.add_subparsers(dest="cmd", required=True)
