@@ -755,7 +755,7 @@ class Session:
         self.colorbar = False
         board.set("colorbar", 0)
         settings = load_settings(out)   # the bench does not change between modules
-        self.last_distance = float(settings.get("distance_m", 1.0))
+        self.last_distance = float(settings.get("distance_m") or 1.0)
         self.last_width = float(settings.get("width_m", 1.0))
         self.distance = float(distance_m) if distance_m else settings.get("distance_m")   # None until typed once
         self.flash = None   # (text, until) shown at the bottom of the live view
@@ -796,15 +796,38 @@ class Session:
         return out
 
     def capture(self):
-        jpg = self.board.capture("MAX")
-        img = decode(jpg)
-        if img is None:
-            raise RuntimeError("the still did not decode as a JPEG")
-        return jpg, img
+        """A full-size still with settled exposure. The live view is paused first:
+        every live frame switches the sensor back to the small size, and the
+        OV2640's auto-exposure needs several frames at the new size to catch up,
+        so a single still straight after a switch comes out dark. Stills are
+        taken back to back until their brightness stops changing."""
+        self.reader.stop()
+        try:
+            last_mean = None
+            jpg = img = None
+            for n in range(1, 13):
+                jpg = self.board.capture("MAX")
+                img = decode(jpg)
+                if img is None:
+                    continue
+                mean = float(cv2.resize(gray_of(img), (80, 60), interpolation=cv2.INTER_AREA).mean())
+                if last_mean is not None and n >= 4 and abs(mean - last_mean) < 1.5:
+                    break
+                last_mean = mean
+            if img is None:
+                raise RuntimeError("the still did not decode as a JPEG")
+            print(f"  exposure settled after {n} stills (mean brightness {last_mean:.0f})")
+            return jpg, img
+        finally:
+            self.start_stream()
 
     def save(self) -> None:
         save_card(self.out, self.card)
-        save_settings(self.out, {"distance_m": self.distance or self.last_distance, "width_m": self.last_width})
+        settings = load_settings(self.out)
+        if self.distance:
+            settings["distance_m"] = self.distance
+        settings["width_m"] = self.last_width
+        save_settings(self.out, settings)
 
     def folder(self) -> Path:
         folder = card_dir(self.out, self.card.label)
@@ -880,7 +903,13 @@ class Session:
             sharp = round(sharpness_at(gray, mid[0], mid[1]), 1)
             how = f"{len(pts)} clicked marks"
             annotated = draw_points(img, pts)
-        vig, centre = vignetting_band(gray)
+            if res["pinhole_rms_px"] < 12:   # hand clicks scatter by a few pixels on their own
+                res["better_model"] = "pinhole"
+                res["distortion_note"] = "straight within click precision"
+        marks_y = float(np.mean([q[1] for q in res.get("points", [])])) if res.get("points") else \
+            float(np.mean([np.mean([c[1] for c in quad]) for quad in marks["corners"]]))
+        band_img = gray if marks_y > h / 2 else gray[::-1]   # measure the band away from the marks
+        vig, centre = vignetting_band(band_img)
         stamp = now()
         res.update({"image": "oneshot.jpg", "image_size": [w, h], "when": stamp})
         self.card.fov = res
@@ -889,7 +918,7 @@ class Session:
                                 "better_model": res["better_model"], "when": stamp}
         self.card.vignetting["still_top_band"] = {"corner_over_centre": round(vig, 3), "centre_mean": round(centre, 1),
                                                   "lenc": self.lenc, "when": stamp,
-                                                  "note": "left/right vs centre over the top 10 % rows of the one-shot still"}
+                                                  "note": "left/right vs centre over the 10 % of rows farthest from the marks"}
         entry = {"distance_m": self.distance, "value": sharp, "stream_size": f"{w}x{h} still, {res['method']}", "when": stamp}
         self.card.sharpness = [s for s in self.card.sharpness if "still" not in str(s.get("stream_size"))] + [entry]
         self.card.sharpness.sort(key=lambda s: s["distance_m"])
