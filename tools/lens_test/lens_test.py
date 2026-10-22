@@ -4,6 +4,7 @@
     python tools/lens_test/lens_test.py --port COM3 info
     python tools/lens_test/lens_test.py --port COM3 live --label A
     python tools/lens_test/lens_test.py --port COM3 snap --label A
+    python tools/lens_test/lens_test.py markers                 printable marker pages
     python tools/lens_test/lens_test.py table [--markdown]
 
 The board runs tools/lens_test/esp32cam and is reached either over the USB
@@ -31,10 +32,14 @@ apart. Five numbers do it:
 Everything is filed as a lens card, build/lens_test/<label>/card.json, next to
 the images it came from, so the physical module can be tagged with its label.
 
-The fast path, with the board never moving: tape along the BOTTOM edge of the
-picture, blank wall above it, board on a marked spot. Per module: `a` (one still,
-three clicks, two numbers: field of view, distortion, vignetting and sharpness
-all from that still), `i` (remote off, then on), `q`. About a minute each.
+The fast path, with the board never moving and nothing to click or type:
+printed ArUco markers taped on the wall every 25 cm (`markers` writes the pages),
+the board on a marked spot. Per module: start, press `a`, read one line, `q`.
+The tool finds the markers in one full-size still, fits the field of view to
+all of them, rates the distortion by how well the straight (pinhole) model fits,
+and reads vignetting and sharpness from the same still. The distance to the
+wall is typed once and remembered (or passed as --distance). `i` with a TV
+remote answers the IR-filter question when wanted.
 
 Hotkeys in the live view:
   a  one-shot: everything but IR from one still (3 clicks)
@@ -78,7 +83,7 @@ WINDOW = "lens_test"
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 
 HELP = """
-  a ONE-SHOT (field of view + distortion + vignetting + sharpness from one still)
+  a MEASURE: one still, markers found automatically (field of view, distortion, vignetting, sharpness)
   n new module    t note    s still    f field of view    d distortion
   v vignetting    k sharpness    i IR peak    l LENC    e AE lock    c colour bars
   o toggle the detailed overlay (live sharpness, vignetting, peak and the measuring boxes)
@@ -394,6 +399,104 @@ def sharpness_at(gray, x: float, y: float, w_frac: float = 0.25, h_frac: float =
     return float(cv2.Laplacian(gray[y0:y1, x0:x1], cv2.CV_64F).var())
 
 
+MARKER_IDS = 7            # ids 0..6, taped at 0, 25, 50 ... 150 cm
+MARKER_SPACING_M = 0.25
+MARKER_SIDE_MM = 70
+
+
+def marker_detector():
+    aruco = cv2.aruco
+    params = aruco.DetectorParameters()
+    params.cornerRefinementMethod = aruco.CORNER_REFINE_SUBPIX
+    return aruco.ArucoDetector(aruco.getPredefinedDictionary(aruco.DICT_4X4_50), params)
+
+
+def fit_fov(X, U, w: int, h: int, distance_m: float) -> dict:
+    """Field of view from points at known wall positions X (m) seen at pixel
+    columns U, the wall distance_m in front of the lens.
+
+    Pinhole: u = u0 + (f / D) X, a straight line through the points.
+    Equidistant (fisheye): u = u0 + f atan((X - X0) / D), X0 being the wall
+    point on the optical axis, found by a 5 mm grid search (three points or
+    more). How badly the straight line fits, in pixels RMS, is the distortion
+    verdict: a standard lens fits to a fraction of a pixel, a wide one bends
+    by many pixels. Works the same for printed markers and for clicked marks."""
+    X = np.asarray(X, dtype=float)
+    U = np.asarray(U, dtype=float)
+    diag = math.hypot(w, h)
+
+    def rms(res):
+        return float(np.sqrt(np.mean(np.square(res))))
+
+    slope, u0 = np.polyfit(X, U, 1)
+    f_pin = float(slope * distance_m)
+    if f_pin <= 0:
+        raise ValueError("the points must run from left to right in increasing wall position")
+    out = {
+        "distance_m": distance_m, "coverage": round(float(U.max() - U.min()) / w, 3),
+        "f_px_pinhole": round(f_pin, 1), "pinhole_rms_px": round(rms(U - (u0 + slope * X)), 2),
+        "hfov_pinhole_deg": round(math.degrees(2 * math.atan(w / (2 * f_pin))), 1),
+        "vfov_pinhole_deg": round(math.degrees(2 * math.atan(h / (2 * f_pin))), 1),
+        "dfov_pinhole_deg": round(math.degrees(2 * math.atan(diag / (2 * f_pin))), 1),
+        "f_px_equidistant": float("nan"), "equidistant_rms_px": float("nan"),
+        "hfov_equidistant_deg": float("nan"), "vfov_equidistant_deg": float("nan"),
+        "dfov_equidistant_deg": float("nan"), "better_model": "pinhole",
+    }
+    if len(X) >= 3:   # three unknowns (f, u0, X0) need three points
+        best = None
+        for x0 in np.arange(X.min() - 3.0, X.max() + 3.0, 0.005):
+            a = np.arctan((X - x0) / distance_m)
+            f_eq, u0_eq = np.polyfit(a, U, 1)
+            r = rms(U - (u0_eq + f_eq * a))
+            if best is None or r < best[0]:
+                best = (r, float(f_eq))
+        res_eq, f_eq = best
+        if f_eq > 0:
+            out.update({"f_px_equidistant": round(f_eq, 1), "equidistant_rms_px": round(res_eq, 2),
+                        "hfov_equidistant_deg": round(math.degrees(w / f_eq), 1),
+                        "vfov_equidistant_deg": round(math.degrees(h / f_eq), 1),
+                        "dfov_equidistant_deg": round(math.degrees(diag / f_eq), 1),
+                        "better_model": "equidistant" if res_eq < 0.7 * out["pinhole_rms_px"] else "pinhole"})
+    return out
+
+
+def measure_markers(img, distance_m: float, spacing_m: float = MARKER_SPACING_M) -> dict | None:
+    """Printed ArUco markers on the wall, no clicks: marker i sits at X = i * spacing.
+    Returns None when fewer than two markers are seen."""
+    gray = gray_of(img)
+    h, w = gray.shape
+    corners, ids, _ = marker_detector().detectMarkers(gray)
+    if ids is None or len(ids) < 2:
+        return None
+    found = sorted((int(i), c.reshape(4, 2)) for c, i in zip(corners, ids.ravel()))
+    X = [i * spacing_m for i, _ in found]
+    U = [float(c[:, 0].mean()) for _, c in found]
+    out = fit_fov(X, U, w, h, distance_m)
+    out.update({"method": "aruco", "markers": [i for i, _ in found], "spacing_m": spacing_m})
+    # sharpness on the printed squares: high-contrast edges, the same on every module
+    sharp = []
+    for _, c in found:
+        x0, y0 = np.floor(c.min(axis=0)).astype(int)
+        x1, y1 = np.ceil(c.max(axis=0)).astype(int)
+        pad = max(4, int(0.1 * (x1 - x0)))
+        roi = gray[max(0, y0 - pad):min(h, y1 + pad), max(0, x0 - pad):min(w, x1 + pad)]
+        if roi.size > 64:
+            sharp.append(float(cv2.Laplacian(roi, cv2.CV_64F).var()))
+    out["sharpness"] = round(float(np.mean(sharp)), 1) if sharp else float("nan")
+    out["corners"] = [c.tolist() for _, c in found]
+    return out
+
+
+def draw_markers(img, res: dict):
+    out = img.copy()
+    for mid, c in zip(res["markers"], res["corners"]):
+        pts = np.array(c, dtype=np.int32).reshape(-1, 1, 2)
+        cv2.polylines(out, [pts], True, (0, 255, 0), 3, cv2.LINE_AA)
+        x, y = pts[0, 0]
+        cv2.putText(out, f"{mid * 25} cm", (int(x), int(y) - 10), FONT, 1.0, (0, 255, 0), 2, cv2.LINE_AA)
+    return out
+
+
 def peak(gray) -> int:
     """Brightest 5x5 spot, which is what an IR remote's LED becomes."""
     return int(cv2.blur(gray, (5, 5)).max())
@@ -537,7 +640,7 @@ def lens_class(card: Card) -> str:
     h_eq = card.fov.get("hfov_equidistant_deg", 0.0)
     if h_pin < 70:
         return "standard"
-    if h_eq == h_eq and h_eq > 125:
+    if h_eq == h_eq and h_eq > 125 and card.fov.get("better_model", "equidistant") == "equidistant":
         return "fisheye"
     return "wide"
 
@@ -592,7 +695,7 @@ def pick_points(img, n: int, hint: str) -> list[tuple[float, float]] | None:
     win = "lens_test: click"
 
     def on_mouse(event, x, y, _flags, _param):
-        if event == cv2.EVENT_LBUTTONDOWN and len(pts) < n:
+        if event == cv2.EVENT_LBUTTONDOWN and (n == 0 or len(pts) < n):
             pts.append((x / scale, y / scale))
 
     cv2.namedWindow(win, cv2.WINDOW_AUTOSIZE)
@@ -606,12 +709,13 @@ def pick_points(img, n: int, hint: str) -> list[tuple[float, float]] | None:
             for i, p in enumerate(shown):
                 cv2.circle(frame, p, 7, (0, 0, 255), 2, cv2.LINE_AA)
                 cv2.putText(frame, str(i + 1), (p[0] + 9, p[1] - 9), FONT, 0.6, (0, 0, 255), 2, cv2.LINE_AA)
-            put_lines(frame, [hint, f"{len(pts)}/{n} points    Enter: accept    u: undo    Esc: cancel"])
+            count = f"{len(pts)} points" if n == 0 else f"{len(pts)}/{n} points"
+            put_lines(frame, [hint, f"{count}    Enter: accept    u: undo    Esc: cancel"])
             cv2.imshow(win, frame)
             key = cv2.waitKey(30) & 0xFF
             if key == 27:
                 return None
-            if key in (13, 10, 32) and len(pts) == n:
+            if key in (13, 10, 32) and (len(pts) == n or (n == 0 and len(pts) >= 2)):
                 return pts
             if key == ord("u") and pts:
                 pts.pop()
@@ -635,7 +739,7 @@ def draw_points(img, pts, colour=(0, 0, 255)):
 # --------------------------------------------------------------------------- #
 
 class Session:
-    def __init__(self, board, out: Path, label: str, stream_size: str) -> None:
+    def __init__(self, board, out: Path, label: str, stream_size: str, distance_m: float | None = None) -> None:
         self.board = board
         self.out = out
         self.stream_size = stream_size
@@ -653,6 +757,8 @@ class Session:
         settings = load_settings(out)   # the bench does not change between modules
         self.last_distance = float(settings.get("distance_m", 1.0))
         self.last_width = float(settings.get("width_m", 1.0))
+        self.distance = float(distance_m) if distance_m else settings.get("distance_m")   # None until typed once
+        self.flash = None   # (text, until) shown at the bottom of the live view
         self.reader = None
         self.last_view = None
         self.detailed = False   # the default view is just for aiming; 'o' shows the live numbers
@@ -698,7 +804,7 @@ class Session:
 
     def save(self) -> None:
         save_card(self.out, self.card)
-        save_settings(self.out, {"distance_m": self.last_distance, "width_m": self.last_width})
+        save_settings(self.out, {"distance_m": self.distance or self.last_distance, "width_m": self.last_width})
 
     def folder(self) -> Path:
         folder = card_dir(self.out, self.card.label)
@@ -731,56 +837,76 @@ class Session:
         print(f"  saved {name} ({img.shape[1]}x{img.shape[0]})")
 
     def act_all(self) -> None:
-        """Field of view, distortion, vignetting and sharpness from ONE still: the
-        tape runs along the bottom edge, so its two ends give the field, its
-        middle the bow, the blank wall above it the vignetting and its print the
-        sharpness. The board never moves between modules."""
-        print("\nOne shot. Board on its mark, tape running along the BOTTOM edge of the"
-              " picture, blank wall above it.")
-        self.banner("One shot: type the distance to the wall")
-        distance = ask_float("distance from the lens to the wall [m]", self.last_distance)
-        print("  taking a full-size still ...")
+        """One still. With printed markers on the wall nothing else is needed; with
+        handwritten marks the person clicks every mark visible, left to right (they
+        are MARKER_SPACING_M apart), and the same fit runs on those points. The
+        blank wall above gives the vignetting and the marks' print the sharpness.
+        The distance to the wall is asked once and remembered."""
+        if not self.distance:
+            self.banner("First time only: type the distance from the lens to the wall")
+            self.distance = ask_float("distance from the lens to the wall [m]", self.last_distance)
+            self.last_distance = self.distance
+            self.save()
+        self.flash = ("taking the still ...", time.time() + 30)
+        print(f"\n[{self.card.label}] taking a full-size still at {self.distance:g} m ...")
         jpg, img = self.capture()
-        pts = pick_points(img, 3, "Click the tape at its LEFT end, its MIDDLE, then its RIGHT end (on the tape line)")
-        if not pts:
-            print("  cancelled")
-            return
-        self.banner("Now type the metres of tape between the LEFT and RIGHT clicks")
-        width = ask_float("tape reading difference between the LEFT and RIGHT clicks [m]", self.last_width)
-        self.last_distance, self.last_width = distance, width
         w, h = img.shape[1], img.shape[0]
-        try:
-            fov = solve_fov(pts[0][0], pts[2][0], w, h, distance, width)
-            bow = solve_distortion(pts, w, h)
-        except ValueError as exc:
-            print(f"  {exc}")
-            return
         gray = gray_of(img)
+        res = measure_markers(img, self.distance)
+        if res is not None:
+            marks = {"markers": res["markers"], "corners": res.pop("corners")}
+            sharp = res.pop("sharpness")
+            seen = ", ".join(f"{m * 25}" for m in res["markers"])
+            how = f"markers at {seen} cm ({len(res['markers'])})"
+            annotated = draw_markers(img, marks)
+        else:
+            self.flash = ("click every big mark, LEFT to RIGHT, then Enter", time.time() + 60)
+            pts = pick_points(img, 0, "Click EVERY big mark on the tape, from LEFT to RIGHT (2 or more), then Enter")
+            if not pts:
+                self.flash = None
+                print("  cancelled")
+                return
+            pts.sort(key=lambda q: q[0])
+            X = [k * MARKER_SPACING_M for k in range(len(pts))]
+            try:
+                res = fit_fov(X, [q[0] for q in pts], w, h, self.distance)
+            except ValueError as exc:
+                self.flash = None
+                print(f"  {exc}")
+                return
+            res.update({"method": "clicked marks", "spacing_m": MARKER_SPACING_M,
+                        "points": [[round(x, 1), round(y, 1)] for x, y in pts]})
+            mid = pts[len(pts) // 2]
+            sharp = round(sharpness_at(gray, mid[0], mid[1]), 1)
+            how = f"{len(pts)} clicked marks"
+            annotated = draw_points(img, pts)
         vig, centre = vignetting_band(gray)
-        sharp = sharpness_at(gray, pts[1][0], pts[1][1])
         stamp = now()
-        marks = [[round(x, 1), round(y, 1)] for x, y in pts]
-        fov.update({"distance_m": distance, "width_m": width, "points": [marks[0], marks[2]],
-                    "image": "oneshot.jpg", "image_size": [w, h], "when": stamp})
-        bow.update({"points": marks, "image": "oneshot.jpg", "when": stamp})
-        self.card.fov = fov
-        self.card.distortion = bow
+        res.update({"image": "oneshot.jpg", "image_size": [w, h], "when": stamp})
+        self.card.fov = res
+        self.card.distortion = {"method": "line fit", "pinhole_rms_px": res["pinhole_rms_px"],
+                                "equidistant_rms_px": res["equidistant_rms_px"],
+                                "better_model": res["better_model"], "when": stamp}
         self.card.vignetting["still_top_band"] = {"corner_over_centre": round(vig, 3), "centre_mean": round(centre, 1),
                                                   "lenc": self.lenc, "when": stamp,
                                                   "note": "left/right vs centre over the top 10 % rows of the one-shot still"}
-        entry = {"distance_m": distance, "value": round(sharp, 1), "stream_size": f"{w}x{h} still, tape print", "when": stamp}
+        entry = {"distance_m": self.distance, "value": sharp, "stream_size": f"{w}x{h} still, {res['method']}", "when": stamp}
         self.card.sharpness = [s for s in self.card.sharpness if "still" not in str(s.get("stream_size"))] + [entry]
         self.card.sharpness.sort(key=lambda s: s["distance_m"])
-        cv2.imwrite(str(self.folder() / "oneshot.jpg"), draw_points(img, pts))
+        cv2.imwrite(str(self.folder() / "oneshot.jpg"), annotated)
         self.save()
-        print(f"  field of view {fov['hfov_pinhole_deg']} x {fov['vfov_pinhole_deg']} deg pinhole"
-              f" ({fov['hfov_equidistant_deg']} deg equidistant) -> {lens_class(self.card)};"
-              f" bow {bow['sag_pct']} % {bow['kind']}; top-band corner/centre {vig:.2f};"
-              f" tape sharpness {sharp:.0f}; clicks cover {fov['coverage'] * 100:.0f} % of the width")
-        if fov["coverage"] < 0.5:
-            print("  tip: click the outermost marks you can see, so the models agree better")
-        if bow["radius_frac"] < 0.4:
-            print("  tip: the tape sits near the middle; the bow is only telling near a border")
+        cls = lens_class(self.card)
+        line = (f"{self.card.label}: {res['hfov_pinhole_deg']:.0f} x {res['vfov_pinhole_deg']:.0f} deg -> {cls}"
+                f"   fit {res['pinhole_rms_px']:.1f} px   corner/centre {vig:.2f}   sharp {sharp:.0f}")
+        self.flash = (line, time.time() + 30)
+        eq = res["hfov_equidistant_deg"]
+        print(f"  {how}, covering {res['coverage'] * 100:.0f} % of the width")
+        print(f"  field of view {res['hfov_pinhole_deg']} x {res['vfov_pinhole_deg']} deg pinhole"
+              + (f", {eq} deg equidistant" if eq == eq else "") + f" -> {cls}")
+        print(f"  straight-line fit {res['pinhole_rms_px']} px RMS ({res['better_model']} model fits best);"
+              f" top-band corner/centre {vig:.2f}; sharpness {sharp:.0f}")
+        if res["coverage"] < 0.5:
+            print("  tip: more marks across the picture would make the number more precise")
 
     def act_fov(self) -> None:
         print("\nField of view. Board square to a wall with a tape measure stuck across it,"
@@ -968,6 +1094,12 @@ class Session:
             # Nothing else on screen: the results go to the terminal, so the picture
             # stays clear for lining up the tape.
             cv2.putText(view, self.card.label, (8, 18), FONT, 0.55, (0, 220, 255), 1, cv2.LINE_AA)
+            if self.flash and time.time() < self.flash[1]:
+                text = self.flash[0]
+                scale = 0.5 if w < 500 else 0.7
+                (tw, th), _ = cv2.getTextSize(text, FONT, scale, 1)
+                cv2.rectangle(view, (0, h - th - 14), (min(w, tw + 16), h), (0, 0, 0), -1)
+                cv2.putText(view, text, (8, h - 7), FONT, scale, (0, 220, 255), 1, cv2.LINE_AA)
             return view
         gray = gray_of(img)
         sharp = sharpness(gray)
@@ -1076,7 +1208,7 @@ def cmd_info(args) -> int:
 
 def cmd_live(args) -> int:
     size = args.stream_size or ("QVGA" if args.port else "VGA")   # serial carries ~45 kB/s
-    Session(make_board(args), Path(args.out), clean_label(args.label), size).run()
+    Session(make_board(args), Path(args.out), clean_label(args.label), size, args.distance).run()
     return 0
 
 
@@ -1097,6 +1229,47 @@ def cmd_snap(args) -> int:
     return 0
 
 
+def cmd_markers(args) -> int:
+    """Printable A4 pages (300 dpi PNG) with the wall markers: print at 100 %, cut
+    each one out with its white margin, tape it above the tape measure with the
+    short line under it on the cm mark its label names."""
+    aruco = cv2.aruco
+    dictionary = aruco.getPredefinedDictionary(aruco.DICT_4X4_50)
+    mm = 300 / 25.4
+    page_w, page_h = int(210 * mm), int(297 * mm)
+    side = int(MARKER_SIDE_MM * mm)
+    per_page = 3
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    files = []
+    for first in range(0, MARKER_IDS, per_page):
+        page = np.full((page_h, page_w), 255, np.uint8)
+        if first == 0:
+            cv2.putText(page, "lens_test wall markers - print at 100 % (actual size), cut with the white margin,",
+                        (int(10 * mm), int(8 * mm)), FONT, 1.3, 0, 2, cv2.LINE_AA)
+            cv2.putText(page, "tape each one ABOVE the tape measure with its short line on the cm mark named below it",
+                        (int(10 * mm), int(14 * mm)), FONT, 1.3, 0, 2, cv2.LINE_AA)
+        for k, mid in enumerate(range(first, min(first + per_page, MARKER_IDS))):
+            x0 = (page_w - side) // 2
+            y0 = int(20 * mm) + k * int(90 * mm)
+            page[y0:y0 + side, x0:x0 + side] = aruco.generateImageMarker(dictionary, mid, side)
+            cx = x0 + side // 2
+            cv2.line(page, (cx, y0 + side + int(2 * mm)), (cx, y0 + side + int(12 * mm)), 0, 4)
+            cv2.putText(page, f"{int(mid * MARKER_SPACING_M * 100)} cm", (cx + int(5 * mm), y0 + side + int(11 * mm)),
+                        FONT, 2.2, 0, 4, cv2.LINE_AA)
+            # cut line with a quiet zone around the marker
+            m = int(12 * mm)
+            cv2.rectangle(page, (x0 - m, y0 - m), (x0 + side + m, y0 + side + int(16 * mm)), 128, 2)
+        name = out / f"markers_page{first // per_page + 1}.png"
+        cv2.imwrite(str(name), page)
+        files.append(name)
+    print("printable pages (A4, print at 100 %):")
+    for f in files:
+        print(f"  {f}")
+    print(f"{MARKER_IDS} markers, {MARKER_SIDE_MM} mm each, for the tape marks 0 to {int((MARKER_IDS - 1) * MARKER_SPACING_M * 100)} cm")
+    return 0
+
+
 def cmd_reboot(args) -> int:
     if not args.port:
         print("reboot works over --port only")
@@ -1111,7 +1284,7 @@ def cmd_table(args) -> int:
     if not cards:
         print(f"no lens cards under {out}")
         return 1
-    header = ["label", "sensor", "HFOV pin", "HFOV eq", "VFOV pin", "class", "bow %",
+    header = ["label", "sensor", "HFOV pin", "HFOV eq", "VFOV pin", "class", "distortion",
               "corner/centre", "IR", "sharpness", "notes"]
     rows = []
     for c in cards:
@@ -1121,7 +1294,7 @@ def cmd_table(args) -> int:
             c.label, f"{c.sensor.get('sensor', '?')} {c.sensor.get('pid', '')}".strip(),
             fmt(fov.get("hfov_pinhole_deg")), fmt(fov.get("hfov_equidistant_deg")),
             fmt(fov.get("vfov_pinhole_deg")), lens_class(c),
-            fmt(c.distortion.get("sag_pct")) if c.distortion else "-",
+            (f"{c.distortion['sag_pct']:.1f} %" if "sag_pct" in c.distortion else f"{c.distortion.get('pinhole_rms_px', 0):.1f} px") if c.distortion else "-",
             fmt(vig.get("corner_over_centre"), 2) if vig else "-",
             fmt(c.ir.get("peak_delta", c.ir.get("peak")), 0) if c.ir else "-",
             " ".join(f"{s['distance_m']:g}m:{s['value']:.0f}" for s in c.sharpness) or "-",
@@ -1160,7 +1333,10 @@ def main(argv: list[str] | None = None) -> int:
     live = sub.add_parser("live", help="live view with measurements and hotkeys")
     live.add_argument("--label", default="module", help="lens-card label to start with")
     live.add_argument("--stream-size", default=None, help="live frame size (default VGA over Wi-Fi, QVGA over serial)")
+    live.add_argument("--distance", type=float, default=None, help="lens-to-wall distance in m (remembered once given)")
     live.set_defaults(fn=cmd_live)
+
+    sub.add_parser("markers", help="write the printable wall-marker pages to --out").set_defaults(fn=cmd_markers)
 
     snap = sub.add_parser("snap", help="save one still to a lens card")
     snap.add_argument("--label", default="module")
