@@ -5,6 +5,7 @@ altitude-sensor setups, and print one summary table.
     python tools/sim_sweep.py                          both courses, none + tof, seeds 0-4
     python tools/sim_sweep.py --courses 1 --altitude-sources tof --seeds 0-9
     python tools/sim_sweep.py --envelope-diameter 0.69
+    python tools/sim_sweep.py --fov-deg 54x42          the 54-degree lens type instead of the 58
     python tools/sim_sweep.py --markdown               table ready for README.md / docs/10
 
 WHY THIS EXISTS. One run is one draw of the sensor noise. On course 1 with no
@@ -96,11 +97,13 @@ def generate_scene(py: Path, course: int, diameter: float | None) -> Path:
 
 
 def run_one(py: Path, xml: Path, course: int, alt: str, seed: int,
-            max_time: float, diameter: float | None) -> Run:
+            max_time: float, diameter: float | None, fov_deg: str | None) -> Run:
     cmd = [str(py), "sim/run_course.py", "--course", str(course), "--altitude-source", alt,
            "--seed", str(seed), "--max-time", str(max_time), "--xml", str(xml), "--quiet"]
     if diameter is not None:
         cmd += ["--envelope-diameter", str(diameter)]
+    if fov_deg:
+        cmd += ["--fov-deg", fov_deg]
     res = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True,
                          encoding="utf-8", errors="replace")
     out = res.stdout
@@ -146,6 +149,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="simulated seconds per run (default 220; see WHY 220 s)")
     ap.add_argument("--envelope-diameter", type=float, default=None,
                     help="m; omit for build_scene.py's default (0.78 m)")
+    ap.add_argument("--fov-deg", default=None, metavar="HxV",
+                    help="camera field of view in degrees, e.g. 54x42, to compare lenses; "
+                         "omit for sim_main.py's own (the measured lens)")
     ap.add_argument("--jobs", type=int, default=min(4, os.cpu_count() or 1),
                     help="runs in parallel (default: up to 4)")
     ap.add_argument("--markdown", action="store_true", help="print the summary as a markdown table")
@@ -169,7 +175,8 @@ def main(argv: list[str] | None = None) -> int:
           f"{ns.max_time:g} s each, {ns.jobs} in parallel ...", flush=True)
     with ThreadPoolExecutor(max_workers=ns.jobs) as pool:
         runs = list(pool.map(
-            lambda j: run_one(py, scenes[j[0]], j[0], j[1], j[2], ns.max_time, ns.envelope_diameter),
+            lambda j: run_one(py, scenes[j[0]], j[0], j[1], j[2], ns.max_time, ns.envelope_diameter,
+                              ns.fov_deg),
             jobs))
 
     if ns.verbose:
@@ -179,7 +186,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  course {r.course}  {r.alt:<5} seed {r.seed:<3} loops: {laps:<22} {note}")
 
     envelope = f"{ns.envelope_diameter:g} m" if ns.envelope_diameter else "0.78 m (default)"
-    print(f"\nenvelope {envelope}, seeds {ns.seeds}, up to 3 loops within {ns.max_time:g} s per run")
+    camera = f"{ns.fov_deg} deg" if ns.fov_deg else "sim_main.py's own"
+    print(f"\nenvelope {envelope}, camera {camera}, seeds {ns.seeds}, "
+          f"up to 3 loops within {ns.max_time:g} s per run")
     rows = []
     for c in courses:
         for a in alts:

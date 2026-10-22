@@ -96,6 +96,7 @@ python sim/run_course.py --course 2 --loops 1 --seed 7
 | `--course {1,2}` | 1 = rectangle perimeter (Rule 19), 2 = figure-eight (Rule 20) |
 | `--loops N` | how many **completed** loops this harness waits for before stopping (default 3, matching Rule 5's cap) — see the caveat in §3.1 |
 | `--envelope-diameter D` | metres; regenerates the scene via `build_scene.py` if it differs from the generator's own default (0.78 m) |
+| `--fov-deg HxV` | camera field of view in degrees, e.g. `54x42`, overriding `sim_main.py`'s measured 58 × 45° for a lens comparison; `tools/sim_sweep.py` passes it through |
 | `--altitude-source {none,baro,tof,both}` | which altitude sensor the synthetic IMU pretends to have. `none` is the real PCB (MPU-6050 only): altitude is held from the balloons themselves. `tof` models the recommended VL53L1X ([docs/10 §3](10-known-issues.md)) |
 | `--seed N` | seeds the sensor-noise RNG (`numpy.random.default_rng`) for a reproducible run |
 

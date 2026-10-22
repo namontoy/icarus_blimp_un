@@ -16,6 +16,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from pathlib import Path
 from typing import List, Optional
@@ -36,6 +37,9 @@ def build_argparser() -> argparse.ArgumentParser:
                           "internal-loop-count caveat)")
     ap.add_argument("--envelope-diameter", type=float, default=None,
                      help="m; omit to use build_scene.py's own default (0.78 m)")
+    ap.add_argument("--fov-deg", type=str, default=None, metavar="HxV",
+                     help="camera field of view in degrees, e.g. 54x42, to compare "
+                          "lenses; omit for sim_main.py's own (the measured lens)")
     ap.add_argument("--altitude-source", choices=list(sim_main.ALTITUDE_SOURCES),
                      default="none",
                      help="synthetic altitude sensor: none (the real PCB, altitude "
@@ -88,6 +92,17 @@ def print_table(result: "sim_main.RunResult") -> None:
 
 def main(argv: Optional[List[str]] = None) -> int:
     ns = build_argparser().parse_args(argv if argv is not None else sys.argv[1:])
+
+    if ns.fov_deg:
+        try:
+            h_deg, v_deg = (float(s) for s in ns.fov_deg.lower().split("x"))
+        except ValueError:
+            print(f"FAIL: --fov-deg wants HxV in degrees, e.g. 54x42, not {ns.fov_deg!r}")
+            return 2
+        # The perception helpers read these module globals on every tick, so
+        # overriding them here is enough; nothing in core/ sees the camera.
+        sim_main.FOV_HALF_ANGLE_RAD = math.radians(h_deg / 2.0)
+        sim_main.FOV_VERT_HALF_ANGLE_RAD = math.radians(v_deg / 2.0)
 
     if ns.xml:
         xml_path = Path(ns.xml)

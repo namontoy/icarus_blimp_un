@@ -72,9 +72,9 @@ floor - which is now also the failsafe.
   measurement the sim assumed 90 x 70 degrees; narrowing it to the real lens
   halved the loops the sensorless board completes on course 1 (12/15 to 6/15)
   and left the ToF rows unchanged. Every "balloon not in view" problem below is
-  therefore a field-of-view problem too. If a 54-degree module is fitted
-  instead, set `FOV_HALF_ANGLE_RAD` and `FOV_VERT_HALF_ANGLE_RAD` in
-  `sim/sim_main.py` to 27 and 21 degrees and rerun the sweep. The detector is
+  therefore a field-of-view problem too. `tools/sim_sweep.py --fov-deg 54x42`
+  simulates another lens without touching the code; the comparison of the
+  team's three lens types is at the end of this section. The detector is
   planned to run on 240 x 180 frames. The sim has no pixels, so that size
   changes none of its numbers; at 58 degrees it means 4.2 mrad per pixel and a
   0.55 m balloon of 130/range px (22 px at 6 m), against which the simulated
@@ -121,6 +121,29 @@ The groups are module types, not individual lenses: every rotated module is in t
 varies tenfold inside a group (focus differences), so the pick is B or N for the
 widest sharp view, or H in the 54-degree group. Not measured yet: sharpness at
 3 m, mass, and the IR filter on all but G.
+
+### Lens comparison in simulation (2026-10-22)
+
+Same sweep as the status tables (seeds 0-4, 220 s, 0.78 m envelope), with the
+camera set to each lens type through `tools/sim_sweep.py --fov-deg`. The 90 x 70
+row is the sim's old assumption, kept as a stand-in for a wide-angle module the
+team does not own; it reproduces the previously recorded numbers exactly, so the
+runs are deterministic per seed and the rows are directly comparable. Loops are
+completed out of 15; times are the best-lap range.
+
+| Camera (deg) | Modules | Course 1, no sensor | Course 1, ToF | Course 2, no sensor | Course 2, ToF |
+|---|---|---|---|---|---|
+| 44 x 34 | A | 6/15, 19.3-94.1 s | 13/15, 20.6-30.8 s | 2/15, 82.6-141.4 s | 11/15, 23.2-33.7 s |
+| 54 x 42 | C F H L M | 6/15, 17.5-118.1 s | 14/15, 22.0-30.7 s | 7/15, 24.9-69.2 s | 13/15, 22.0-36.3 s |
+| 58 x 45 | B D E G I J K N | 6/15, 19.0-78.7 s | 15/15, 21.6-24.0 s | 8/15, 25.9-113.4 s | 15/15, 23.0-24.2 s |
+| 90 x 70 | none (wide lens, not owned) | 12/15, 20.0-48.3 s | 15/15, 22.4-27.0 s | 7/15, 33.7-56.9 s | 15/15, 22.3-27.1 s |
+
+With the ToF, the 58-degree type is the narrowest lens that completes every
+loop; the 54-degree type drops 3 of 30 and module A 6 of 30, each a lost
+sighting followed by a long search (the missing loops had 80-120 s of budget
+left, so they are not the clock running out), and the wide lens buys nothing
+more. Without an altitude sensor every lens trips the failsafe in every run,
+the wide one included, so no lens replaces the sensor. Fit B or N, and the ToF.
 
 ## 3. THE hardware decision: add a downward ToF sensor
 

@@ -40,9 +40,11 @@ of simulated time per run:
 Without an altitude reference the vehicle went into failsafe in all 10 runs; with the ToF sensor,
 in none, and every loop finished. With the earlier, optimistic 90 × 70° camera the sensorless
 board had completed 19 of 30 loops: the real lens loses the balloons more often, and every lost
-sighting is a lost altitude reference, while the ToF rows did not move. That is why the top hardware recommendation is a **VL53L1X
-time-of-flight sensor** (about 2 g) on the existing I²C bus, which the firmware and estimator
-already support.
+sighting is a lost altitude reference, while the ToF rows did not move. That is why the top
+hardware recommendation is a **VL53L1X time-of-flight sensor** (about 2 g) on the existing I²C
+bus, which the firmware and estimator already support. Among the team's own lenses the 58° type
+is the narrowest that completes every loop with the ToF; the 54° and 44° modules drop 3 and 6 of
+30 loops (comparison in [docs/10](docs/10-known-issues.md)).
 Every number here simulates a vehicle that has not been weighed or thrust-tested yet;
 [docs/10](docs/10-known-issues.md) lists what that leaves out.
 
@@ -270,6 +272,7 @@ seeds:
 ```powershell
 python tools/sim_sweep.py                                       # both courses, none + ToF, seeds 0-4
 python tools/sim_sweep.py --courses 1 --altitude-sources tof --seeds 0-9 --markdown
+python tools/sim_sweep.py --fov-deg 54x42                       # another lens than the measured 58 x 45
 ```
 
 ### Test one core module

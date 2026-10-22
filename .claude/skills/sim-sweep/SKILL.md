@@ -6,8 +6,9 @@ argument-hint: "[--courses 1,2] [--altitude-sources none,tof] [--seeds 0-4] [--e
 
 # Measuring simulated performance
 
-If the request names courses, altitude sources, seeds or an envelope diameter, pass them to the
-script as options (`python tools/sim_sweep.py --help` lists them).
+If the request names courses, altitude sources, seeds, an envelope diameter or a camera field of
+view (a lens comparison, `--fov-deg 54x42`), pass them to the script as options
+(`python tools/sim_sweep.py --help` lists them).
 
 1. Rebuild the controller with `python tools/build.py dll`. The sweep refuses to run without a
    DLL but cannot tell whether it is stale.
