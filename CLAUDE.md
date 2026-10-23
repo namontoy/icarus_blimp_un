@@ -8,7 +8,7 @@ An indoor autonomous blimp that has to hover at 2 m (band 1.85–2.25 m). It is 
 
 | Path | Chip | Role |
 |---|---|---|
-| `firmware/projects/i2c_tools/` | ESP32-S3 (Waveshare ESP32-S3-Zero) | The flight-controller-to-be: GY-88 IMU/mag/baro, altimeter, four DRV8833 thrusters, and since the `s3-wireless-link` work its own Wi-Fi access point carrying the console and a UDP packet link (`docs/wireless-link.md`). The name comes from the Espressif `i2c_tools` example it grew out of, and the console prompt is still `i2c-tools>`. |
+| `firmware/projects/i2c_tools/` | ESP32-S3 (Waveshare ESP32-S3-Zero) | The flight-controller-to-be: IMU, magnetometer and barometer (stand-alone breakouts since the GY-88 burned; see below), altimeter, four DRV8833 thrusters, and since the `s3-wireless-link` work its own Wi-Fi access point carrying the console and a UDP packet link (`docs/wireless-link.md`). The name comes from the Espressif `i2c_tools` example it grew out of, and the console prompt is still `i2c-tools>`. |
 | `firmware/projects/optflow_cam/` | ESP32-CAM (AI-Thinker, original ESP32) | Downward optical flow. It prints CSV over UART to a laptop. |
 | `firmware/projects/blink/` | — | Stock ESP-IDF example, kept as a toolchain smoke test. |
 | `software/` | host | `blimp_link.py` is the ground tool for this repo's firmware (standard library only; `mock_blimp.py` fakes the firmware on localhost). The other Python tools were imported from a **separate quadcopter project (esp-drone)**: they speak CRTP-over-UDP to esp-drone firmware, **not** to anything in this repo. See `docs/esp-drone-tools-report.md` §8 for what would need to change to use them here. |
@@ -78,15 +78,23 @@ The GUI labels are in Spanish. `optflow_cam/host/flow_monitor.py` is a separate 
 ### Altitude sensing
 
 - **Primary altimeter: VL53L1X time-of-flight**, through the ST ULD driver in `components/vl53l1x_uld/` and the `tof` command. Its datasheet suggests its long-mode range may fall short of 2.25 m under room ambient IR. That is an **open question, to be settled by experimental measurement** at hover height, so don't treat it as decided either way. On the bench (dark room, about 1.57 m), timing budgets below 100 ms read about 5 % short.
-- **Backup: Parallax PING))) 28015 ultrasonic**, in `cmd_ping.c`. It is **parked and not yet tested in this role**: it isn't in SRCS because the motors took GPIO 7–14, and its header comment explains how to restore it. It needs temperature compensation (air temperature from the BMP180) and a 5 V SIG divider.
+- **Backup: Parallax PING))) 28015 ultrasonic**, in `cmd_ping.c`. It is **parked and not yet tested in this role**: it isn't in SRCS because the motors took GPIO 7–14, and its header comment explains how to restore it. It needs temperature compensation (air temperature from the barometer, via `baro_read_temperature_c()`) and a 5 V SIG divider.
 - Either sensor measures slant range, so correct it with tilt: `h = d·cos θ`.
 
 ### Hardware facts that shape code
 
-- **The GY-88 keeps its register state across ESP32 resets and reflashes.** Drivers must write ranges/modes explicitly at init and read them back. Never derive scale factors from whatever the chip currently holds.
-- I2C addresses: MPU-6050 `0x68` (boots asleep; write `PWR_MGMT_1`=0), HMC5883L `0x1E` (directly on the bus, no MPU bypass), BMP180 `0x77`.
+- **Sensor set (2026-10-22):** the GY-88 burned. The bench now carries stand-alone breakouts, and two of them are not the chips they were sold as:
+
+  | Role | On the GY-88 | Stand-alone breakout now on the bus |
+  |---|---|---|
+  | IMU | MPU-6050 `0x68` | MPU-6050 `0x68` (boots asleep; write `PWR_MGMT_1`=0) |
+  | Magnetometer | HMC5883L `0x1E`, ID "H43" at `0x0A`, directly on the bus (no MPU bypass) | **QMC5883L** `0x0D` (sold as "HMC5883L"), `0xFF` at reg `0x0D`, X/Y/Z little-endian |
+  | Barometer | BMP180 `0x77`, chip ID `0x55` | **BME280** `0x76` (sold as "BMP280"), chip ID `0x60`; a real BMP280 would be `0x58` |
+
+  `mag` and `baro` probe both addresses and pick the driver by ID register, not by address. **Keep both sets supported**: a new GY-88 may be bought. The GY-88 and BMP280 paths compile but have not run since the swap. The QMC5883L reads ‖m‖ ≈ 14.5 µT against the HMC5883L's 26.5 µT; its scale is unverified (`firmware/projects/i2c_tools/README.md` §14).
+- **The sensors keep their register state across ESP32 resets and reflashes** (found on the GY-88; assume the same of the breakouts, since an ESP32 reset doesn't power-cycle them either). Drivers must write ranges/modes explicitly at init and read them back. Never derive scale factors from whatever the chip currently holds.
 - The code uses the new `driver/i2c_master.h` API. `esp-idf-lib`'s drivers for these chips use the legacy `driver/i2c.h` API, so don't mix the two on one bus.
-- Motors and the sensors' AMS1117 share one 5 V step-up. If the IMU drops out exactly when thrust is applied, suspect a brownout before you suspect code (see the header comment in `cmd_motor.c`).
+- Motors and the sensors shared one 5 V step-up (through the GY-88's AMS1117; how the replacement breakouts are fed has not been recorded). If the IMU drops out exactly when thrust is applied, suspect a brownout before you suspect code (see the header comment in `cmd_motor.c`).
 
 ## Optical flow architecture (`optflow_cam`)
 
