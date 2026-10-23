@@ -18,6 +18,12 @@ python software/blimp_link.py stop
 (`--host 127.0.0.1` on the commands above). Protocol, safety timers and the bring-up
 checklist: `docs/wireless-link.md`.
 
+## The ground station: `ground_station/`
+
+The GUI for the bench and the arena: motors, sensors, the camera and the console on one
+browser page, served by `python -m software.ground_station` (`--demo` needs no hardware).
+Its own README is in the folder; the design is `docs/ground-station-plan.md`.
+
 ## esp-drone tools (not for this repo's firmware)
 
 Everything below is about the Python tools imported from the esp-drone project.

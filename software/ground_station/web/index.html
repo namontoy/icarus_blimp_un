@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Icarus Ground Station</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Titillium+Web:wght@400;600;700;900&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="brand">
+    <div class="wordmark">ICARUS</div>
+    <div class="brand-sub">Universidad Nacional de Colombia <span class="dot">·</span> blimp ground station</div>
+  </div>
+  <div class="pills">
+    <span class="pill idle" id="pill-link" title="UDP link to the blimp: age of the last packet">LINK <b>—</b></span>
+    <span class="pill idle" id="pill-fs" title="motor driver failsafe on the blimp">FAILSAFE <b>—</b></span>
+    <span class="pill idle" id="pill-sta" title="stations on the blimp's access point">STA <b>—</b></span>
+    <span class="pill idle" id="pill-cam" title="camera link">CAM <b>—</b></span>
+    <span class="pill demo" id="pill-demo" hidden>DEMO DATA</span>
+  </div>
+  <button class="stop" id="btn-stop" type="button" title="Coast all four motors (Space or Esc)">STOP</button>
+</header>
+
+<main class="grid">
+
+  <!-- ============================================================ MOTORS -->
+  <section class="panel motors" aria-labelledby="h-motors">
+    <div class="panel-head">
+      <h2 id="h-motors">Motors</h2>
+      <span class="head-note">signed thrust, −1 … +1 · bars show the blimp's readback</span>
+    </div>
+    <div class="panel-body">
+      <svg class="topview" viewBox="0 0 240 190" role="img" aria-label="top view of the blimp with the four thrusters">
+        <defs>
+          <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto">
+            <path d="M0 0 L10 5 L0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+        <ellipse cx="120" cy="95" rx="96" ry="72" class="envelope"/>
+        <rect x="88" y="78" width="64" height="34" rx="4" class="gondola"/>
+        <text x="120" y="24" class="svg-label" text-anchor="middle">FRONT</text>
+        <g id="tv-FL" class="thruster" transform="translate(74 70)"><circle r="7"/><text y="-11" text-anchor="middle">FL</text><line id="tv-FL-arrow" x1="0" y1="-9" x2="0" y2="-9" marker-end="url(#arrow)"/></g>
+        <g id="tv-FR" class="thruster" transform="translate(166 70)"><circle r="7"/><text y="-11" text-anchor="middle">FR</text><line id="tv-FR-arrow" x1="0" y1="-9" x2="0" y2="-9" marker-end="url(#arrow)"/></g>
+        <g id="tv-RL" class="thruster lift" transform="translate(74 122)"><circle r="7"/><text y="20" text-anchor="middle">RL</text><circle id="tv-RL-ring" r="7" class="ring"/></g>
+        <g id="tv-RR" class="thruster lift" transform="translate(166 122)"><circle r="7"/><text y="20" text-anchor="middle">RR</text><circle id="tv-RR-ring" r="7" class="ring"/></g>
+        <text x="120" y="176" class="svg-label" text-anchor="middle">front pair: surge and yaw · rear pair: lift</text>
+      </svg>
+
+      <div class="tower" id="tower">
+        <!-- one row per motor, built by app.js -->
+      </div>
+
+      <div class="controls">
+        <label class="switch"><input type="checkbox" id="chk-enable"><span class="track"></span><span>Motors enabled</span></label>
+        <label class="field">Limit <input type="number" id="in-limit" min="5" max="100" step="5" value="30"><span>%</span></label>
+        <label class="switch small"><input type="checkbox" id="chk-pairs" checked><span class="track"></span><span>Move pairs together</span></label>
+        <button type="button" class="btn" id="btn-zero">Zero all</button>
+      </div>
+      <p class="hint" id="motor-hint">Enable, then move a slider. The page repeats the setpoint 10 times a second; if it stops, the back end releases the motors within 0.5 s and the blimp coasts on its own timers.</p>
+    </div>
+  </section>
+
+  <!-- ============================================================ CAMERA -->
+  <section class="panel camera" aria-labelledby="h-camera">
+    <div class="panel-head">
+      <h2 id="h-camera">Camera</h2>
+      <span class="head-note" id="cam-note">forward ESP32-CAM · 160 × 120 RGB565</span>
+    </div>
+    <div class="panel-body cam-body">
+      <div class="cam-main">
+        <div class="cam-frame">
+          <canvas id="cam-canvas" width="640" height="480" aria-label="camera frame with detection overlay"></canvas>
+          <div class="cam-empty" id="cam-empty">no frame yet · Grab or Live</div>
+          <div class="cam-stamp" id="cam-stamp"></div>
+        </div>
+        <div class="cam-buttons">
+          <button type="button" class="btn" id="btn-cam-connect">Connect</button>
+          <button type="button" class="btn" id="btn-cam-grab">Grab frame</button>
+          <button type="button" class="btn toggle" id="btn-cam-live" aria-pressed="false">Live</button>
+          <button type="button" class="btn toggle" id="btn-cam-rotate" aria-pressed="false">Rotate 180°</button>
+          <label class="field">Baud
+            <select id="sel-baud">
+              <option>115200</option><option>230400</option><option selected>460800</option><option>921600</option>
+            </select>
+          </label>
+          <button type="button" class="btn" id="btn-cam-baud">Set</button>
+        </div>
+      </div>
+      <div class="cam-side">
+        <div class="verdict idle" id="verdict"><div class="verdict-word" id="verdict-word">NO DATA</div><div class="verdict-sub" id="verdict-sub">waiting for the camera's rows</div></div>
+        <div class="readouts">
+          <div class="readout"><span class="ro-label">Bearing</span><span class="ro-value" id="ro-az">—</span><span class="ro-unit">°</span></div>
+          <div class="readout"><span class="ro-label">Elevation</span><span class="ro-value" id="ro-el">—</span><span class="ro-unit">°</span></div>
+          <div class="readout"><span class="ro-label">Range</span><span class="ro-value" id="ro-range">—</span><span class="ro-unit">m</span></div>
+          <div class="readout"><span class="ro-label">Confidence</span><span class="ro-value" id="ro-conf">—</span><span class="ro-unit"></span></div>
+        </div>
+        <canvas id="fov-canvas" width="300" height="150" class="fov" aria-label="field of view plot of the reported blobs"></canvas>
+        <table class="blobs" id="blobs">
+          <thead><tr><th>#</th><th>az °</th><th>el °</th><th>range m</th><th>conf</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="cam-health mono" id="cam-health">link: —</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- =========================================================== SENSORS -->
+  <section class="panel sensors" aria-labelledby="h-sensors">
+    <div class="panel-head">
+      <h2 id="h-sensors">Sensors</h2>
+      <span class="head-note" id="sen-note">GY-88 and VL53L1X on the blimp</span>
+    </div>
+    <div class="panel-body">
+      <div class="notice" id="sen-missing" hidden>
+        The firmware does not stream sensors yet (plan §5); these panels fill once <code>LINK_PKT_SENSORS</code> lands. Meanwhile the console works: <code>imu -n 3</code>, <code>tof -n 3</code>.
+      </div>
+
+      <div class="block">
+        <div class="block-head"><h3>IMU</h3><span class="legend"><i style="--c:var(--s-x)"></i>x <i style="--c:var(--s-y)"></i>y <i style="--c:var(--s-z)"></i>z</span></div>
+        <div class="imu-grid mono">
+          <span class="k">acc g</span><span id="acc-x">—</span><span id="acc-y">—</span><span id="acc-z">—</span>
+          <span class="k">gyro °/s</span><span id="gyro-x">—</span><span id="gyro-y">—</span><span id="gyro-z">—</span>
+        </div>
+        <canvas id="plot-acc" class="plot" height="90" aria-label="accelerometer, last 10 seconds"></canvas>
+        <canvas id="plot-gyro" class="plot" height="90" aria-label="gyroscope, last 10 seconds"></canvas>
+        <div class="plot-tip mono" id="plot-tip" hidden></div>
+      </div>
+
+      <div class="block two">
+        <div>
+          <div class="block-head"><h3>Attitude</h3></div>
+          <div class="readouts tight">
+            <div class="readout"><span class="ro-label">Roll</span><span class="ro-value" id="att-roll">—</span><span class="ro-unit">°</span></div>
+            <div class="readout"><span class="ro-label">Pitch</span><span class="ro-value" id="att-pitch">—</span><span class="ro-unit">°</span></div>
+            <div class="readout"><span class="ro-label">IMU temp</span><span class="ro-value" id="imu-temp">—</span><span class="ro-unit">°C</span></div>
+          </div>
+        </div>
+        <div class="compass-wrap">
+          <div class="block-head"><h3>Heading</h3></div>
+          <svg class="compass" viewBox="0 0 120 120" role="img" aria-label="magnetic heading">
+            <circle cx="60" cy="60" r="54" class="dial"/>
+            <g class="ticks" id="compass-ticks"></g>
+            <text x="60" y="16" text-anchor="middle" class="card">N</text>
+            <text x="108" y="64" text-anchor="middle" class="card">E</text>
+            <text x="60" y="110" text-anchor="middle" class="card">S</text>
+            <text x="12" y="64" text-anchor="middle" class="card">W</text>
+            <g id="needle" transform="rotate(0 60 60)"><polygon points="60,14 65,60 60,66 55,60" class="needle-n"/><polygon points="60,106 65,60 60,54 55,60" class="needle-s"/></g>
+            <circle cx="60" cy="60" r="4" class="hub"/>
+            <text x="60" y="88" text-anchor="middle" class="hdg mono" id="hdg-text">—</text>
+          </svg>
+        </div>
+      </div>
+
+      <div class="block two">
+        <div class="tof-wrap">
+          <div class="block-head"><h3>Range below</h3><span class="head-note">VL53L1X · hover band 1.85–2.25 m</span></div>
+          <svg class="tof" viewBox="0 0 160 120" role="img" aria-label="time-of-flight range">
+            <rect x="20" y="10" width="120" height="100" class="gauge-bg"/>
+            <rect x="20" id="tof-band" width="120" class="gauge-band"/>
+            <g id="tof-ticks"></g>
+            <rect x="20" id="tof-fill" y="110" width="120" height="0" class="gauge-fill"/>
+            <line x1="14" x2="146" id="tof-line" y1="110" y2="110" class="gauge-line"/>
+            <text x="80" y="64" text-anchor="middle" class="gauge-text mono" id="tof-text">—</text>
+          </svg>
+          <div class="hint mono" id="tof-status">—</div>
+        </div>
+        <div>
+          <div class="block-head"><h3>Barometer</h3></div>
+          <div class="readouts tight">
+            <div class="readout"><span class="ro-label">Pressure</span><span class="ro-value" id="baro-p">—</span><span class="ro-unit">hPa</span></div>
+            <div class="readout"><span class="ro-label">Temperature</span><span class="ro-value" id="baro-t">—</span><span class="ro-unit">°C</span></div>
+            <div class="readout"><span class="ro-label">Altitude</span><span class="ro-value" id="baro-alt">—</span><span class="ro-unit">m</span></div>
+          </div>
+          <div class="block-head"><h3>Magnetometer</h3></div>
+          <div class="imu-grid mono three"><span class="k">gauss</span><span id="mag-x">—</span><span id="mag-y">—</span><span id="mag-z">—</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- =========================================================== CONSOLE -->
+  <section class="panel console" aria-labelledby="h-console">
+    <div class="panel-head">
+      <h2 id="h-console">Console</h2>
+      <span class="head-note">the firmware's <code>i2c-tools&gt;</code> prompt, over the air · one command at a time</span>
+    </div>
+    <div class="panel-body con-body">
+      <pre class="con-out mono" id="con-out" aria-live="polite"></pre>
+      <form class="con-form" id="con-form">
+        <span class="prompt mono">i2c-tools&gt;</span>
+        <input class="mono" id="con-in" type="text" autocomplete="off" spellcheck="false" placeholder="help">
+        <button type="submit" class="btn primary" id="con-send">Send</button>
+      </form>
+      <div class="chips" id="chips"></div>
+    </div>
+  </section>
+
+  <!-- ============================================================ EVENTS -->
+  <section class="panel events" aria-labelledby="h-events">
+    <div class="panel-head">
+      <h2 id="h-events">Events</h2>
+      <span class="head-note mono" id="ev-counts"></span>
+    </div>
+    <div class="panel-body">
+      <ol class="ev-list mono" id="ev-list"></ol>
+    </div>
+  </section>
+
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>

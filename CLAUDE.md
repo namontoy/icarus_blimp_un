@@ -65,6 +65,8 @@ QT_QPA_PLATFORM=offscreen python -c "import sys; sys.path.insert(0, 'software');
 
 The GUI labels are in Spanish. `optflow_cam/host/flow_monitor.py` is a separate serial viewer/logger and needs `pyserial`.
 
+`software/ground_station/` is the GUI: a Tornado back end (`pip install tornado`) serving a plain HTML/CSS/JS page that bridges `blimp_link.py`, the camera's serial protocol and a demo mode over a WebSocket. `python -m software.ground_station --demo` runs it with no hardware; design and message table in `docs/ground-station-plan.md`. The page's identity is the university's palette with McLaren-style type; keep new UI inside `web/app.css`'s tokens.
+
 `software/blimp_link.py` and `software/mock_blimp.py` need only the standard library (Python 3.8+), on any OS. `python software/blimp_link.py selftest` checks the packet codec; `python software/mock_blimp.py` in one terminal and `python software/blimp_link.py --host 127.0.0.1 status` in another exercises the link with no hardware.
 
 ## S3 firmware architecture (`i2c_tools`)
