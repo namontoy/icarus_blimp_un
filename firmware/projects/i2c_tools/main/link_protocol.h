@@ -117,8 +117,10 @@ _Static_assert(sizeof(link_telemetry_t)  == 52, "telemetry layout");
 /*
  * The bench's sensors, one packet at a fixed rate for the ground station's
  * displays and logs. Units are the ones the console commands print: g and
- * deg/s from the MPU-6050, gauss from the HMC5883L, pascal and metres from
- * the BMP180, millimetres and ST's range status from the VL53L1X.
+ * deg/s from the MPU-6050, gauss from the magnetometer (HMC5883L on the
+ * GY-88, QMC5883L on the breakout that replaced it), pascal and metres from
+ * the barometer (BMP180 or BME280), millimetres and ST's range status from
+ * the VL53L1X. Which chip answered is the driver's business, not the wire's.
  *
  * `valid` says which blocks carry a fresh reading; a clear bit means the
  * fields of that block are zero and must not be plotted. The rates differ
