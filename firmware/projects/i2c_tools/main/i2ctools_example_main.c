@@ -10,6 +10,8 @@
 #include "esp_log.h"
 #include "esp_console.h"
 #include "esp_vfs_fat.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "cmd_system.h"
 #include "cmd_i2ctools.h"
 #include "cmd_imu.h"
@@ -49,6 +51,43 @@ static void initialize_filesystem(void)
     }
 }
 #endif // CONFIG_EXAMPLE_STORE_HISTORY
+
+/*
+ * 'exit' / 'quit' only explain how to leave. The REPL runs on the chip, and
+ * the program holding the serial port open is idf.py monitor on the laptop:
+ * nothing the chip prints can make it close. People type 'exit' by habit, so
+ * the answer belongs where they look. The console over UDP runs these same
+ * commands in its own task, and there the monitor's keys mean nothing, so the
+ * hint follows whichever console asked.
+ */
+static int do_exit_cmd(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    if (strcmp(pcTaskGetName(NULL), "net_console") == 0) {
+        printf("This console runs on the blimp and has nothing to close here.\n"
+               "blimp_link.py's interactive console leaves on 'exit' or Ctrl+C.\n");
+    } else {
+        printf("This console runs on the blimp; it can't close the monitor on your laptop.\n"
+               "To leave idf.py monitor press Ctrl+X (or Ctrl+T, then x).\n"
+               "That also frees the serial port. Ctrl+C is passed to the chip, not the monitor.\n");
+    }
+    return 0;
+}
+
+static void register_exit(void)
+{
+    const char *names[] = { "exit", "quit" };
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        const esp_console_cmd_t cmd = {
+            .command = names[i],
+            .help = "How to leave this console (the monitor exits with Ctrl+X)",
+            .hint = NULL,
+            .func = &do_exit_cmd,
+        };
+        ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
+    }
+}
 
 void app_main(void)
 {
@@ -112,6 +151,7 @@ void app_main(void)
     register_motor();     /* already initialised above */
     register_wifi();
     register_link();
+    register_exit();
 
     /*
      * The wireless link comes up after every command is registered: the
@@ -151,6 +191,7 @@ void app_main(void)
     printf(" | 11. Try 'motor' to drive the DRV8833 thrusters             |\n");
     printf(" | 12. Try 'wifi' and 'link' for the Wi-Fi ground link        |\n");
     printf(" |     (software/blimp_link.py runs all of this over the air) |\n");
+    printf(" | 13. Type 'exit' or 'quit' to see how to leave the monitor  |\n");
     printf(" |                                                            |\n");
     printf(" ==============================================================\n\n");
 
