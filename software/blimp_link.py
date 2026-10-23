@@ -38,9 +38,11 @@ PKT_HEARTBEAT = 0x01
 PKT_MOTOR_SET = 0x02
 PKT_MOTOR_STOP = 0x03
 PKT_TELEMETRY = 0x81
+PKT_SENSORS = 0x82
 
 MOTOR_ORDER = ('FL', 'RL', 'FR', 'RR')      # motor_id_t order, as on the wire
 FAILSAFE = {0: 'off', 1: 'idle', 2: 'armed', 3: 'TRIPPED'}
+SENSORS_IMU, SENSORS_MAG, SENSORS_BARO, SENSORS_TOF = 1, 2, 4, 8     # link_sensors_t.valid
 EOT = b'\x04'                   # closes every console response
 
 _HDR = struct.Struct('<HBBHH')              # magic, version, type, seq, reserved
@@ -49,11 +51,15 @@ _MOTOR_SET = struct.Struct('<4f')
 _MOTOR_STOP = struct.Struct('<B3x')
 _TELEMETRY = struct.Struct('<I4f4B3IHH')    # t_us, cmd[4], failsafe, alive, link_motors,
                                             # stations, rx_ok, rx_bad, free_heap, age_ms, reserved
+_SENSORS = struct.Struct('<I3f3ff3fffffHBB')    # t_us, acc[3] g, gyro[3] dps, imu temp,
+                                                # mag[3] gauss, heading deg, pressure Pa,
+                                                # baro temp, baro alt m, tof mm, tof status, valid
 # The same sizes are _Static_assert'ed in link_protocol.h.
 assert _HDR.size + _CRC.size == 12
 assert _HDR.size + _MOTOR_SET.size + _CRC.size == 28
 assert _HDR.size + _MOTOR_STOP.size + _CRC.size == 16
 assert _HDR.size + _TELEMETRY.size + _CRC.size == 52
+assert _HDR.size + _SENSORS.size + _CRC.size == 76
 
 
 # ----------------------------------------------------------------- codec
@@ -91,6 +97,30 @@ def decode_telemetry(body):
             'free_heap': f[11], 'link_age_ms': f[12]}
 
 
+def decode_sensors(body):
+    f = _SENSORS.unpack(body)
+    valid = f[17]
+    return {'t_us': f[0],
+            'imu_valid': bool(valid & SENSORS_IMU), 'acc': f[1:4], 'gyro': f[4:7], 'imu_temp_c': f[7],
+            'mag_valid': bool(valid & SENSORS_MAG), 'mag': f[8:11], 'heading_deg': f[11],
+            'baro_valid': bool(valid & SENSORS_BARO), 'pressure_pa': f[12], 'baro_temp_c': f[13],
+            'baro_alt_m': f[14],
+            'tof_valid': bool(valid & SENSORS_TOF), 'tof_mm': f[15], 'tof_status': f[16]}
+
+
+def format_sensors(s):
+    parts = ['t=%8.3fs' % (s['t_us'] / 1e6)]
+    if s['imu_valid']:
+        parts.append('acc %+.2f %+.2f %+.2f g  gyro %+6.1f %+6.1f %+6.1f dps' % (*s['acc'], *s['gyro']))
+    if s['mag_valid']:
+        parts.append('hdg %5.1f' % s['heading_deg'])
+    if s['baro_valid']:
+        parts.append('%.0f Pa %.1f C' % (s['pressure_pa'], s['baro_temp_c']))
+    if s['tof_valid']:
+        parts.append('tof %4d mm%s' % (s['tof_mm'], '' if s['tof_status'] == 0 else ' (status %d)' % s['tof_status']))
+    return '  '.join(parts)
+
+
 def format_telemetry(t):
     motors = ' '.join('%s %+.3f' % (m, t['motor'][m]) for m in MOTOR_ORDER)
     return ('t=%8.3fs  %s  failsafe %-7s link %s%s  sta %d  rx %d/%d  heap %dk' % (
@@ -116,8 +146,11 @@ class BlimpLink:
         self.seq = 0
         self.lock = threading.Lock()
         self.telemetry = None
+        self.sensors = None             # latest decoded SENSORS packet, if the firmware sends them
+        self.on_packet = None           # optional callback(kind, dict) from the receive thread
         self.last_rx = 0.0
         self.rx_count = 0
+        self.sensors_count = 0
         self.rx_bad = 0
         self._hb_period = 1.0 / heartbeat_hz
         self._stop = threading.Event()
@@ -192,6 +225,14 @@ class BlimpLink:
                 self.telemetry = decode_telemetry(body)
                 self.last_rx = time.monotonic()
                 self.rx_count += 1
+                if self.on_packet:
+                    self.on_packet('telemetry', self.telemetry)
+            elif ptype == PKT_SENSORS and len(body) == _SENSORS.size:
+                self.sensors = decode_sensors(body)
+                self.last_rx = time.monotonic()
+                self.sensors_count += 1
+                if self.on_packet:
+                    self.on_packet('sensors', self.sensors)
 
 
 # ---------------------------------------------------------------- console
@@ -289,6 +330,8 @@ def cmd_status(args):
             if link.rx_count != shown and link.telemetry:
                 shown = link.rx_count
                 print(format_telemetry(link.telemetry))
+                if link.sensors:
+                    print('   ', format_sensors(link.sensors))
             elif not link.alive:
                 print('no telemetry for 1 s')
             time.sleep(args.interval)
@@ -381,6 +424,17 @@ def cmd_selftest(args):
     assert t['link_motors'] and t['stations'] == 1 and t['link_age_ms'] == 42
     assert abs(t['motor']['FR'] + 0.3) < 1e-6 and t['rx_bad'] == 2
     format_telemetry(t)
+
+    sen = pack(PKT_SENSORS, 4, _SENSORS.pack(
+        99, 0.01, -0.02, 0.98, 1.5, -0.5, 12.0, 31.2, 0.21, -0.05, 0.40, 123.4,
+        75012.0, 22.5, 1.37, 1520, 0, SENSORS_IMU | SENSORS_MAG | SENSORS_BARO | SENSORS_TOF))
+    assert len(sen) == 76
+    s = decode_sensors(unpack(sen)[2])
+    assert s['imu_valid'] and s['tof_valid'] and s['tof_mm'] == 1520 and s['tof_status'] == 0
+    assert abs(s['heading_deg'] - 123.4) < 1e-3 and abs(s['acc'][2] - 0.98) < 1e-6
+    s2 = decode_sensors(unpack(pack(PKT_SENSORS, 5, _SENSORS.pack(*([0] * 17), SENSORS_TOF)))[2])
+    assert not s2['imu_valid'] and s2['tof_valid']
+    format_sensors(s)
 
     for bad, why in ((ms[:-1], 'truncated'),
                      (ms[:10] + bytes([ms[10] ^ 0x01]) + ms[11:], 'bit flip'),

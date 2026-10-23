@@ -45,6 +45,14 @@ class MockBlimp:
         self.last_rx = 0.0
         self.rx_ok = self.rx_bad = self.tx_seq = 0
         self.lost_logged = False
+        # A toy airframe for the sensor packet: heading turns with the front
+        # pair's difference, height rises with the rear pair, and the IMU sees
+        # gravity plus motor vibration. Enough for a GUI to show motion; not a
+        # model of the blimp.
+        self.heading = 42.0
+        self.height_m = 1.50
+        self.vz = 0.0
+        self.last_step = time.monotonic()
         self.lock = threading.Lock()
         self.link = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.link.bind((host, port))
@@ -131,6 +139,35 @@ class MockBlimp:
         self.tx_seq += 1
         self.link.sendto(bl.pack(bl.PKT_TELEMETRY, self.tx_seq, body), self.peer)
 
+    def sensors(self, now):
+        if self.peer is None or now - self.last_rx > LINK_TIMEOUT_S * PEER_HOLD_MULT:
+            return
+        dt = min(0.2, now - self.last_step)
+        self.last_step = now
+        fl, rl, fr, rr = self.motor
+        yaw_rate = 25.0 * (fl - fr)                              # deg/s per unit of asymmetry
+        self.heading = (self.heading + yaw_rate * dt) % 360.0
+        lift = 0.8 * (rl + rr) - 0.05                            # m/s^2, slightly heavy at rest
+        self.vz += lift * dt
+        self.vz *= 0.96                                          # drag
+        self.height_m = max(0.05, min(3.0, self.height_m + self.vz * dt))
+        vib = 0.02 * sum(abs(c) for c in self.motor)
+        rnd = lambda s: (hash((int(now * 1000), s)) % 1000 / 500.0 - 1.0)   # cheap noise in -1..1
+        tilt = 0.03 * (fl + fr)                                  # the front pair pitches the nose
+        acc = (0.01 + tilt + vib * rnd(1), -0.02 + vib * rnd(2), 0.93 + vib * rnd(3))
+        gyro = (0.3 * rnd(4), -2.66 + 0.3 * rnd(5), yaw_rate + 0.5 * rnd(6))
+        h = math.radians(self.heading)
+        mag = (0.24 * math.cos(h), -0.24 * math.sin(h), 0.31)
+        pressure = 75000.0 - 12.0 * self.height_m + 2.0 * rnd(7)
+        tof_mm = int(self.height_m * 1000 + 8 * rnd(8))
+        tof_status = 0 if self.height_m < 2.4 else 2                  # "signal fail" out of reach
+        body = bl._SENSORS.pack(int((now - self.t0) * 1e6) & 0xFFFFFFFF, *acc, *gyro, 31.5 + rnd(9),
+                                *mag, self.heading, pressure, 22.4, self.height_m - 1.5,
+                                max(0, tof_mm), tof_status,
+                                bl.SENSORS_IMU | bl.SENSORS_MAG | bl.SENSORS_BARO | bl.SENSORS_TOF)
+        self.tx_seq += 1
+        self.link.sendto(bl.pack(bl.PKT_SENSORS, self.tx_seq, body), self.peer)
+
     def link_loop(self):
         period = 1.0 / TELEMETRY_HZ
         next_tx = time.monotonic() + period
@@ -148,6 +185,7 @@ class MockBlimp:
             self.failsafe_tick(now)
             if now >= next_tx:
                 self.telemetry(now)
+                self.sensors(now)
                 next_tx += period
                 if next_tx < now:
                     next_tx = now + period

@@ -46,6 +46,7 @@ typedef enum {
     LINK_PKT_MOTOR_STOP = 0x03,  /* coast (or brake) all four, once is enough  */
     /* blimp -> host */
     LINK_PKT_TELEMETRY  = 0x81,
+    LINK_PKT_SENSORS    = 0x82,  /* every sensor on the bench, see below       */
 } link_pkt_type_t;
 
 typedef struct __attribute__((packed)) {
@@ -112,6 +113,47 @@ _Static_assert(sizeof(link_heartbeat_t)  == 12, "heartbeat layout");
 _Static_assert(sizeof(link_motor_set_t)  == 28, "motor_set layout");
 _Static_assert(sizeof(link_motor_stop_t) == 16, "motor_stop layout");
 _Static_assert(sizeof(link_telemetry_t)  == 52, "telemetry layout");
+
+/*
+ * The bench's sensors, one packet at a fixed rate for the ground station's
+ * displays and logs. Units are the ones the console commands print: g and
+ * deg/s from the MPU-6050, gauss from the HMC5883L, pascal and metres from
+ * the BMP180, millimetres and ST's range status from the VL53L1X.
+ *
+ * `valid` says which blocks carry a fresh reading; a clear bit means the
+ * fields of that block are zero and must not be plotted. The rates differ
+ * per sensor (the barometer is slow, the ToF depends on its timing budget),
+ * so the same reading may repeat across packets.
+ *
+ * Defined ahead of the firmware: as of 2026-10-23 only software/mock_blimp.py
+ * sends it. The firmware needs read functions lifted out of cmd_imu.c,
+ * cmd_mag.c, cmd_baro.c and cmd_tof.c first (the sensor-fusion plan's
+ * Phase 2); when that lands, this layout is the contract. Adding a packet
+ * type does not change LINK_PROTO_VERSION: older receivers reject it by type.
+ */
+#define LINK_SENSORS_IMU    (1u << 0)
+#define LINK_SENSORS_MAG    (1u << 1)
+#define LINK_SENSORS_BARO   (1u << 2)
+#define LINK_SENSORS_TOF    (1u << 3)
+
+typedef struct __attribute__((packed)) {
+    link_header_t h;
+    uint32_t t_us;
+    float    ax_g, ay_g, az_g;         /* MPU-6050 accelerometer, body axes  */
+    float    gx_dps, gy_dps, gz_dps;   /* MPU-6050 gyroscope                 */
+    float    imu_temp_c;
+    float    mx_gauss, my_gauss, mz_gauss;
+    float    heading_deg;              /* from the magnetometer, 0..360      */
+    float    pressure_pa;
+    float    baro_temp_c;
+    float    baro_alt_m;               /* pressure altitude, relative        */
+    uint16_t tof_mm;
+    uint8_t  tof_status;               /* ST ULD range status, 0 = valid     */
+    uint8_t  valid;                    /* LINK_SENSORS_* bits                */
+    uint32_t crc32;
+} link_sensors_t;
+
+_Static_assert(sizeof(link_sensors_t)    == 76, "sensors layout");
 
 /*
  * CRC-32 as zlib, PNG and Python's zlib.crc32() compute it (polynomial
