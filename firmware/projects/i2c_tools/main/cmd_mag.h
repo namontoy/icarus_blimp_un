@@ -1,5 +1,6 @@
 /*
- * 'mag' console command: decoded HMC5883L readings.
+ * 'mag' console command: decoded magnetometer readings from an HMC5883L
+ * (0x1E) or a QMC5883L (0x0D), found automatically.
  */
 #pragma once
 
