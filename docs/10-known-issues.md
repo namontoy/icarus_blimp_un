@@ -213,3 +213,15 @@ real camera's field of view and the real camera stream.
   around it.
 - The tether model is a 4-link capsule chain, not a rope; balloon rebound after
   a touch is approximate.
+- The scene's camera site (`camera_dz` = -0.35 m, 5 cm ahead of the envelope
+  centre) sits 4 cm above the gondola's top face, inside the envelope's lower
+  surface; the real camera will mount on the gondola front a few centimetres
+  lower. Once the gondola is built, measure the camera height and put it in both
+  `params.c` (`cam_dz_m`, which the altitude fix uses) and `build_scene.py`.
+- The sim calls a balloon visible only while its CENTRE is inside the field of
+  view. With the camera 0.35 m below the 2 m balloon plane and a 45-degree
+  vertical field, a balloon centre enters the frame from 0.90 m ahead of the
+  envelope centre, while contact is at 0.67 m, so the sim reports the target
+  lost for the last 0.2 m of every approach. A real detector still sees the
+  balloon's lower half, so this is the conservative side; if the final approach
+  is ever tuned on it, gate on the blob's extent instead of its centre.
