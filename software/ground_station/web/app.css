@@ -1,6 +1,9 @@
 /* Icarus ground station - one dark pit-wall screen.
-   Layout: a 3-column grid (motors | camera | sensors) over a 2-column strip
-   (console | events); panels scroll inside themselves; stacks below 1100 px.
+   Layout: a 3-column grid (motors | camera | sensors) that takes all the
+   height left under the header, over a dock (console | events as tabs) whose
+   height the user drags and which collapses to its tab bar. The panels are
+   sized to need no scrollbar at 1080p: the IMU plots and the camera frame
+   are the flexible elements. Stacks below 1100 px.
    Colours: the Universidad Nacional's green and red; McLaren's papaya only
    as the detail colour. Type: Titillium Web (display and UI) + IBM Plex Mono
    (data). See docs/ground-station-plan.md §3. */
@@ -75,6 +78,12 @@ button { cursor: pointer; }
 .wordmark::first-letter { color: var(--un-green); }
 .brand-sub { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.12em; margin-top: 4px; }
 .brand-sub .dot { color: var(--papaya); }
+.wifi { display: flex; align-items: center; gap: 10px; margin-left: 12px; min-width: 0; }
+.wifi-btn { white-space: nowrap; }
+.wifi-btn.up { border-color: var(--un-green); color: var(--un-green); }
+.wifi-btn.busy { border-color: var(--papaya); color: var(--papaya); }
+.wifi-note { color: var(--faint); font-size: 11px; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.btn.full { padding: 5px 9px; font-size: 15px; line-height: 1; }
 .pills { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto; }
 .pill {
   font-size: 11px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase;
@@ -104,13 +113,12 @@ button { cursor: pointer; }
   flex: 1 1 auto; min-height: 0;
   display: grid; gap: 12px; margin-top: 12px;
   grid-template-columns: 340px minmax(0, 1fr) 400px;
-  grid-template-rows: minmax(0, 1fr) 250px;
+  grid-template-rows: minmax(0, 1fr);
 }
-.motors  { grid-column: 1; grid-row: 1; }
-.camera  { grid-column: 2; grid-row: 1; }
-.sensors { grid-column: 3; grid-row: 1; }
-.console { grid-column: 1 / 3; grid-row: 2; }
-.events  { grid-column: 3; grid-row: 2; }
+.motors  { grid-column: 1; }
+.camera  { grid-column: 2; }
+.sensors { grid-column: 3; }
+body.resizing { cursor: ns-resize; user-select: none; }
 
 .panel {
   position: relative; min-width: 0; min-height: 0;
@@ -179,14 +187,17 @@ input[type=range].slider::-moz-range-thumb { width: 14px; height: 18px; border: 
 .notice { background: var(--raised); border-left: 3px solid var(--amber); padding: 8px 10px; color: var(--muted); font-size: 12px; margin-bottom: 10px; }
 
 /* ------------------------------------------------------------- camera */
-.cam-body { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 14px; align-content: start; }
-.cam-main { min-width: 0; }
-.cam-frame { position: relative; background: #050706; aspect-ratio: 4 / 3; max-width: 100%; border: 1px solid var(--border); }
-.cam-frame canvas { width: 100%; height: 100%; display: block; image-rendering: pixelated; }
+.cam-body { display: grid; grid-template-columns: minmax(0, 1fr) 300px; grid-template-rows: minmax(0, 1fr); gap: 14px; overflow: hidden; }
+.cam-main { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+/* The frame takes whatever height the panel has; the 4:3 image letterboxes
+   inside it rather than setting the panel's height, so the page never grows
+   past the window because of the camera. */
+.cam-frame { position: relative; flex: 1 1 auto; min-height: 120px; background: #050706; border: 1px solid var(--border); }
+.cam-frame canvas { width: 100%; height: 100%; display: block; object-fit: contain; image-rendering: pixelated; }
 .cam-empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--faint); font-size: 13px; letter-spacing: 0.1em; text-transform: uppercase; pointer-events: none; }
 .cam-stamp { position: absolute; left: 8px; bottom: 6px; font-family: var(--font-mono); font-size: 11px; color: var(--muted); background: rgba(5, 7, 6, 0.7); padding: 1px 6px; }
-.cam-buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; align-items: center; }
-.cam-side { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.cam-buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; align-items: center; flex: 0 0 auto; }
+.cam-side { display: flex; flex-direction: column; gap: 10px; min-width: 0; min-height: 0; overflow: auto; }
 .verdict { padding: 10px 14px; background: var(--raised); border-left: 4px solid var(--faint); }
 .verdict-word { font-weight: 900; font-size: 24px; letter-spacing: 0.12em; line-height: 1; }
 .verdict-sub { color: var(--muted); font-size: 12px; margin-top: 4px; }
@@ -209,7 +220,20 @@ table.blobs tr.main td { color: var(--un-green); }
 .cam-health { color: var(--faint); font-size: 11px; white-space: pre-line; }
 
 /* ------------------------------------------------------------ sensors */
-.block { margin-bottom: 14px; }
+/* The body is a column; the IMU block is the one that flexes, so the two
+   plots absorb whatever height the gauges below leave over, down to a
+   floor at which the body scrolls instead. */
+.sensors .panel-body { display: flex; flex-direction: column; }
+.sensors .notice { flex: 0 0 auto; }
+.block { margin-bottom: 10px; flex: 0 0 auto; }
+.block.imu { flex: 1 1 auto; display: flex; flex-direction: column; }
+.block.imu .imu-grid, .block.imu .block-head { flex: 0 0 auto; }
+/* Each plot sits absolutely inside a box that does the flexing. A canvas's
+   intrinsic size is whatever it was last drawn at, so letting it size the
+   box would ratchet; the box has a floor instead, below which the panel
+   body scrolls rather than letting blocks overlap. */
+.plot-box { position: relative; flex: 1 1 0; min-height: 44px; margin-top: 6px; }
+.plot-box .plot { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; }
 .block.two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .block-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 6px; }
 .block-head .head-note { font-size: 11px; }
@@ -221,7 +245,7 @@ table.blobs tr.main td { color: var(--un-green); }
 .imu-grid span:not(.k) { text-align: right; }
 .plot { width: 100%; height: 90px; display: block; background: var(--bg); border: 1px solid var(--border); margin-top: 6px; }
 .plot-tip { position: fixed; z-index: 5; background: var(--raised-2); border: 1px solid var(--border); padding: 4px 8px; font-size: 11px; pointer-events: none; white-space: pre; }
-.compass { width: 100%; max-width: 150px; display: block; margin: 0 auto; }
+.compass { width: 100%; max-width: 140px; display: block; margin: 0 auto; }
 .compass .dial { fill: var(--bg); stroke: var(--border); stroke-width: 1.5; }
 .compass .ticks line { stroke: var(--faint); stroke-width: 1; }
 .compass .card { fill: var(--muted); font-size: 9px; font-weight: 700; }
@@ -237,6 +261,44 @@ table.blobs tr.main td { color: var(--un-green); }
 .tof .gauge-text { fill: var(--fg); font-size: 15px; font-weight: 600; }
 .tof .tick { stroke: var(--grid); }
 .tof .tick-label { fill: var(--faint); font-size: 7px; }
+
+/* --------------------------------------------------------------- dock */
+.dock {
+  position: relative; flex: 0 0 auto; margin-top: 12px;
+  height: var(--dock-h, 230px); min-height: 0;
+  background: var(--panel);
+  clip-path: polygon(0 0, calc(100% - var(--chamfer)) 0, 100% var(--chamfer), 100% 100%, 0 100%);
+  display: flex; flex-direction: column;
+}
+.dock::before { content: ""; position: absolute; left: 0; top: 0; right: 0; height: 2px; background: var(--un-green); }
+.dock.collapsed { height: auto; }
+.dock.collapsed .dock-body, .dock.collapsed .dock-handle { display: none; }
+.dock-handle { flex: 0 0 auto; height: 10px; cursor: ns-resize; position: relative; touch-action: none; }
+.dock-handle::after { content: ""; position: absolute; left: 50%; top: 4px; width: 56px; height: 3px; margin-left: -28px; background: var(--faint); }
+.dock-handle:hover::after, body.resizing .dock-handle::after { background: var(--un-green); }
+.dock-bar { display: flex; align-items: center; gap: 12px; padding: 2px 16px 0; flex: 0 0 auto; }
+.dock.collapsed .dock-bar { padding-top: 6px; padding-bottom: 4px; }
+.tabs { display: flex; gap: 2px; }
+.tab {
+  background: transparent; border: 0; border-bottom: 2px solid transparent;
+  color: var(--muted); font-weight: 700; font-size: 14px; letter-spacing: 0.08em; text-transform: uppercase;
+  padding: 6px 12px 5px;
+}
+.tab:hover { color: var(--fg); }
+.tab[aria-selected=true] { color: var(--fg); border-bottom-color: var(--un-green); }
+.tab.new::after { content: ""; display: inline-block; width: 7px; height: 7px; background: var(--papaya); margin-left: 7px; vertical-align: middle; }
+.badge { font-size: 11px; font-weight: 500; color: var(--faint); margin-left: 6px; letter-spacing: 0; text-transform: none; }
+.badge.warn { color: var(--amber); }
+.badge.crit { color: var(--un-red); }
+.dock-note { margin-left: auto; color: var(--faint); font-size: 12px; text-align: right; }
+.dock-toggle {
+  background: transparent; border: 1px solid var(--border); color: var(--muted);
+  width: 28px; height: 24px; padding: 0; font-size: 13px; line-height: 1;
+}
+.dock-toggle:hover { color: var(--fg); border-color: var(--un-green); }
+.dock-body { flex: 1 1 auto; min-height: 0; padding: 8px 16px 12px; display: flex; flex-direction: column; }
+.tabpane { flex: 1 1 auto; min-height: 0; }
+.ev-pane { overflow: auto; }
 
 /* ------------------------------------------------------------ console */
 .con-body { display: flex; flex-direction: column; gap: 8px; }
@@ -263,10 +325,21 @@ table.blobs tr.main td { color: var(--un-green); }
 @media (max-width: 1100px) {
   body { overflow: auto; }
   .grid { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; }
-  .motors, .camera, .sensors, .console, .events { grid-column: 1; grid-row: auto; }
+  .motors, .camera, .sensors { grid-column: 1; grid-row: auto; }
   .panel { min-height: 320px; }
-  .console { min-height: 300px; }
-  .cam-body { grid-template-columns: minmax(0, 1fr); }
+  .cam-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; }
+  .cam-frame { flex: 0 0 auto; aspect-ratio: 4 / 3; }
+  .dock { height: 320px; }
+  .dock.collapsed { height: auto; }
+}
+/* Short windows (a laptop with the browser chrome showing): smaller gauges
+   and no motor hint, so the three panels still fit over the dock. */
+@media (max-height: 860px) and (min-width: 1101px) {
+  .topview { max-width: 200px; }
+  .compass { max-width: 112px; }
+  .tof { max-width: 140px; }
+  #motor-hint { display: none; }
+  .block { margin-bottom: 6px; }
 }
 @media (max-width: 520px) {
   .wordmark { font-size: 22px; }

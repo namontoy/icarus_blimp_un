@@ -90,9 +90,17 @@ timing tower. Dark only: a ground station is a pit-wall display, and the venue i
 |  pair controls    |  grab / live / connect, FOV plot  |  heading dial        |
 |  limit, enable    |  blob table, link health          |  ToF gauge, baro     |
 +-------------------+-----------------------------------+----------------------+
-| CONSOLE  input, output, quick commands                 | EVENTS               |
+| ===== drag handle =====                                                      |
+| [CONSOLE] [EVENTS 0 crit · 1 warn]                                        ▾ |
+|  the selected tab: console input, output, quick commands / the event log     |
 +------------------------------------------------------------------------------+
 ```
+
+The three panels take all the height under the header; the dock below them holds the
+console and the event log as tabs (2026-10-24). Its handle drags the height, ▾ collapses it to
+the tab bar, and the browser remembers height, tab and collapsed state. The IMU plots and the
+camera frame are the flexible elements, so at 1080p no panel needs a scrollbar; a short window
+gets smaller gauges and the motor hint disappears.
 
 ## 4. Messages between browser and back end
 
@@ -108,9 +116,16 @@ JSON, one object per WebSocket message. Server to browser:
 | `camstat` | camera link: connected, port, baud, rows/s, frames ok/bad | 2 Hz |
 | `con` / `con_end` | console output chunks and the end of a reply | as it arrives |
 | `ev` | `{level, text}` for the event log | as they happen |
+| `wifistat` | this computer's Wi-Fi toward the blimp: `backend`, `joined`, `ip`, `ssid`, `busy`, `phase`, `error`, `candidates` | in `hello`, on change (checked every 2 s), after a join or leave |
 
 Browser to server: `motor {cmd:[fl,rl,fr,rr]}`, `stop {brake}`, `con {line}`,
-`cam {action: connect|disconnect|grab|live|baud, ...}`.
+`cam {action: connect|disconnect|grab|live|baud, ...}`, `wifi {action: connect|disconnect}`.
+
+The page opens in its own window when pywebview is installed (`window.py`; `--browser` for
+the system browser instead), and the header's **Join blimp Wi-Fi** button has the back end
+join the `ICARUS-…` access point (`wifi.py`: `netsh wlan` on Windows by profile name, since
+Windows 11 withholds scans from consoles without location services; `nmcli` on Linux as in
+`software/drone_gui.py`). Both added 2026-10-24.
 
 ## 5. The sensor packet
 
@@ -171,6 +186,9 @@ python -m software.ground_station                   # the real blimp at 192.168.
 python -m software.ground_station --cam COM5        # plus the camera on a serial port
 ```
 
-It prints the address to open, `http://127.0.0.1:8765/`, and opens it in the default browser
-unless `--no-browser`. Tornado is the one dependency beyond the standard library
-(`pip install tornado`); pyserial is needed for the camera.
+With pywebview installed it opens as its own window; otherwise it prints the address,
+`http://127.0.0.1:8765/`, and opens the default browser (`--browser` forces that, `--no-browser`
+serves only). Dependencies are pinned in `software/ground_station/requirements.txt` (tornado,
+pywebview, pyserial for the camera); the per-platform steps, including the system packages
+Linux needs for the window and how the Wi-Fi join differs between Windows and Linux, are in
+`software/ground_station/README.md` under "Installing".

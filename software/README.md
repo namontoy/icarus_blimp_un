@@ -20,9 +20,12 @@ checklist: `docs/wireless-link.md`.
 
 ## The ground station: `ground_station/`
 
-The GUI for the bench and the arena: motors, sensors, the camera and the console on one
-browser page, served by `python -m software.ground_station` (`--demo` needs no hardware).
-Its own README is in the folder; the design is `docs/ground-station-plan.md`.
+The GUI for the bench and the arena: motors, sensors, the camera and the console in one
+window (or a browser page), started with `python -m software.ground_station` (`--demo` needs
+no hardware). Dependencies: `pip install -r software/ground_station/requirements.txt`. Its own
+README covers installing on Windows and Linux, the differences between the two (the window
+engine and how the Wi-Fi button joins the blimp), and how to use it; the design is
+`docs/ground-station-plan.md`.
 
 ## esp-drone tools (not for this repo's firmware)
 

@@ -36,6 +36,8 @@ const state = {
   cam: { status: null, frame: null, row: null, rowAt: 0, rotate: false, live: false, rowsSeen: 0, rowTimes: [] },
   events: [],
   conHistory: [], conIndex: -1,
+  dockTab: 'console',
+  wifi: null,
 };
 
 // ------------------------------------------------------------------ utils
@@ -187,12 +189,14 @@ function handle(m) {
     case 'con': conWrite(m.text); break;
     case 'con_end': conDone(); break;
     case 'ev': pushEvent(m); break;
+    case 'wifistat': onWifi(m); break;
   }
 }
 
 function onHello(m) {
   state.demo = !!m.demo;
   $('#pill-demo').hidden = !m.demo;
+  onWifi(m.wifi || null);
   $('#cam-note').textContent = m.camera && m.camera.source !== 'none'
     ? `source: ${m.camera.source}${m.camera.port ? ' · ' + m.camera.port : ''}` : 'no camera configured (--cam PORT or --cam demo)';
   (m.events || []).forEach(pushEvent);
@@ -248,6 +252,35 @@ function onCamStat(st) {
   renderCameraSide();
 }
 
+// ------------------------------------------------------------------ wi-fi
+// The back end joins the blimp's access point on request (wifi.py); the
+// page only shows the state and offers the one button. Joined or not is
+// judged by the back end from its own address, so the pill is honest even
+// when the network was joined by hand.
+
+function onWifi(w) {
+  state.wifi = w;
+  const b = $('#btn-wifi'), note = $('#wifi-note');
+  if (state.demo) {
+    b.disabled = true; b.className = 'btn wifi-btn'; b.textContent = 'Join blimp Wi-Fi';
+    note.textContent = 'demo: no radio involved'; setPill('#pill-wifi', 'idle', 'DEMO'); return;
+  }
+  if (!w || w.backend === 'none') {
+    b.disabled = true; b.className = 'btn wifi-btn'; b.textContent = 'Join blimp Wi-Fi';
+    note.textContent = (w && w.error) || 'no Wi-Fi control on this system: join ICARUS-… by hand';
+    setPill('#pill-wifi', w && w.joined ? 'ok' : 'idle', w && w.joined ? w.ip : '—'); return;
+  }
+  b.disabled = !!w.busy;
+  if (w.busy) { b.textContent = w.phase === 'leaving' ? 'Leaving…' : 'Joining…'; b.className = 'btn wifi-btn busy'; }
+  else if (w.joined) { b.textContent = 'Leave blimp Wi-Fi'; b.className = 'btn wifi-btn up'; }
+  else { b.textContent = 'Join blimp Wi-Fi'; b.className = 'btn wifi-btn'; }
+  if (w.joined) note.textContent = `${w.ssid || 'on the blimp network'} · this computer is ${w.ip}`;
+  else if (w.error) note.textContent = w.error;
+  else note.textContent = w.candidates && w.candidates.length ? 'known: ' + w.candidates.join(', ') : 'no ICARUS-… network known yet';
+  note.title = note.textContent;
+  setPill('#pill-wifi', w.busy ? 'live' : w.joined ? 'ok' : 'warn', w.busy ? w.phase.toUpperCase() : w.joined ? w.ip : 'DOWN');
+}
+
 // ----------------------------------------------------------------- events
 
 function addEvent(level, text) { pushEvent({ t: 'ev', ts: Date.now() / 1000, level, text }); }
@@ -259,7 +292,11 @@ function pushEvent(ev) {
   const list = $('#ev-list'); list.appendChild(li); while (list.children.length > 200) list.removeChild(list.firstChild);
   list.parentElement.scrollTop = list.parentElement.scrollHeight;
   const n = (lv) => state.events.filter((e) => e.level === lv).length;
-  $('#ev-counts').textContent = `${n('crit')} crit · ${n('warn')} warn`;
+  const nc = n('crit'), nw = n('warn');
+  const badge = $('#ev-counts'); badge.textContent = `${nc} crit · ${nw} warn`;
+  badge.className = 'badge mono' + (nc ? ' crit' : nw ? ' warn' : '');
+  // the tab is not in view: mark it so the dot says there is something to read
+  if (state.dockTab !== 'events') $('#tab-events').classList.add('new');
 }
 
 function escapeHtml(s) { return String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
@@ -499,10 +536,65 @@ function conSend(line) {
 
 const QUICK = ['help', 'motor --status', 'wifi', 'link', 'imu -n 3', 'tof -n 3', 'mag -n 3', 'baro', 'motor -s'];
 
+// ------------------------------------------------------------------- dock
+// The console and the event log share one strip under the panels: two tabs,
+// a handle on the top edge that drags the height, a button that collapses it
+// to the tab bar. Height, tab and collapsed state persist in localStorage,
+// which is a per-browser convenience: every read and write is guarded, and
+// the page works the same when storage is empty or unavailable.
+
+const DOCK_MIN_PX = 110;
+// First-run height: about a quarter of the window, 230 px on a 1080p screen,
+// less on a laptop with the browser chrome showing.
+const dockDefaultPx = () => clamp(Math.round(window.innerHeight * 0.23), 140, 230);
+
+function wireDock() {
+  const dock = $('#dock'), handle = $('#dock-handle'), toggle = $('#dock-toggle');
+  const store = (k, v) => { try { localStorage.setItem('icarus.dock.' + k, String(v)); } catch (e) { /* storage unavailable */ } };
+  const load = (k) => { try { return localStorage.getItem('icarus.dock.' + k); } catch (e) { return null; } };
+  // leave the panels above at least ~320 px, whatever the window
+  const maxPx = () => Math.max(DOCK_MIN_PX, window.innerHeight - 320);
+  const setHeight = (px) => { px = clamp(Math.round(px), DOCK_MIN_PX, maxPx()); dock.style.setProperty('--dock-h', px + 'px'); return px; };
+  let height = setHeight(Number(load('h')) || dockDefaultPx());
+
+  const setCollapsed = (c) => {
+    dock.classList.toggle('collapsed', c);
+    toggle.setAttribute('aria-expanded', String(!c));
+    toggle.innerHTML = c ? '&#9652;' : '&#9662;';
+    toggle.title = c ? 'expand the console and events' : 'collapse to the tab bar';
+    store('collapsed', c ? 1 : 0);
+  };
+  setCollapsed(load('collapsed') === '1');
+  toggle.addEventListener('click', () => setCollapsed(!dock.classList.contains('collapsed')));
+
+  const tabs = [...dock.querySelectorAll('.tab')];
+  const show = (name) => {
+    tabs.forEach((t) => { const on = t.dataset.tab === name; t.setAttribute('aria-selected', String(on)); $('#pane-' + t.dataset.tab).hidden = !on; });
+    $('#note-console').hidden = name !== 'console'; $('#note-events').hidden = name !== 'events';
+    state.dockTab = name; store('tab', name);
+    if (name === 'events') { $('#tab-events').classList.remove('new'); const p = $('#pane-events'); p.scrollTop = p.scrollHeight; }
+    else $('#con-in').focus({ preventScroll: true });
+  };
+  tabs.forEach((t) => t.addEventListener('click', () => { if (dock.classList.contains('collapsed')) setCollapsed(false); show(t.dataset.tab); }));
+  show(load('tab') === 'events' ? 'events' : 'console');
+
+  let drag = null;
+  handle.addEventListener('pointerdown', (e) => {
+    if (dock.classList.contains('collapsed')) return;
+    drag = { y: e.clientY, h: dock.getBoundingClientRect().height };
+    handle.setPointerCapture(e.pointerId); document.body.classList.add('resizing'); e.preventDefault();
+  });
+  handle.addEventListener('pointermove', (e) => { if (drag) height = setHeight(drag.h + (drag.y - e.clientY)); });
+  const end = () => { if (!drag) return; drag = null; document.body.classList.remove('resizing'); store('h', height); };
+  handle.addEventListener('pointerup', end); handle.addEventListener('pointercancel', end);
+  handle.addEventListener('dblclick', () => { height = setHeight(dockDefaultPx()); store('h', height); });
+  window.addEventListener('resize', () => { height = setHeight(height); });
+}
+
 // ----------------------------------------------------------------- wiring
 
 function wire() {
-  buildTower(); buildGauges();
+  buildTower(); buildGauges(); wireDock();
   const chips = $('#chips');
   for (const q of QUICK) { const b = document.createElement('button'); b.type = 'button'; b.className = 'chip'; b.textContent = q; b.addEventListener('click', () => conSend(q)); chips.appendChild(b); }
   $('#con-form').addEventListener('submit', (e) => { e.preventDefault(); const i = $('#con-in'); conSend(i.value); i.value = ''; });
@@ -512,6 +604,14 @@ function wire() {
     if (e.key === 'ArrowDown') { e.preventDefault(); if (state.conIndex < 0) return; state.conIndex = Math.min(h.length, state.conIndex + 1); e.target.value = state.conIndex === h.length ? '' : h[state.conIndex]; if (state.conIndex === h.length) state.conIndex = -1; }
   });
   $('#btn-stop').addEventListener('click', () => stopAll(false));
+  $('#btn-wifi').addEventListener('click', () => { const w = state.wifi; link.send({ t: 'wifi', action: w && w.joined ? 'disconnect' : 'connect' }); });
+  // Full screen: the native window (pywebview) does it itself; a browser uses the Fullscreen API.
+  const fullscreen = () => {
+    if (window.pywebview && window.pywebview.api) window.pywebview.api.toggle_fullscreen();
+    else if (document.fullscreenElement) document.exitFullscreen();
+    else document.documentElement.requestFullscreen();
+  };
+  $('#btn-full').addEventListener('click', fullscreen);
   $('#chk-enable').addEventListener('change', (e) => { if (!e.target.checked) { stopAll(false); } else setEnabled(true); });
   $('#in-limit').addEventListener('change', (e) => { state.limit = clamp(Number(e.target.value) / 100, 0.05, 1); e.target.value = Math.round(state.limit * 100); addEvent(state.limit > 0.5 ? 'warn' : 'info', `thrust limit ${Math.round(state.limit * 100)} %`); sendMotors(); });
   $('#chk-pairs').addEventListener('change', (e) => { state.pairs = e.target.checked; });
@@ -524,6 +624,7 @@ function wire() {
   document.addEventListener('keydown', (e) => {
     const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) && e.target.type !== 'range' && e.target.type !== 'checkbox';
     if (e.key === 'Escape' || (e.key === ' ' && !typing)) { e.preventDefault(); stopAll(false); }
+    if (e.key === 'F11') { e.preventDefault(); fullscreen(); }
   });
   window.addEventListener('beforeunload', () => { if (state.enabled) link.send({ t: 'stop', brake: false }); });
   // animation: plots, staleness, camera verdict ageing

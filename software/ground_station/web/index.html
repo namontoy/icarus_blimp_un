@@ -16,13 +16,19 @@
     <div class="wordmark">ICARUS</div>
     <div class="brand-sub">Universidad Nacional de Colombia <span class="dot">·</span> blimp ground station</div>
   </div>
+  <div class="wifi">
+    <button type="button" class="btn wifi-btn" id="btn-wifi" disabled title="join the blimp's access point from this computer">Join blimp Wi-Fi</button>
+    <span class="wifi-note mono" id="wifi-note">—</span>
+  </div>
   <div class="pills">
+    <span class="pill idle" id="pill-wifi" title="this computer's connection to the blimp's access point">WI-FI <b>—</b></span>
     <span class="pill idle" id="pill-link" title="UDP link to the blimp: age of the last packet">LINK <b>—</b></span>
     <span class="pill idle" id="pill-fs" title="motor driver failsafe on the blimp">FAILSAFE <b>—</b></span>
     <span class="pill idle" id="pill-sta" title="stations on the blimp's access point">STA <b>—</b></span>
     <span class="pill idle" id="pill-cam" title="camera link">CAM <b>—</b></span>
     <span class="pill demo" id="pill-demo" hidden>DEMO DATA</span>
   </div>
+  <button type="button" class="btn full" id="btn-full" title="full screen (F11)" aria-label="toggle full screen">&#x26F6;</button>
   <button class="stop" id="btn-stop" type="button" title="Coast all four motors (Space or Esc)">STOP</button>
 </header>
 
@@ -123,14 +129,14 @@
         Sensor stream paused: no packet for more than 1.5 s. A console sensor command (<code>imu</code>, <code>mag</code>, <code>baro</code>, <code>tof</code>) borrows the chips while it runs; otherwise ask <code>sensors</code>.
       </div>
 
-      <div class="block">
+      <div class="block imu">
         <div class="block-head"><h3>IMU</h3><span class="legend"><i style="--c:var(--s-x)"></i>x <i style="--c:var(--s-y)"></i>y <i style="--c:var(--s-z)"></i>z</span></div>
         <div class="imu-grid mono">
           <span class="k">acc g</span><span id="acc-x">—</span><span id="acc-y">—</span><span id="acc-z">—</span>
           <span class="k">gyro °/s</span><span id="gyro-x">—</span><span id="gyro-y">—</span><span id="gyro-z">—</span>
         </div>
-        <canvas id="plot-acc" class="plot" height="90" aria-label="accelerometer, last 10 seconds"></canvas>
-        <canvas id="plot-gyro" class="plot" height="90" aria-label="gyroscope, last 10 seconds"></canvas>
+        <div class="plot-box"><canvas id="plot-acc" class="plot" height="90" aria-label="accelerometer, last 10 seconds"></canvas></div>
+        <div class="plot-box"><canvas id="plot-gyro" class="plot" height="90" aria-label="gyroscope, last 10 seconds"></canvas></div>
         <div class="plot-tip mono" id="plot-tip" hidden></div>
       </div>
 
@@ -186,13 +192,25 @@
     </div>
   </section>
 
-  <!-- =========================================================== CONSOLE -->
-  <section class="panel console" aria-labelledby="h-console">
-    <div class="panel-head">
-      <h2 id="h-console">Console</h2>
-      <span class="head-note">the firmware's <code>i2c-tools&gt;</code> prompt, over the air · one command at a time</span>
+</main>
+
+<!-- ======================================================= CONSOLE / EVENTS -->
+<!-- One dock under the three panels: the console and the event log as tabs,
+     a drag handle on its top edge to set its height, and a collapse button.
+     Height, tab and collapsed state are remembered in this browser. -->
+<section class="dock" id="dock" aria-label="console and events">
+  <div class="dock-handle" id="dock-handle" title="drag to resize · double-click to reset"></div>
+  <div class="dock-bar">
+    <div class="tabs" role="tablist" aria-label="console or events">
+      <button type="button" class="tab" role="tab" id="tab-console" data-tab="console" aria-selected="true" aria-controls="pane-console">Console</button>
+      <button type="button" class="tab" role="tab" id="tab-events" data-tab="events" aria-selected="false" aria-controls="pane-events">Events <span class="badge mono" id="ev-counts"></span></button>
     </div>
-    <div class="panel-body con-body">
+    <span class="dock-note" id="note-console">the firmware's <code>i2c-tools&gt;</code> prompt, over the air · one command at a time</span>
+    <span class="dock-note" id="note-events" hidden>link, failsafe, setpoint and camera events · newest at the bottom</span>
+    <button type="button" class="dock-toggle" id="dock-toggle" aria-expanded="true" aria-controls="dock-body" title="collapse to the tab bar">&#9662;</button>
+  </div>
+  <div class="dock-body" id="dock-body">
+    <div class="tabpane con-body" id="pane-console" role="tabpanel" aria-labelledby="tab-console">
       <pre class="con-out mono" id="con-out" aria-live="polite"></pre>
       <form class="con-form" id="con-form">
         <span class="prompt mono">i2c-tools&gt;</span>
@@ -201,20 +219,11 @@
       </form>
       <div class="chips" id="chips"></div>
     </div>
-  </section>
-
-  <!-- ============================================================ EVENTS -->
-  <section class="panel events" aria-labelledby="h-events">
-    <div class="panel-head">
-      <h2 id="h-events">Events</h2>
-      <span class="head-note mono" id="ev-counts"></span>
-    </div>
-    <div class="panel-body">
+    <div class="tabpane ev-pane" id="pane-events" role="tabpanel" aria-labelledby="tab-events" hidden>
       <ol class="ev-list mono" id="ev-list"></ol>
     </div>
-  </section>
-
-</main>
+  </div>
+</section>
 
 <script src="app.js"></script>
 </body>
