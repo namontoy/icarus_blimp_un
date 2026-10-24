@@ -24,7 +24,9 @@ if "%~1"=="" (
   exit /b 1
 )
 set "PROJECT=%~1"
-shift
+REM shift /1 keeps %0: a plain shift moves it too, and %~dp0 below would then
+REM name the first argument's folder instead of this script's.
+shift /1
 
 if not defined PY311 set "PY311=%LOCALAPPDATA%\Programs\Python\Python311"
 if not defined IDF_PATH set "IDF_PATH=%USERPROFILE%\esp\esp-idf-v5.5.5"
@@ -48,7 +50,7 @@ set "ARGS="
 :collect
 if "%~1"=="" goto run
 set "ARGS=!ARGS! %1"
-shift
+shift /1
 goto collect
 :run
 if "!ARGS!"=="" set "ARGS= build"
