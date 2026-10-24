@@ -1,10 +1,14 @@
 /*
- * 'imu' console command: wake the MPU-6050 and print decoded readings.
+ * 'imu' console command and the MPU-6050 driver behind it.
  *
  * Shares the bus that 'i2cconfig' set up, so it follows whatever SDA/SCL the
- * rest of the tool is using.
+ * rest of the tool is using. imu_attach() / imu_read() / imu_detach() are
+ * the driver; the command below and the sensor stream (sensor_stream.c) are
+ * its two callers, which is how the bench stays the regression test for the
+ * numbers the ground station plots.
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "argtable3/argtable3.h"
 #include "driver/i2c_master.h"
@@ -14,6 +18,7 @@
 #include "freertos/task.h"
 #include "cmd_i2ctools.h"
 #include "cmd_imu.h"
+#include "sensor_stream.h"
 
 static const char *TAG = "cmd_imu";
 
@@ -37,6 +42,13 @@ static const int   accel_range_g[4]     = { 2, 4, 8, 16 };
 static const float gyro_lsb_per_dps[4]  = { 131.0f, 65.5f, 32.8f, 16.4f };
 static const int   gyro_range_dps[4]    = { 250, 500, 1000, 2000 };
 
+struct imu_dev {
+    i2c_master_dev_handle_t dev;
+    int addr;
+    int afs_sel;    /* what the chip reports back: the scaling follows these, */
+    int fs_sel;     /* not what was asked for                                  */
+};
+
 static esp_err_t reg_read(i2c_master_dev_handle_t dev, uint8_t reg, uint8_t *buf, size_t len)
 {
     return i2c_master_transmit_receive(dev, &reg, 1, buf, len, IMU_TIMEOUT_MS);
@@ -47,6 +59,156 @@ static esp_err_t reg_write(i2c_master_dev_handle_t dev, uint8_t reg, uint8_t val
     uint8_t out[2] = { reg, val };
     return i2c_master_transmit(dev, out, sizeof(out), IMU_TIMEOUT_MS);
 }
+
+/* ---------------------------------------------------------------- driver */
+
+/*
+ * Wake the chip and set the ranges explicitly instead of inheriting whatever
+ * the chip holds. An ESP32 reset does not power-cycle this sensor, so its
+ * registers survive a reflash - and have been observed changing across one.
+ * A driver whose scaling depends on found state is a driver that can
+ * silently report numbers off by 4x. The ranges are read back and the
+ * scaling uses what the chip reports, so a write that did not take shows up
+ * as wrong-looking ranges in the header rather than as quietly mis-scaled
+ * readings.
+ */
+static esp_err_t imu_configure(imu_dev_t *d, int want_afs, int want_fs)
+{
+    uint8_t who = 0;
+    if (reg_read(d->dev, MPU6050_REG_WHO_AM_I, &who, 1) != ESP_OK) {
+        ESP_LOGE(TAG, "no response from 0x%02x - check wiring and 'i2cdetect'", d->addr);
+        return ESP_ERR_NOT_FOUND;
+    }
+    if (who != MPU6050_WHO_AM_I_VALUE) {
+        /* Not fatal: MPU-6500/9250 and clones answer differently but share the
+           register map closely enough that the readings below still decode. */
+        ESP_LOGW(TAG, "WHO_AM_I is 0x%02x, expected 0x%02x for an MPU-6050", who,
+                 MPU6050_WHO_AM_I_VALUE);
+    }
+
+    /* The MPU-6050 powers up asleep; clearing PWR_MGMT_1 wakes it and selects
+       the internal 8 MHz oscillator. */
+    if (reg_write(d->dev, MPU6050_REG_PWR_MGMT_1, 0x00) != ESP_OK) {
+        ESP_LOGE(TAG, "failed to wake the sensor");
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    vTaskDelay(pdMS_TO_TICKS(50)); // let the oscillator and filters settle
+
+    if (reg_write(d->dev, MPU6050_REG_GYRO_CONFIG, (uint8_t)(want_fs << 3)) != ESP_OK ||
+        reg_write(d->dev, MPU6050_REG_ACCEL_CONFIG, (uint8_t)(want_afs << 3)) != ESP_OK) {
+        ESP_LOGE(TAG, "failed to set the range configuration");
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    uint8_t cfg[2] = {0};
+    if (reg_read(d->dev, MPU6050_REG_GYRO_CONFIG, cfg, 2) != ESP_OK) {
+        ESP_LOGE(TAG, "failed to read the range configuration");
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    d->fs_sel  = (cfg[0] >> 3) & 0x03;
+    d->afs_sel = (cfg[1] >> 3) & 0x03;
+
+    if (d->fs_sel != want_fs || d->afs_sel != want_afs) {
+        ESP_LOGW(TAG, "range readback mismatch: asked for afs=%d fs=%d, chip reports "
+                      "afs=%d fs=%d", want_afs, want_fs, d->afs_sel, d->fs_sel);
+    }
+    return ESP_OK;
+}
+
+esp_err_t imu_attach(int addr, int accel_fs, int gyro_fs, imu_dev_t **out)
+{
+    if (out == NULL || accel_fs < 0 || accel_fs > 3 || gyro_fs < 0 || gyro_fs > 3) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *out = NULL;
+    if (addr < 0) {
+        addr = MPU6050_ADDR_DEFAULT;
+    }
+    /* Probe before talking: a register read of an empty address makes the
+       driver log a NACK error for what is, for the stream's retries, an
+       expected answer. */
+    if (tool_bus_handle == NULL ||
+        i2c_master_probe(tool_bus_handle, addr, IMU_TIMEOUT_MS) != ESP_OK) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    imu_dev_t *d = calloc(1, sizeof(*d));
+    if (d == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    d->addr = addr;
+    i2c_device_config_t dev_conf = {
+        .scl_speed_hz = IMU_SCL_SPEED_HZ,
+        .device_address = addr,
+    };
+    if (i2c_master_bus_add_device(tool_bus_handle, &dev_conf, &d->dev) != ESP_OK) {
+        ESP_LOGE(TAG, "could not add device 0x%02x to the bus", addr);
+        free(d);
+        return ESP_FAIL;
+    }
+    esp_err_t err = imu_configure(d, accel_fs, gyro_fs);
+    if (err != ESP_OK) {
+        imu_detach(d);
+        return err;
+    }
+    *out = d;
+    return ESP_OK;
+}
+
+void imu_ranges(const imu_dev_t *d, int *accel_g, int *gyro_dps)
+{
+    *accel_g  = accel_range_g[d->afs_sel];
+    *gyro_dps = gyro_range_dps[d->fs_sel];
+}
+
+int imu_addr(const imu_dev_t *d)
+{
+    return d->addr;
+}
+
+esp_err_t imu_read(imu_dev_t *d, imu_reading_t *r)
+{
+    if (d == NULL || r == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    /* Accel, temperature and gyro are contiguous from 0x3B, so one
+       transaction gives a coherent sample of all three. */
+    uint8_t raw[14];
+    esp_err_t err = reg_read(d->dev, MPU6050_REG_ACCEL_XOUT_H, raw, sizeof(raw));
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    int16_t ax = (int16_t)((raw[0]  << 8) | raw[1]);
+    int16_t ay = (int16_t)((raw[2]  << 8) | raw[3]);
+    int16_t az = (int16_t)((raw[4]  << 8) | raw[5]);
+    int16_t t  = (int16_t)((raw[6]  << 8) | raw[7]);
+    int16_t gx = (int16_t)((raw[8]  << 8) | raw[9]);
+    int16_t gy = (int16_t)((raw[10] << 8) | raw[11]);
+    int16_t gz = (int16_t)((raw[12] << 8) | raw[13]);
+
+    r->ax_g   = ax / accel_lsb_per_g[d->afs_sel];
+    r->ay_g   = ay / accel_lsb_per_g[d->afs_sel];
+    r->az_g   = az / accel_lsb_per_g[d->afs_sel];
+    r->gx_dps = gx / gyro_lsb_per_dps[d->fs_sel];
+    r->gy_dps = gy / gyro_lsb_per_dps[d->fs_sel];
+    r->gz_dps = gz / gyro_lsb_per_dps[d->fs_sel];
+    r->temp_c = t / 340.0f + 36.53f;   // datasheet conversion
+    return ESP_OK;
+}
+
+void imu_detach(imu_dev_t *d)
+{
+    if (d == NULL) {
+        return;
+    }
+    if (d->dev != NULL) {
+        i2c_master_bus_rm_device(d->dev);
+    }
+    free(d);
+}
+
+/* --------------------------------------------------------------- console */
 
 static struct {
     struct arg_int *chip_address;
@@ -77,94 +239,34 @@ static int do_imu_cmd(int argc, char **argv)
         return 1;
     }
 
-    i2c_device_config_t dev_conf = {
-        .scl_speed_hz = IMU_SCL_SPEED_HZ,
-        .device_address = chip_addr,
-    };
-    i2c_master_dev_handle_t dev = NULL;
-    if (i2c_master_bus_add_device(tool_bus_handle, &dev_conf, &dev) != ESP_OK) {
-        ESP_LOGE(TAG, "could not add device 0x%02x to the bus", chip_addr);
-        return 1;
-    }
+    /* The stream holds this chip while it runs; borrow it for the command. */
+    sensor_stream_pause();
 
     int ret = 1;
-    uint8_t who = 0;
-    if (reg_read(dev, MPU6050_REG_WHO_AM_I, &who, 1) != ESP_OK) {
+    imu_dev_t *d = NULL;
+    esp_err_t err = imu_attach(chip_addr, want_afs, want_fs, &d);
+    if (err == ESP_ERR_NOT_FOUND) {
         ESP_LOGE(TAG, "no response from 0x%02x - check wiring and 'i2cdetect'", chip_addr);
         goto cleanup;
     }
-    if (who != MPU6050_WHO_AM_I_VALUE) {
-        /* Not fatal: MPU-6500/9250 and clones answer differently but share the
-           register map closely enough that the readings below still decode. */
-        ESP_LOGW(TAG, "WHO_AM_I is 0x%02x, expected 0x%02x for an MPU-6050", who,
-                 MPU6050_WHO_AM_I_VALUE);
+    if (err != ESP_OK) {
+        goto cleanup;   /* imu_attach already said why */
     }
 
-    /* The MPU-6050 powers up asleep; clearing PWR_MGMT_1 wakes it and selects
-       the internal 8 MHz oscillator. */
-    if (reg_write(dev, MPU6050_REG_PWR_MGMT_1, 0x00) != ESP_OK) {
-        ESP_LOGE(TAG, "failed to wake the sensor");
-        goto cleanup;
-    }
-    vTaskDelay(pdMS_TO_TICKS(50)); // let the oscillator and filters settle
-
-    /* Set the ranges explicitly instead of inheriting whatever the chip holds.
-       An ESP32 reset does not power-cycle this sensor, so its registers
-       survive a reflash - and have been observed changing across one. A
-       command whose scaling depends on found state is a command that can
-       silently report numbers off by 4x. */
-    if (reg_write(dev, MPU6050_REG_GYRO_CONFIG, (uint8_t)(want_fs << 3)) != ESP_OK ||
-        reg_write(dev, MPU6050_REG_ACCEL_CONFIG, (uint8_t)(want_afs << 3)) != ESP_OK) {
-        ESP_LOGE(TAG, "failed to set the range configuration");
-        goto cleanup;
-    }
-
-    /* Read them back and scale from what the chip actually reports, so a write
-       that did not take shows up as wrong-looking ranges in the header rather
-       than as quietly mis-scaled readings. */
-    uint8_t cfg[2] = {0};
-    if (reg_read(dev, MPU6050_REG_GYRO_CONFIG, cfg, 2) != ESP_OK) {
-        ESP_LOGE(TAG, "failed to read the range configuration");
-        goto cleanup;
-    }
-    int fs_sel  = (cfg[0] >> 3) & 0x03;
-    int afs_sel = (cfg[1] >> 3) & 0x03;
-
-    if (fs_sel != want_fs || afs_sel != want_afs) {
-        ESP_LOGW(TAG, "range readback mismatch: asked for afs=%d fs=%d, chip reports "
-                      "afs=%d fs=%d", want_afs, want_fs, afs_sel, fs_sel);
-    }
-
-    printf("MPU-6050 @ 0x%02x   accel +/-%dg   gyro +/-%d dps\n",
-           chip_addr, accel_range_g[afs_sel], gyro_range_dps[fs_sel]);
+    int accel_g = 0, gyro_dps = 0;
+    imu_ranges(d, &accel_g, &gyro_dps);
+    printf("MPU-6050 @ 0x%02x   accel +/-%dg   gyro +/-%d dps\n", chip_addr, accel_g, gyro_dps);
     printf("%9s %9s %9s %9s %9s %9s %8s\n",
            "ax[g]", "ay[g]", "az[g]", "gx[dps]", "gy[dps]", "gz[dps]", "T[C]");
 
     for (int i = 0; i < count; i++) {
-        /* Accel, temperature and gyro are contiguous from 0x3B, so one
-           transaction gives a coherent sample of all three. */
-        uint8_t raw[14];
-        if (reg_read(dev, MPU6050_REG_ACCEL_XOUT_H, raw, sizeof(raw)) != ESP_OK) {
+        imu_reading_t r;
+        if (imu_read(d, &r) != ESP_OK) {
             ESP_LOGE(TAG, "read failed at sample %d", i);
             goto cleanup;
         }
-
-        int16_t ax = (int16_t)((raw[0]  << 8) | raw[1]);
-        int16_t ay = (int16_t)((raw[2]  << 8) | raw[3]);
-        int16_t az = (int16_t)((raw[4]  << 8) | raw[5]);
-        int16_t t  = (int16_t)((raw[6]  << 8) | raw[7]);
-        int16_t gx = (int16_t)((raw[8]  << 8) | raw[9]);
-        int16_t gy = (int16_t)((raw[10] << 8) | raw[11]);
-        int16_t gz = (int16_t)((raw[12] << 8) | raw[13]);
-
         printf("%9.3f %9.3f %9.3f %9.2f %9.2f %9.2f %8.1f\n",
-               ax / accel_lsb_per_g[afs_sel],
-               ay / accel_lsb_per_g[afs_sel],
-               az / accel_lsb_per_g[afs_sel],
-               gx / gyro_lsb_per_dps[fs_sel],
-               gy / gyro_lsb_per_dps[fs_sel],
-               gz / gyro_lsb_per_dps[fs_sel],
-               t / 340.0f + 36.53f);   // datasheet conversion
+               r.ax_g, r.ay_g, r.az_g, r.gx_dps, r.gy_dps, r.gz_dps, r.temp_c);
         fflush(stdout);
 
         if (i + 1 < count) {
@@ -174,7 +276,8 @@ static int do_imu_cmd(int argc, char **argv)
     ret = 0;
 
 cleanup:
-    i2c_master_bus_rm_device(dev);
+    imu_detach(d);
+    sensor_stream_resume();
     return ret;
 }
 

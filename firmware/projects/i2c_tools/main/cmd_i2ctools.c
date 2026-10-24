@@ -17,6 +17,7 @@
 #include "driver/i2c_master.h"
 #include "esp_console.h"
 #include "esp_log.h"
+#include "sensor_stream.h"
 
 static const char *TAG = "cmd_i2ctools";
 
@@ -68,25 +69,34 @@ static int do_i2cconfig_cmd(int argc, char **argv)
     /* Check "--scl" option */
     i2c_gpio_scl = i2cconfig_args.scl->ival[0];
 
+    /* The sensor stream holds devices on this bus, and a bus with devices
+       still attached cannot be deleted; pausing the stream releases them. */
+    sensor_stream_pause();
+
     // re-init the bus
+    int ret = 0;
     if (i2c_del_master_bus(tool_bus_handle) != ESP_OK) {
-        return 1;
+        ret = 1;
+    } else {
+        i2c_master_bus_config_t i2c_bus_config = {
+            .clk_source = I2C_CLK_SRC_DEFAULT,
+            .i2c_port = i2c_port,
+            .scl_io_num = i2c_gpio_scl,
+            .sda_io_num = i2c_gpio_sda,
+            .glitch_ignore_cnt = 7,
+            .flags.enable_internal_pullup = true,
+        };
+
+        if (i2c_new_master_bus(&i2c_bus_config, &tool_bus_handle) != ESP_OK) {
+            /* The old bus is gone; leave no dangling handle for the drivers
+               (they treat NULL as "no bus"). */
+            tool_bus_handle = NULL;
+            ret = 1;
+        }
     }
 
-    i2c_master_bus_config_t i2c_bus_config = {
-        .clk_source = I2C_CLK_SRC_DEFAULT,
-        .i2c_port = i2c_port,
-        .scl_io_num = i2c_gpio_scl,
-        .sda_io_num = i2c_gpio_sda,
-        .glitch_ignore_cnt = 7,
-        .flags.enable_internal_pullup = true,
-    };
-
-    if (i2c_new_master_bus(&i2c_bus_config, &tool_bus_handle) != ESP_OK) {
-        return 1;
-    }
-
-    return 0;
+    sensor_stream_resume();
+    return ret;
 }
 
 static void register_i2cconfig(void)

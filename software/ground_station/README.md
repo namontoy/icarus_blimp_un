@@ -28,8 +28,11 @@ says so with an orange DEMO DATA pill. That copy of the page never reaches a bli
   and the firmware coasts on its own timers after that. Remove the propellers on the bench.
 - **Sensors**: live numbers, 10 s plots of the accelerometer and gyroscope (hover for values),
   roll and pitch from the accelerometer, the magnetic heading, the range below with the
-  1.85–2.25 m hover band, and the barometer. Until the firmware streams its sensors the panel
-  says so; the console commands still work.
+  1.85–2.25 m hover band, and the barometer. The firmware streams them from boot (`sensors` in
+  the console shows what it found). A console sensor command (`imu`, `mag`, `baro`, `tof`)
+  borrows the chips while it runs, so the panel shows a "paused" notice after 1.5 s without a
+  packet and resumes when the command returns. The barometer's altitude is relative to its
+  first reading since the blimp booted.
 - **Camera**: Connect, Grab frame, Live, Rotate 180° (display only), and the baud rate. The
   frame is the camera's 160 × 120 pixels at four times with the detector's box, the verdict
   tile, the blob table and the field-of-view plot come from the camera's own CSV rows.

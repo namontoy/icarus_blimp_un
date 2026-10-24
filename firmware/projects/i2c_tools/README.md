@@ -54,7 +54,8 @@ written down, but it has not run on hardware.
 | VL53L1X (`tof`) | **Measured** 2026-10-11, at 1.57 m only | 1566 mm, sd 1.5 mm at a 100 ms budget, dark room. Budgets below 100 ms read about 5 % short. **Range at 2 m not measured yet** (§8) |
 | Motors (`motor`) | **Measured** 2026-10-12 | 2 s run at 10 %, then the failsafe coasted it. No spurious errors |
 | Per-motor break-away duty | Not measured | The 12 % default is a guess. Measure it with `--sweep` (§6) |
-| Wi-Fi AP, UDP link, UDP console | **Built, not run on hardware** | Tested against `software/mock_blimp.py` only. Bring-up checklist: `docs/wireless-link.md` §8 |
+| Wi-Fi AP, UDP link | **Measured** 2026-10-24 | The laptop joined `ICARUS-…` and the ground station page (`software/ground_station/`) received telemetry. The rest of the checklist in `docs/wireless-link.md` §8 (console over UDP, link-loss and failsafe tests, current, range) is still open |
+| Sensor stream (`sensors`, the `SENSORS` packet) | **Built, not run on hardware** | Written 2026-10-24 on the four drivers above. The ground station decodes the same packet from `software/mock_blimp.py` |
 | PING))) ultrasonic | **Parked, not tested** | Not in the build (§8) |
 
 ## 2. Hardware and wiring
@@ -185,11 +186,14 @@ On Windows: `scripts\idf.bat i2c_tools build` (see `docs/wireless-link.md` §10)
    partition mounted at `/data` (`CONFIG_EXAMPLE_STORE_HISTORY`).
 3. The I2C master bus is created (SDA 4, SCL 5).
 4. The commands are registered: the stock I2C tools, `imu`, `mag`, `baro`,
-   `tof`, `motor`, `wifi`, `link`, `exit`/`quit`.
+   `tof`, `motor`, `wifi`, `link`, `sensors`, `exit`/`quit`.
 5. **Wireless**: `net_wifi_init()` brings up the access point, then
    `net_link_start()` and `net_console_start()` open the UDP ports. Each step
    is non-fatal. A Wi-Fi failure leaves you with the USB console.
-6. The LED task starts. The banner is printed, and the REPL starts on USB.
+6. **Sensor stream**: `sensor_stream_start()` creates the sampling task,
+   which attaches whatever sensors answer and feeds the link's `SENSORS`
+   packet (`CONFIG_SENSOR_STREAM_AT_BOOT`). Also non-fatal.
+7. The LED task starts. The banner is printed, and the REPL starts on USB.
 
 `cmd_system.h` is included, but `register_system()` is not called, so the stock
 `free`, `restart`, `version` etc. commands are not available.
@@ -357,6 +361,31 @@ a valid packet and whether it is alive or STALE, how many packets were received,
 rejected and sent, and whether the motors are currently being driven over the
 link.
 
+### `sensors`: the sensor stream
+
+```
+sensors            what the stream found, its latest readings, sample and error counts
+sensors --off      stop sampling and release every sensor
+sensors --on       start again
+```
+
+`sensor_stream.c` samples the IMU, the magnetometer and the VL53L1X 20 times a
+second and the barometer 4 times a second, through the same drivers as the
+four commands above, and the link sends each sample as a `SENSORS` packet (§7)
+for the ground station. It starts at boot (`SENSOR_STREAM_AT_BOOT`). A sensor
+that is missing is probed again every 2 s, quietly, so a breakout plugged in
+later shows up; one whose reads fail three times in a row, or that stops
+producing for a second, is released and re-attached the same way. The
+barometer's altitude in the packet is relative to the first reading since
+boot; `sensors` prints both that and the absolute one.
+
+**`imu`, `mag`, `baro`, `tof` and `i2cconfig` pause the stream** for the length
+of their run: each command resets and reconfigures its chip, the ToF port
+allows one attach per address, and a bus with devices on it cannot be
+deleted. The stream re-attaches, reconfiguring from scratch, when the command
+returns. On the ground station that shows as a "paused" notice for the length
+of the command.
+
 ### `exit` / `quit`: how to leave
 
 These don't close anything. They print how to leave. The console runs on the
@@ -400,8 +429,9 @@ section.
 
 Files: `net_wifi.c`, `net_link.c`, `net_console.c`, and `link_protocol.h` for
 the packet formats. The full design, the reasoning behind it and the bring-up
-checklist are in **`docs/wireless-link.md`**. **None of it has run on hardware
-yet** (§1).
+checklist are in **`docs/wireless-link.md`**. The access point and the packet
+link first ran on hardware on 2026-10-24 (the laptop joined and the ground
+station received telemetry); the rest of that checklist is still open (§1).
 
 ### Access point
 
@@ -433,6 +463,7 @@ A packet with the wrong size, magic, version or CRC is counted and dropped.
 | MOTOR_SET | `0x02` | 28 B | host → blimp | `float cmd[4]`, in FL, RL, FR, RR order, −1..1 |
 | MOTOR_STOP | `0x03` | 16 B | host → blimp | Coast, or brake if the brake byte is 1 |
 | TELEMETRY | `0x81` | 52 B | blimp → host | Clock, the four motor commands the driver holds, failsafe state, link state, station count, packet counters, free heap |
+| SENSORS | `0x82` | 76 B | blimp → host | Clock, accelerometer and gyroscope (g, °/s), IMU temperature, magnetometer (gauss) and heading, pressure, barometer temperature, altitude relative to the first reading, ToF range (mm) and status, and a `valid` bitmask (IMU 1, MAG 2, BARO 4, TOF 8) |
 
 - **`MOTOR_SET` is a standing command only while the host keeps repeating it.**
   `net_link.c` has its own timeout (500 ms, reset by any valid packet). When it
@@ -442,6 +473,9 @@ A packet with the wrong size, magic, version or CRC is counted and dropped.
 - The blimp sends telemetry (20 Hz) to the last host that sent a valid packet.
   It keeps sending for ten times the timeout after the host goes quiet, then
   stops.
+- One `SENSORS` packet follows each telemetry packet while the sensor stream
+  has a new sample (`sensors`, §5); none while the stream is paused or off,
+  so the ground station sees a gap rather than a frozen number.
 
 ### UDP 7201: console over the air
 
@@ -523,6 +557,8 @@ default there or put it in `sdkconfig.defaults*`.
 | | `NET_LINK_PORT` / `NET_CONSOLE_PORT` | 7200 / 7201 |
 | | `NET_LINK_TIMEOUT_MS` | 500 |
 | | `NET_LINK_TELEMETRY_HZ` | 20 |
+| Sensor stream | `SENSOR_STREAM_AT_BOOT` | y (otherwise `sensors --on`) |
+| | `SENSOR_STREAM_HZ` | 20 |
 
 ## 10. C API for other modules
 
@@ -533,14 +569,26 @@ without parsing console output.
 | Header | Functions |
 |---|---|
 | `cmd_motor.h` | `motors_init`, `motor_set`, `motors_set_all`, `motor_get`, `motors_coast`, `motors_brake`, `motors_set_decay`, `motors_set_deadband`, `motors_failsafe_set_timeout_ms`, `motors_failsafe_feed`, `motors_failsafe_tripped`, `motors_failsafe_state`, `motor_name`, `motor_where` |
-| `cmd_baro.h` | `baro_read_temperature_c` (used for speed-of-sound compensation; finds whichever barometer is present, like `baro`). Compiled, but its only caller (`cmd_ping.c`) is parked, so it has not run on hardware |
+| `cmd_imu.h` | `imu_attach`, `imu_read`, `imu_ranges`, `imu_addr`, `imu_detach` |
+| `cmd_mag.h` | `mag_attach`, `mag_read`, `mag_info`, `mag_detach` |
+| `cmd_baro.h` | `baro_attach`, `baro_read`, `baro_info`, `baro_detach`; `baro_read_temperature_c` (for speed-of-sound compensation; compiled, but its only caller `cmd_ping.c` is parked) |
+| `cmd_tof.h` | `tof_attach`, `tof_read`, `tof_info`, `tof_detach`, `tof_budget_valid`, `tof_status_text` |
+| `sensor_stream.h` | `sensor_stream_start`, `sensor_stream_pause`, `sensor_stream_resume`, `sensor_stream_latest` |
 | `net_wifi.h` | `net_wifi_init`, `net_wifi_start`, `net_wifi_stop`, `net_wifi_is_up`, `net_wifi_station_count`, `net_wifi_ssid`, `net_wifi_ip_str` |
 | `net_link.h`, `net_console.h` | Start functions and link status |
 | `components/vl53l1x_uld` | ST's ULD API, plus `vl53l1x_port_attach(bus, addr)` / `vl53l1x_port_detach` to bind it to the shared bus |
 
+Every sensor driver has the same shape: `xxx_attach()` finds the chip, adds it
+to the bus and configures it from scratch (ranges written and read back),
+`xxx_read()` returns one decoded sample, `xxx_detach()` removes it. The
+console command and the sensor stream are both loops over that API, which is
+why the bench commands remain the regression test for what the ground
+station plots. A caller that wants a chip while the stream is running
+brackets its work with `sensor_stream_pause()` / `sensor_stream_resume()`.
+
 The shared bus handle is `tool_bus_handle` (declared in `cmd_i2ctools.h`).
 Drivers add their device to that bus. They never create or delete the bus
-themselves.
+themselves, and they treat a NULL handle as "no bus".
 
 ## 11. Adding a module
 
@@ -594,10 +642,11 @@ i2c_tools/
     ├── Kconfig.projbuild         menuconfig settings (§9)
     ├── idf_component.yml         led_strip + example console helpers
     ├── cmd_i2ctools.c/.h         stock i2cconfig/detect/get/set/dump, shared bus handle
-    ├── cmd_imu.c/.h              MPU-6050
-    ├── cmd_mag.c/.h              HMC5883L or QMC5883L, auto-detected
-    ├── cmd_baro.c/.h             BMP180, BMP280 or BME280, auto-detected
-    ├── cmd_tof.c/.h              VL53L1X
+    ├── cmd_imu.c/.h              MPU-6050 driver + `imu`
+    ├── cmd_mag.c/.h              HMC5883L or QMC5883L driver, auto-detected, + `mag`
+    ├── cmd_baro.c/.h             BMP180, BMP280 or BME280 driver, auto-detected, + `baro`
+    ├── cmd_tof.c/.h              VL53L1X driver + `tof`
+    ├── sensor_stream.c/.h        samples every sensor for the SENSORS packet + `sensors`
     ├── cmd_motor.c/.h            DRV8833 ×2, failsafe
     ├── cmd_ping.c/.h             PING))) ultrasonic, PARKED (not in SRCS)
     ├── led_blink.c/.h            WS2812 hue sweep
@@ -628,6 +677,12 @@ for different hardware (a CCS811). It is not a test of this firmware.
   flight.
 - **One console at a time** (USB or UDP), and UDP replies don't include logs
   from other tasks (§7).
+- **The sensor stream and the console share the chips by turns.** `imu`,
+  `mag`, `baro`, `tof` and `i2cconfig` pause the stream, which releases every
+  sensor, and it re-attaches when they return; the ground station's sensor
+  panels go stale for the length of the command. `i2cget`/`i2cset` on a
+  sensor register while the stream runs do not pause it, so what they change
+  is what the stream reads until its next re-attach.
 - **Stale text to correct later:**
   - `cmd_tof.c`'s header comment about the altimeter decision (§8);
   - the `MOTOR_DEADBAND_PERMILLE` help in `Kconfig.projbuild`, which says

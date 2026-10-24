@@ -1,12 +1,12 @@
 /*
- * 'baro' console command: decoded Bosch barometer readings.
+ * 'baro' console command and the Bosch barometer driver behind it.
  *
  * Three chips are supported, because the bench has had all of them: the
  * BMP085/BMP180 on the GY-88 carrier, and, since that carrier burned out on
  * 2026-10-22, a stand-alone breakout sold as a BMP280 that identifies itself
  * as a BME280. All three answer chip ID register 0xD0 with a different value
- * (0x55, 0x58, 0x60), so the command probes 0x77 and then 0x76, reads that
- * one register and picks the driver from the answer - never from the
+ * (0x55, 0x58, 0x60), so the driver probes 0x77 and then 0x76, reads that
+ * one register and picks the chip from the answer - never from the
  * address, which a BMx280 shares with the BMP180 when its SDO pin is high.
  *
  * None of these chips reports physical units. They hand out raw ADC counts
@@ -14,10 +14,14 @@
  * the chip, so each driver carries Bosch's fixed-point compensation from its
  * datasheet, kept in integer math deliberately so it matches the reference
  * implementation bit for bit.
+ *
+ * baro_attach() / baro_read() / baro_detach() are the driver; the command
+ * below and the sensor stream (sensor_stream.c) are its callers.
  */
 #include <inttypes.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <math.h>
 #include "argtable3/argtable3.h"
 #include "driver/i2c_master.h"
@@ -27,6 +31,7 @@
 #include "freertos/task.h"
 #include "cmd_i2ctools.h"
 #include "cmd_baro.h"
+#include "sensor_stream.h"
 
 static const char *TAG = "cmd_baro";
 
@@ -76,12 +81,6 @@ static const char *TAG = "cmd_baro";
 /* Standard sea-level pressure, for the altitude estimate. */
 #define SEA_LEVEL_PA        101325.0f
 
-typedef enum {
-    BARO_CHIP_BMP180,
-    BARO_CHIP_BMP280,
-    BARO_CHIP_BME280,
-} baro_chip_t;
-
 /* Conversion time per oversampling setting, from the datasheet. */
 static const int baro_conv_ms[4] = { 5, 8, 14, 26 };
 
@@ -115,6 +114,16 @@ static const struct bmx280_osrs bmx280_presets[4] = {
     { .t = 1, .p = 3, .h = 1 },
     { .t = 1, .p = 4, .h = 1 },
     { .t = 2, .p = 5, .h = 1 },
+};
+
+struct baro_dev {
+    i2c_master_dev_handle_t dev;
+    int                 addr;
+    baro_chip_t         chip;
+    int                 oss;
+    struct bmp180_calib b180;   /* BMP180 */
+    struct bmx280_calib b280;   /* BMP280 and BME280 */
+    struct bmx280_osrs  o;      /* BMP280 and BME280 */
 };
 
 static const char *baro_chip_name(baro_chip_t chip)
@@ -174,6 +183,9 @@ static esp_err_t baro_open(int want_addr, i2c_master_dev_handle_t *dev, int *add
     const int n = (want_addr >= 0) ? 1 : 2;
     esp_err_t result = ESP_ERR_NOT_FOUND;
 
+    if (tool_bus_handle == NULL) {
+        return ESP_ERR_NOT_FOUND;
+    }
     for (int i = 0; i < n; i++) {
         int a = (want_addr >= 0) ? want_addr : candidates[i];
         if (i2c_master_probe(tool_bus_handle, a, BARO_TIMEOUT_MS) != ESP_OK) {
@@ -303,40 +315,6 @@ static void compensate(const struct bmp180_calib *c, int32_t ut, int32_t up, int
 static float altitude_m(float press_pa)
 {
     return 44330.0f * (1.0f - powf(press_pa / SEA_LEVEL_PA, 1.0f / 5.255f));
-}
-
-static int run_bmp180(i2c_master_dev_handle_t dev, int chip_addr, int count, int interval,
-                      int oss)
-{
-    struct bmp180_calib calib;
-    if (read_calibration(dev, &calib) != ESP_OK) {
-        return 1;
-    }
-
-    printf("BMP085/180 @ 0x%02x   oversampling %d (%d ms)   sea level %.2f hPa\n",
-           chip_addr, oss, baro_conv_ms[oss], SEA_LEVEL_PA / 100.0f);
-    printf("%8s %11s %10s\n", "T[C]", "P[hPa]", "alt[m]");
-
-    for (int i = 0; i < count; i++) {
-        int32_t ut = 0, up = 0;
-        if (read_raw_temp(dev, &ut) != ESP_OK ||
-            read_raw_pressure(dev, oss, &up) != ESP_OK) {
-            ESP_LOGE(TAG, "read failed at sample %d", i);
-            return 1;
-        }
-
-        float temp_c;
-        int32_t press_pa;
-        compensate(&calib, ut, up, oss, &temp_c, &press_pa);
-
-        printf("%8.1f %11.2f %10.1f\n", temp_c, press_pa / 100.0f, altitude_m(press_pa));
-        fflush(stdout);
-
-        if (i + 1 < count) {
-            vTaskDelay(pdMS_TO_TICKS(interval));
-        }
-    }
-    return 0;
 }
 
 /* --------------------------------------------------------- BMP280/BME280 */
@@ -569,27 +547,168 @@ static float bmx280_humidity_pct(const struct bmx280_calib *c, int32_t t_fine, i
     return (uint32_t)(v >> 12) / 1024.0f;   // datasheet yields Q22.10 %RH
 }
 
-static int run_bmx280(i2c_master_dev_handle_t dev, int chip_addr, baro_chip_t chip,
-                      int count, int interval, int oss)
+/* ---------------------------------------------------------------- driver */
+
+esp_err_t baro_attach(int addr, int oss, baro_dev_t **out)
 {
-    const bool humid = (chip == BARO_CHIP_BME280);
-    struct bmx280_osrs o = bmx280_presets[oss];
-    if (!humid) {
-        o.h = 0;
+    if (out == NULL || oss < 0 || oss > 3) {
+        return ESP_ERR_INVALID_ARG;
     }
+    *out = NULL;
 
-    struct bmx280_calib calib;
-    if (bmx280_setup(dev, chip, &o, &calib) != ESP_OK) {
-        ESP_LOGE(TAG, "%s setup failed", baro_chip_name(chip));
-        return 1;
+    i2c_master_dev_handle_t dev = NULL;
+    int found = 0;
+    baro_chip_t chip = BARO_CHIP_BMP180;
+    esp_err_t err = baro_open(addr, &dev, &found, &chip);
+    if (err != ESP_OK) {
+        return err;
     }
+    baro_dev_t *d = calloc(1, sizeof(*d));
+    if (d == NULL) {
+        i2c_master_bus_rm_device(dev);
+        return ESP_ERR_NO_MEM;
+    }
+    d->dev  = dev;
+    d->addr = found;
+    d->chip = chip;
+    d->oss  = oss;
 
-    printf("%s @ 0x%02x   oversampling %d (P x%d, T x%d", baro_chip_name(chip), chip_addr,
-           oss, osrs_mult(o.p), osrs_mult(o.t));
-    if (humid) {
-        printf(", H x%d", osrs_mult(o.h));
+    if (chip == BARO_CHIP_BMP180) {
+        err = read_calibration(dev, &d->b180);
+    } else {
+        d->o = bmx280_presets[oss];
+        if (chip != BARO_CHIP_BME280) {
+            d->o.h = 0;
+        }
+        err = bmx280_setup(dev, chip, &d->o, &d->b280);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "%s setup failed", baro_chip_name(chip));
+        }
     }
-    printf(", %d ms)   sea level %.2f hPa\n", bmx280_conv_ms(&o), SEA_LEVEL_PA / 100.0f);
+    if (err != ESP_OK) {
+        baro_detach(d);
+        return err;
+    }
+    *out = d;
+    return ESP_OK;
+}
+
+void baro_info(const baro_dev_t *d, baro_info_t *info)
+{
+    info->chip = d->chip;
+    info->name = baro_chip_name(d->chip);
+    info->addr = d->addr;
+    info->oss  = d->oss;
+    if (d->chip == BARO_CHIP_BMP180) {
+        info->conv_ms = baro_conv_ms[d->oss];
+        info->osrs_t = info->osrs_p = info->osrs_h = 0;
+    } else {
+        info->conv_ms = bmx280_conv_ms(&d->o);
+        info->osrs_t  = osrs_mult(d->o.t);
+        info->osrs_p  = osrs_mult(d->o.p);
+        info->osrs_h  = osrs_mult(d->o.h);
+    }
+}
+
+esp_err_t baro_read(baro_dev_t *d, baro_reading_t *r)
+{
+    if (d == NULL || r == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    r->humidity_pct = 0.0f;
+    r->has_humidity = false;
+
+    if (d->chip == BARO_CHIP_BMP180) {
+        int32_t ut = 0, up = 0;
+        esp_err_t err = read_raw_temp(d->dev, &ut);
+        if (err == ESP_OK) {
+            err = read_raw_pressure(d->dev, d->oss, &up);
+        }
+        if (err != ESP_OK) {
+            return err;
+        }
+        int32_t press_pa = 0;
+        compensate(&d->b180, ut, up, d->oss, &r->temp_c, &press_pa);
+        r->pressure_pa = (float)press_pa;
+    } else {
+        int32_t adc_t = 0, adc_p = 0, adc_h = 0;
+        esp_err_t err = bmx280_measure(d->dev, d->chip, &d->o, &adc_t, &adc_p, &adc_h);
+        if (err != ESP_OK) {
+            return err;
+        }
+        if (adc_t == BMX280_SKIPPED_20BIT || adc_p == BMX280_SKIPPED_20BIT) {
+            ESP_LOGE(TAG, "sample came back empty (T 0x%05" PRIx32 ", P 0x%05" PRIx32
+                          ") - the conversion did not run", adc_t, adc_p);
+            return ESP_ERR_INVALID_RESPONSE;
+        }
+        int32_t t_fine = bmx280_t_fine(&d->b280, adc_t);
+        r->temp_c = bmx280_temp_c(t_fine);
+        if (!bmx280_press_pa(&d->b280, t_fine, adc_p, &r->pressure_pa)) {
+            ESP_LOGE(TAG, "pressure compensation divides by zero - bad calibration");
+            return ESP_ERR_INVALID_RESPONSE;
+        }
+        if (d->chip == BARO_CHIP_BME280 && adc_h != BMX280_SKIPPED_16BIT) {
+            r->humidity_pct = bmx280_humidity_pct(&d->b280, t_fine, adc_h);
+            r->has_humidity = true;
+        }
+    }
+    r->altitude_m = altitude_m(r->pressure_pa);
+    return ESP_OK;
+}
+
+void baro_detach(baro_dev_t *d)
+{
+    if (d == NULL) {
+        return;
+    }
+    if (d->dev != NULL) {
+        i2c_master_bus_rm_device(d->dev);
+    }
+    free(d);
+}
+
+/* Air temperature alone, for the 'ping' speed-of-sound correction. One
+   attach, one sample at the fastest preset, detach: about 20 ms on the bus,
+   which is nothing next to an ultrasonic ping. */
+esp_err_t baro_read_temperature_c(float *temp_c)
+{
+    if (temp_c == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    baro_dev_t *d = NULL;
+    esp_err_t err = baro_attach(-1, 0, &d);
+    if (err != ESP_OK) {
+        return err;
+    }
+    baro_reading_t r;
+    err = baro_read(d, &r);
+    if (err == ESP_OK) {
+        *temp_c = r.temp_c;
+    }
+    baro_detach(d);
+    return err;
+}
+
+/* ---------------------------------------------------------------- console */
+
+static int run_baro(baro_dev_t *d, int count, int interval)
+{
+    baro_info_t info;
+    baro_info(d, &info);
+    const bool bmp180 = (info.chip == BARO_CHIP_BMP180);
+    const bool humid  = (info.chip == BARO_CHIP_BME280);
+
+    if (bmp180) {
+        printf("BMP085/180 @ 0x%02x   oversampling %d (%d ms)   sea level %.2f hPa\n",
+               info.addr, info.oss, info.conv_ms, SEA_LEVEL_PA / 100.0f);
+    } else {
+        printf("%s @ 0x%02x   oversampling %d (P x%d, T x%d", info.name, info.addr,
+               info.oss, info.osrs_p, info.osrs_t);
+        if (humid) {
+            printf(", H x%d", info.osrs_h);
+        }
+        printf(", %d ms)   sea level %.2f hPa\n", info.conv_ms, SEA_LEVEL_PA / 100.0f);
+    }
     if (humid) {
         printf("%8s %11s %10s %7s\n", "T[C]", "P[hPa]", "alt[m]", "RH[%]");
     } else {
@@ -597,34 +716,24 @@ static int run_bmx280(i2c_master_dev_handle_t dev, int chip_addr, baro_chip_t ch
     }
 
     for (int i = 0; i < count; i++) {
-        int32_t adc_t = 0, adc_p = 0, adc_h = 0;
-        if (bmx280_measure(dev, chip, &o, &adc_t, &adc_p, &adc_h) != ESP_OK) {
+        baro_reading_t r;
+        if (baro_read(d, &r) != ESP_OK) {
             ESP_LOGE(TAG, "read failed at sample %d", i);
             return 1;
         }
-        if (adc_t == BMX280_SKIPPED_20BIT || adc_p == BMX280_SKIPPED_20BIT) {
-            ESP_LOGE(TAG, "sample %d came back empty (T 0x%05" PRIx32 ", P 0x%05" PRIx32
-                          ") - the conversion did not run", i, adc_t, adc_p);
-            return 1;
-        }
-
-        int32_t t_fine = bmx280_t_fine(&calib, adc_t);
-        float press_pa = 0;
-        if (!bmx280_press_pa(&calib, t_fine, adc_p, &press_pa)) {
-            ESP_LOGE(TAG, "pressure compensation divides by zero - bad calibration");
-            return 1;
-        }
-
-        printf("%8.2f %11.2f %10.1f", bmx280_temp_c(t_fine), press_pa / 100.0f,
-               altitude_m(press_pa));
-        if (humid) {
-            if (adc_h == BMX280_SKIPPED_16BIT) {
-                printf(" %7s", "-");
-            } else {
-                printf(" %7.1f", bmx280_humidity_pct(&calib, t_fine, adc_h));
+        if (bmp180) {
+            printf("%8.1f %11.2f %10.1f\n", r.temp_c, r.pressure_pa / 100.0f, r.altitude_m);
+        } else {
+            printf("%8.2f %11.2f %10.1f", r.temp_c, r.pressure_pa / 100.0f, r.altitude_m);
+            if (humid) {
+                if (r.has_humidity) {
+                    printf(" %7.1f", r.humidity_pct);
+                } else {
+                    printf(" %7s", "-");
+                }
             }
+            printf("\n");
         }
-        printf("\n");
         fflush(stdout);
 
         if (i + 1 < count) {
@@ -633,8 +742,6 @@ static int run_bmx280(i2c_master_dev_handle_t dev, int chip_addr, baro_chip_t ch
     }
     return 0;
 }
-
-/* ---------------------------------------------------------------- console */
 
 static struct {
     struct arg_int *chip_address;
@@ -662,26 +769,25 @@ static int do_baro_cmd(int argc, char **argv)
         return 1;
     }
 
-    i2c_master_dev_handle_t dev = NULL;
-    int chip_addr = 0;
-    baro_chip_t chip;
-    esp_err_t err = baro_open(want_addr, &dev, &chip_addr, &chip);
-    if (err != ESP_OK) {
-        if (err == ESP_ERR_NOT_FOUND) {
-            if (want_addr >= 0) {
-                ESP_LOGE(TAG, "no response from 0x%02x - check wiring and 'i2cdetect'", want_addr);
-            } else {
-                ESP_LOGE(TAG, "no barometer at 0x77 or 0x76 - check wiring and 'i2cdetect'");
-            }
-        } else if (err == ESP_FAIL) {
-            ESP_LOGE(TAG, "could not add the device to the bus");
-        }
-        return 1;
-    }
+    /* The stream holds this chip while it runs; borrow it for the command. */
+    sensor_stream_pause();
 
-    int ret = (chip == BARO_CHIP_BMP180) ? run_bmp180(dev, chip_addr, count, interval, oss)
-                                         : run_bmx280(dev, chip_addr, chip, count, interval, oss);
-    i2c_master_bus_rm_device(dev);
+    int ret = 1;
+    baro_dev_t *d = NULL;
+    esp_err_t err = baro_attach(want_addr, oss, &d);
+    if (err == ESP_OK) {
+        ret = run_baro(d, count, interval);
+    } else if (err == ESP_ERR_NOT_FOUND) {
+        if (want_addr >= 0) {
+            ESP_LOGE(TAG, "no response from 0x%02x - check wiring and 'i2cdetect'", want_addr);
+        } else {
+            ESP_LOGE(TAG, "no barometer at 0x77 or 0x76 - check wiring and 'i2cdetect'");
+        }
+    } else if (err == ESP_FAIL) {
+        ESP_LOGE(TAG, "could not add the device to the bus");
+    }
+    baro_detach(d);
+    sensor_stream_resume();
     return ret;
 }
 
@@ -702,59 +808,4 @@ void register_baro(void)
         .argtable = &baro_args
     };
     ESP_ERROR_CHECK(esp_console_cmd_register(&baro_cmd));
-}
-
-/* Air temperature alone, for the 'ping' speed-of-sound correction. The
-   barometer is already on the bus, so exposing this is cheaper than making
-   the caller carry its own temperature source - and more honest than letting
-   an ultrasonic range be computed from an assumed 20 C.
-
-   BMP180: only B5 of Bosch's compensation matters here, so those three lines
-   are repeated rather than calling compensate() with a zero pressure reading,
-   which would underflow its unsigned B7 term. BMx280: one forced conversion
-   with pressure and humidity skipped. */
-esp_err_t baro_read_temperature_c(float *temp_c)
-{
-    if (temp_c == NULL) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    i2c_master_dev_handle_t dev = NULL;
-    int chip_addr = 0;
-    baro_chip_t chip;
-    esp_err_t err = baro_open(-1, &dev, &chip_addr, &chip);
-    if (err != ESP_OK) {
-        return err;
-    }
-
-    if (chip == BARO_CHIP_BMP180) {
-        struct bmp180_calib calib;
-        int32_t ut = 0;
-        err = read_calibration(dev, &calib);
-        if (err == ESP_OK) {
-            err = read_raw_temp(dev, &ut);
-        }
-        if (err == ESP_OK) {
-            int32_t x1 = ((ut - (int32_t)calib.ac6) * (int32_t)calib.ac5) >> 15;
-            int32_t x2 = ((int32_t)calib.mc << 11) / (x1 + (int32_t)calib.md);
-            *temp_c = (((x1 + x2) + 8) >> 4) / 10.0f;
-        }
-    } else {
-        const struct bmx280_osrs o = { .t = 2, .p = 0, .h = 0 };
-        struct bmx280_calib calib;
-        int32_t adc_t = 0, adc_p = 0, adc_h = 0;
-        err = bmx280_setup(dev, chip, &o, &calib);
-        if (err == ESP_OK) {
-            err = bmx280_measure(dev, chip, &o, &adc_t, &adc_p, &adc_h);
-        }
-        if (err == ESP_OK && adc_t == BMX280_SKIPPED_20BIT) {
-            err = ESP_ERR_INVALID_RESPONSE;
-        }
-        if (err == ESP_OK) {
-            *temp_c = bmx280_temp_c(bmx280_t_fine(&calib, adc_t));
-        }
-    }
-
-    i2c_master_bus_rm_device(dev);
-    return err;
 }

@@ -531,7 +531,8 @@ function wire() {
     const h = state.hist;
     plotAcc.draw(h.t, h.acc, 'g'); plotGyro.draw(h.t, h.gyro, '°/s');
     const senStale = state.senAt && performance.now() - state.senAt > 1500;
-    $('#sen-missing').hidden = state.senEverSeen && !senStale ? true : !(state.alive && !state.demo && !state.senEverSeen);
+    $('#sen-missing').hidden = !(state.alive && !state.demo && !state.senEverSeen);
+    $('#sen-stale').hidden = !(state.alive && state.senEverSeen && senStale);
     if (state.telAt && performance.now() - state.telAt > 1500 && state.alive) { state.alive = false; renderTower(); setPill('#pill-link', 'crit', 'STALE'); }
     if (state.cam.row && performance.now() - state.cam.rowAt > 2000 && performance.now() - state.cam.rowAt < 2300) renderCameraSide();
     requestAnimationFrame(frame);

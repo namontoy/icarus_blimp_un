@@ -24,6 +24,7 @@
 #include "net_wifi.h"
 #include "net_link.h"
 #include "net_console.h"
+#include "sensor_stream.h"
 
 static const char *TAG = "i2c-tools";
 
@@ -151,6 +152,7 @@ void app_main(void)
     register_motor();     /* already initialised above */
     register_wifi();
     register_link();
+    register_sensors();
     register_exit();
 
     /*
@@ -172,6 +174,22 @@ void app_main(void)
         }
     }
 
+    /*
+     * The sensor stream feeds the link's SENSORS packet, so it starts after
+     * the link. It samples through the same drivers as the console commands
+     * and hands the chips over whenever one of them runs (sensor_stream.h).
+     * CONFIG_SENSOR_STREAM_AT_BOOT=n leaves the chips untouched until
+     * 'sensors --on'. Not fatal either: the console commands still work.
+     */
+#if CONFIG_SENSOR_STREAM_AT_BOOT
+    const bool stream_at_boot = true;
+#else
+    const bool stream_at_boot = false;   /* a disabled Kconfig bool is undefined, not 0 */
+#endif
+    if (sensor_stream_start(stream_at_boot) != ESP_OK) {
+        ESP_LOGE(TAG, "sensor stream unavailable - console sensor commands only");
+    }
+
     /* Status LED runs in its own task, so the REPL below stays responsive. */
     led_blink_start();
 
@@ -191,7 +209,8 @@ void app_main(void)
     printf(" | 11. Try 'motor' to drive the DRV8833 thrusters             |\n");
     printf(" | 12. Try 'wifi' and 'link' for the Wi-Fi ground link        |\n");
     printf(" |     (software/blimp_link.py runs all of this over the air) |\n");
-    printf(" | 13. Type 'exit' or 'quit' to see how to leave the monitor  |\n");
+    printf(" | 13. Try 'sensors' for the stream the ground station plots  |\n");
+    printf(" | 14. Type 'exit' or 'quit' to see how to leave the monitor  |\n");
     printf(" |                                                            |\n");
     printf(" ==============================================================\n\n");
 

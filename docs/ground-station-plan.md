@@ -112,17 +112,20 @@ JSON, one object per WebSocket message. Server to browser:
 Browser to server: `motor {cmd:[fl,rl,fr,rr]}`, `stop {brake}`, `con {line}`,
 `cam {action: connect|disconnect|grab|live|baud, ...}`.
 
-## 5. Data that does not exist yet: the sensor packet
+## 5. The sensor packet
 
-The firmware streams telemetry (motors, failsafe, link health) but its sensors are console
-commands that print text. The GUI needs a steady binary feed, so this branch defines
-`LINK_PKT_SENSORS` (0x82, 76 bytes) in `link_protocol.h` and `blimp_link.py`: accelerometer and
-gyroscope in g and deg/s, IMU temperature, magnetometer in gauss and heading, pressure,
-barometer temperature and pressure altitude, ToF range and status, and a `valid` bitmask so an
-absent sensor is never plotted as zero. `mock_blimp.py` sends it. The firmware does not yet:
-that needs `imu_read()`, `mag_read()`, `baro_read()` and `tof_read()` lifted out of the console
-commands and a sampling task that feeds `net_link.c`, the sensor-fusion plan's Phase 2. Until
-then the sensor panels show the mock, and the real blimp shows them empty with a note.
+The firmware streams telemetry (motors, failsafe, link health) and, since 2026-10-24, its
+sensors. `LINK_PKT_SENSORS` (0x82, 76 bytes) in `link_protocol.h` and `blimp_link.py` carries
+the accelerometer and gyroscope in g and deg/s, IMU temperature, magnetometer in gauss and
+heading, pressure, barometer temperature and altitude relative to the first reading since
+boot, ToF range and status, and a `valid` bitmask so an absent sensor is never plotted as
+zero. On the blimp, `sensor_stream.c` samples through the same attach/read/detach drivers as
+the console commands (`imu`, `mag`, `baro`, `tof`; 20 Hz, the barometer at 4 Hz) and
+`net_link.c` sends one packet per new sample after each telemetry packet. A console sensor
+command borrows the chips for its run and the stream pauses, which the page shows as an
+orange notice after 1.5 s without a packet. `mock_blimp.py` sends the same packet for work
+without hardware. The stream has not run on hardware yet; `sensors` on the console reports
+what it found.
 
 ## 6. Safety, end to end
 
@@ -153,11 +156,11 @@ rows will come through the S3 over UDP instead, and only the back end's source c
 | Phase | Content | Status |
 |---|---|---|
 | 1 | Sensor packet in the protocol, mock sends it | done 2026-10-23 |
-| 2 | Back end: Tornado server, blimp bridge with the deadman, demo source, console relay | in progress |
-| 3 | Front end: layout, identity, motors, sensors, camera, console, events, keyboard | in progress |
+| 2 | Back end: Tornado server, blimp bridge with the deadman, demo source, console relay | done 2026-10-23 |
+| 3 | Front end: layout, identity, motors, sensors, camera, console, events, keyboard | done 2026-10-23; first run against the blimp 2026-10-24 (link and motors live, sensors empty) |
 | 4 | Camera over serial with the tcview parser | after the `target-cam` branch merges |
-| 5 | Firmware: sensor task and `LINK_PKT_SENSORS` | next firmware job |
-| 6 | Bench: run against the real blimp, record what the page gets wrong | after flashing |
+| 5 | Firmware: sensor task and `LINK_PKT_SENSORS` | done 2026-10-24 (`sensor_stream.c`), not yet run on hardware |
+| 6 | Bench: run against the real blimp with the stream, record what the page gets wrong | next |
 | 7 | Logging to CSV, parameter tuning from the page, Spanish labels if wanted | later |
 
 ## 9. Running it

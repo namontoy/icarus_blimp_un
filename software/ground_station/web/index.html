@@ -117,7 +117,10 @@
     </div>
     <div class="panel-body">
       <div class="notice" id="sen-missing" hidden>
-        The firmware does not stream sensors yet (plan §5); these panels fill once <code>LINK_PKT_SENSORS</code> lands. Meanwhile the console works: <code>imu -n 3</code>, <code>tof -n 3</code>.
+        No sensor packet from the blimp yet. The firmware streams its sensors from boot; <code>sensors</code> in the console shows what it found, and <code>sensors --on</code> starts the stream if it is off.
+      </div>
+      <div class="notice" id="sen-stale" hidden>
+        Sensor stream paused: no packet for more than 1.5 s. A console sensor command (<code>imu</code>, <code>mag</code>, <code>baro</code>, <code>tof</code>) borrows the chips while it runs; otherwise ask <code>sensors</code>.
       </div>
 
       <div class="block">

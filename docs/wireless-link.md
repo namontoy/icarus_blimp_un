@@ -50,11 +50,15 @@ New files in `firmware/projects/i2c_tools/main/`:
 | `net_wifi.c/.h` | NVS, netif, Wi-Fi driver, the access point; `wifi` command (`--start`, `--stop`, status with stations and RSSI) |
 | `net_link.c/.h` | UDP packet task: commands in, telemetry out at a fixed rate, link timeout; `link` command |
 | `net_console.c/.h` | The console over UDP: one command line per datagram, output back as datagrams, closed by a 0x04 byte |
+| `sensor_stream.c/.h` | Added 2026-10-24: samples every sensor at a fixed rate for the `SENSORS` packet; `sensors` command; the pause/resume lease that console sensor commands take |
 
 Changed: `cmd_motor.h/.c` gain `motors_failsafe_state()` (off / idle / armed / tripped) for
 telemetry; `app_main` registers the two commands and starts the link after every other
 command is registered; `main/CMakeLists.txt`; `Kconfig.projbuild` gets a "Wireless link" menu;
-`partitions_example.csv` gives the app 2 MB (section 9).
+`partitions_example.csv` gives the app 2 MB (section 9). For the sensor stream, `cmd_imu.c`,
+`cmd_mag.c`, `cmd_baro.c` and `cmd_tof.c` were split into an attach/read/detach driver and a
+console command that loops over it, with the same configuration, scaling and messages as
+before, and `i2cconfig` pauses the stream while it recreates the bus.
 
 Host side, standard library only: `software/blimp_link.py` (the ground tool) and
 `software/mock_blimp.py` (the firmware's link behaviour on localhost, for development without
@@ -95,6 +99,7 @@ u32 crc32   over the whole struct with this field zeroed; zlib/PNG CRC-32
 | `0x02 MOTOR_SET` | host → blimp | `f32 cmd[4]`, FL RL FR RR (`motor_id_t` order), −1..+1, 0 coasts | 28 B |
 | `0x03 MOTOR_STOP` | host → blimp | `u8 brake` | 16 B |
 | `0x81 TELEMETRY` | blimp → host | `u32 t_us`, `f32 motor_cmd[4]`, `u8 failsafe`, `u8 link_alive`, `u8 link_motors`, `u8 stations`, `u32 rx_ok`, `u32 rx_bad`, `u32 free_heap`, `u16 link_age_ms` | 52 B |
+| `0x82 SENSORS` | blimp → host | `u32 t_us`, `f32 acc[3]` g, `f32 gyro[3]` dps, `f32 imu_temp_c`, `f32 mag[3]` gauss, `f32 heading_deg`, `f32 pressure_pa`, `f32 baro_temp_c`, `f32 baro_alt_m` (relative to the first reading), `u16 tof_mm`, `u8 tof_status`, `u8 valid` (IMU 1, MAG 2, BARO 4, TOF 8) | 76 B |
 
 Anything with the wrong size for its type, another magic or version, or a bad CRC is counted in
 `rx_bad` and ignored. There are no acknowledgements: the telemetry's `motor_cmd` readback is
@@ -190,6 +195,11 @@ Props off. USB console open in a second window so the logs are visible.
    telemetry running, and during a `motor` run. Record the figures here.
 10. Range: walk the laptop to the far end of the room with `status` running; note where
     `rx_bad` or gaps appear.
+11. Sensor stream: `sensors` on USB lists what it found (expect the MPU-6050, the QMC5883L,
+    the BME280 and the VL53L1X). With the ground station page open, the four sensor blocks
+    fill within a second of the link coming up. Type `imu -n 3` in the page's console: the
+    panels show the orange "paused" notice while the command runs, then resume with the same
+    numbers the command printed. `link` on USB counts the `SENSORS` packets separately.
 
 ## 9. What is proven and what is not
 
@@ -199,7 +209,9 @@ Props off. USB console open in a second window so the logs are visible.
 | Packet codec round-trips, rejects truncation, bit flips, wrong magic and version | ✅ `blimp_link.py selftest` |
 | Host tool drives the protocol end to end, including both timers | ✅ against `mock_blimp.py` on localhost |
 | CRC-32 implementation in C matches zlib | reasoned: same algorithm; the check value in the header is the test to run on target |
-| Access point comes up, laptop associates, DHCP works | ❓ not run on hardware |
+| Access point comes up, laptop associates, DHCP works | ✅ 2026-10-24: the laptop joined and the ground station page received telemetry |
+| `SENSORS` packet carries the real readings (`sensor_stream.c`) | ❓ built 2026-10-24, not run on hardware; the page decodes the same layout from the mock |
+| Console sensor commands and the stream share the chips by turns (`sensor_stream_pause()`) | reasoned from the `i2c_master` and ULD port sources; ❓ not run |
 | Per-task `stdout` redirection captures command output | reasoned from the newlib/FreeRTOS sources; ❓ not run |
 | `ESP_LOGx` printed inside a command reaches the UDP console | ❓ depends on the log sink being `vprintf` on the calling task; verify with `imu -c 0x69` (deliberate wrong address) |
 | Link timeout and motor failsafe behave as in section 5 | ✅ in the mock; ❓ on hardware |
@@ -207,11 +219,11 @@ Props off. USB console open in a second window so the logs are visible.
 | Image fits its partition | ✅ measured 2026-10-21: 929 KB (`-Og` debug build) in the factory partition, which `partitions_example.csv` grows from 1 MB (11 % free) to 2 MB (56 % free); the FAT `storage` partition moves up and reformats once |
 | 2.4 GHz behaviour at the venue | ❓ unknown; channel is a Kconfig setting for that reason |
 
-Not in this first cut, planned next: sensor streams (IMU, ToF) as their own telemetry packet,
-which needs `imu_read()`/`tof_read()` functions lifted out of the console commands (the
-sensor-fusion plan's Phase 2); a GUI on top of `blimp_link.py`, reusing the skeleton of the
-esp-drone tool as `docs/esp-drone-tools-report.md` section 8 suggests; an arm step if the key
-alone turns out to be too little.
+Built since the first cut: the sensor stream (`sensor_stream.c` sampling through the
+attach/read/detach drivers lifted out of `cmd_imu.c`, `cmd_mag.c`, `cmd_baro.c` and `cmd_tof.c`,
+sent as the `SENSORS` packet, 2026-10-24) and the ground station page
+(`software/ground_station/`, design in `docs/ground-station-plan.md`, 2026-10-23). Still
+planned: an arm step if the key alone turns out to be too little.
 
 ## 10. Building on Windows
 

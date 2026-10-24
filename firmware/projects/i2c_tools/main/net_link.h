@@ -29,7 +29,8 @@ typedef struct {
     uint32_t age_ms;        /* since the last valid packet                  */
     uint32_t rx_ok;
     uint32_t rx_bad;
-    uint32_t tx;
+    uint32_t tx;            /* every packet sent, telemetry and sensors     */
+    uint32_t tx_sensors;    /* SENSORS packets among them                   */
 } net_link_status_t;
 
 void net_link_get_status(net_link_status_t *out);

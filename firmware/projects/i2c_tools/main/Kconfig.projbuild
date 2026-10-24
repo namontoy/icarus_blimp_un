@@ -201,3 +201,32 @@ menu "Wireless link (Wi-Fi access point + UDP)"
         default 20
 
 endmenu
+
+menu "Sensor stream (the packet the ground station plots)"
+
+    # sensor_stream.c samples every sensor through the same drivers as the
+    # console commands and hands the latest reading to net_link.c, which
+    # sends it as LINK_PKT_SENSORS. A console sensor command pauses the
+    # stream and takes the chip for its own run either way.
+
+    config SENSOR_STREAM_AT_BOOT
+        bool "Sample the sensors from boot"
+        default y
+        help
+            Off, nothing touches the chips until 'sensors --on' is typed, for
+            a bench where the console commands should own them, or to keep
+            the bus quiet while probing the sensor rail.
+
+    config SENSOR_STREAM_HZ
+        int "Sample and packet rate in Hz"
+        range 1 50
+        default 20
+        help
+            The IMU, the magnetometer and the rangefinder are polled at this
+            rate; the barometer runs on its own slower schedule, see
+            sensor_stream.c. Bounded above by the 10 ms FreeRTOS tick: 50 Hz
+            is two ticks. The link sends at most one SENSORS packet per
+            telemetry tick (NET_LINK_TELEMETRY_HZ), so a faster stream only
+            means fresher samples, not more packets.
+
+endmenu

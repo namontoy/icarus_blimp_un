@@ -44,6 +44,7 @@
 #include "link_protocol.h"
 #include "net_link.h"
 #include "net_wifi.h"
+#include "sensor_stream.h"
 
 static const char *TAG = "net_link";
 
@@ -68,6 +69,8 @@ static struct {
     volatile uint32_t  tx;
     uint16_t           tx_seq;
     volatile bool      link_motors;   /* standing commands came over the air */
+    uint32_t           sensors_seq;   /* the stream's sample last sent       */
+    volatile uint32_t  tx_sensors;
 } s;
 
 /* --------------------------------------------------------------- receive */
@@ -194,13 +197,21 @@ static void check_link_timeout(int64_t now)
 
 /* ------------------------------------------------------------- telemetry */
 
-static void send_telemetry(int64_t now)
+/* The blimp answers the last valid sender, and keeps answering for a while
+   after it goes quiet, so a host that paused still sees the link go stale. */
+static bool peer_listening(int64_t now, int64_t *age_ms)
 {
     if (!s.have_peer) {
-        return;
+        return false;
     }
-    int64_t age_ms = (now - s.last_rx_us) / 1000;
-    if (age_ms > (int64_t)CONFIG_NET_LINK_TIMEOUT_MS * LINK_PEER_HOLD_MULT) {
+    *age_ms = (now - s.last_rx_us) / 1000;
+    return *age_ms <= (int64_t)CONFIG_NET_LINK_TIMEOUT_MS * LINK_PEER_HOLD_MULT;
+}
+
+static void send_telemetry(int64_t now)
+{
+    int64_t age_ms = 0;
+    if (!peer_listening(now, &age_ms)) {
         return;
     }
 
@@ -230,6 +241,42 @@ static void send_telemetry(int64_t now)
     }
 }
 
+/*
+ * The sensor stream's newest sample, once per sample. sensor_stream.c keeps
+ * the latest reading and a sequence number; this sends it when the number
+ * has moved. The stream and the telemetry tick run at the same rate by
+ * default, so one SENSORS packet follows each TELEMETRY. While the stream is
+ * paused by a console command, or off, nothing is sent, and the ground
+ * station shows the gap rather than a frozen number.
+ */
+static void send_sensors(int64_t now)
+{
+    int64_t age_ms = 0;
+    if (!peer_listening(now, &age_ms)) {
+        return;
+    }
+    link_sensors_t p;
+    uint32_t seq = 0;
+    if (!sensor_stream_latest(&p, &seq) || seq == s.sensors_seq) {
+        return;
+    }
+    s.sensors_seq = seq;
+
+    p.h.magic     = LINK_PROTO_MAGIC;
+    p.h.version   = LINK_PROTO_VERSION;
+    p.h.type      = LINK_PKT_SENSORS;
+    p.h.seq       = s.tx_seq++;
+    p.h._reserved = 0;
+    p.crc32       = 0;
+    p.crc32       = link_crc32(&p, sizeof(p));
+
+    int sent = sendto(s.sock, &p, sizeof(p), 0, (struct sockaddr *)&s.peer, sizeof(s.peer));
+    if (sent == (int)sizeof(p)) {
+        s.tx++;
+        s.tx_sensors++;
+    }
+}
+
 /* ------------------------------------------------------------------ task */
 
 static void link_task(void *arg)
@@ -250,6 +297,7 @@ static void link_task(void *arg)
         check_link_timeout(now);
         if (now >= next_tx_us) {
             send_telemetry(now);
+            send_sensors(now);
             next_tx_us += period_us;
             if (next_tx_us < now) {     /* fell behind: resync, don't burst */
                 next_tx_us = now + period_us;
@@ -302,6 +350,7 @@ void net_link_get_status(net_link_status_t *out)
     out->rx_ok       = s.rx_ok;
     out->rx_bad      = s.rx_bad;
     out->tx          = s.tx;
+    out->tx_sensors  = s.tx_sensors;
     if (s.have_peer) {
         int64_t age = (esp_timer_get_time() - s.last_rx_us) / 1000;
         out->age_ms = age < 0 ? 0 : (uint32_t)age;
@@ -332,8 +381,8 @@ static int do_link_cmd(int argc, char **argv)
         printf("peer %s   %s, last packet %" PRIu32 " ms ago\n", st.peer,
                st.alive ? "alive" : "STALE", st.age_ms);
     }
-    printf("rx ok %" PRIu32 "   rx rejected %" PRIu32 "   tx %" PRIu32 "\n",
-           st.rx_ok, st.rx_bad, st.tx);
+    printf("rx ok %" PRIu32 "   rx rejected %" PRIu32 "   tx %" PRIu32
+           " (of which sensors %" PRIu32 ")\n", st.rx_ok, st.rx_bad, st.tx, st.tx_sensors);
     printf("motors %s\n", st.link_motors ? "driven over the link" : "not driven over the link");
     return 0;
 }

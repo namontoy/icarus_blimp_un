@@ -1,5 +1,5 @@
 /*
- * 'mag' console command: decoded magnetometer readings.
+ * 'mag' console command and the magnetometer driver behind it.
  *
  * Two chips are supported. The HMC5883L (Honeywell) is the one on the GY-88
  * carrier. The QMC5883L (QST) is what most stand-alone "HMC5883L" breakouts
@@ -8,14 +8,17 @@
  * 0x1E), the register map, the byte order and the scale. The one that
  * replaced the burned GY-88 on 2026-10-22 is such a board.
  *
- * With no address given the command probes 0x1E and then 0x0D, and picks the
- * driver from the chip's identification registers ("H43" on the HMC5883L,
- * 0xFF in register 0x0D on the QMC5883L), not from the address alone.
+ * With no address given the driver probes 0x1E and then 0x0D, and picks the
+ * chip from its identification registers ("H43" on the HMC5883L, 0xFF in
+ * register 0x0D on the QMC5883L), not from the address alone.
  *
  * Shares the bus that 'i2cconfig' set up, like the rest of the tool.
+ * mag_attach() / mag_read() / mag_detach() are the driver; the command below
+ * and the sensor stream (sensor_stream.c) are its two callers.
  */
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <math.h>
 #include "argtable3/argtable3.h"
 #include "driver/i2c_master.h"
@@ -25,6 +28,7 @@
 #include "freertos/task.h"
 #include "cmd_i2ctools.h"
 #include "cmd_mag.h"
+#include "sensor_stream.h"
 
 static const char *TAG = "cmd_mag";
 
@@ -43,8 +47,6 @@ static const char *TAG = "cmd_mag";
 /* 8 samples averaged, 15 Hz output, normal measurement bias. */
 #define HMC5883L_CONFIG_A_DEFAULT 0x70
 #define HMC5883L_STATUS_RDY       0x01
-/* 15 Hz means a sample every ~67 ms; well inside this. */
-#define HMC5883L_DRDY_TIMEOUT_MS  500
 /* Returned on any axis whose field exceeded the selected gain. */
 #define HMC5883L_OVERFLOW       (-4096)
 
@@ -74,8 +76,10 @@ static const char *TAG = "cmd_mag";
 #define QMC5883L_CONTROL_1_DEFAULT 0x15
 #define QMC5883L_LSB_PER_GAUSS  3000.0f
 #define QMC5883L_RANGE_GAUSS    8.0f
-/* 50 Hz means a sample every 20 ms. */
-#define QMC5883L_DRDY_TIMEOUT_MS 500
+
+/* The HMC5883L at 15 Hz means a sample every ~67 ms, the QMC5883L at 50 Hz
+   every 20 ms; both well inside this. */
+#define MAG_DRDY_TIMEOUT_MS     500
 
 /* Datasheet gain table, indexed by the GN field of CONFIG_B. */
 static const float mag_lsb_per_gauss[8] = {
@@ -85,10 +89,12 @@ static const float mag_range_gauss[8] = {
     0.88f, 1.3f, 1.9f, 2.5f, 4.0f, 4.7f, 5.6f, 8.1f
 };
 
-typedef enum {
-    MAG_CHIP_HMC5883L,
-    MAG_CHIP_QMC5883L,
-} mag_chip_t;
+struct mag_dev {
+    i2c_master_dev_handle_t dev;
+    int        addr;
+    mag_chip_t chip;
+    int        gn;      /* HMC5883L gain field, read back after configuring */
+};
 
 static esp_err_t reg_read(i2c_master_dev_handle_t dev, uint8_t reg, uint8_t *buf, size_t len)
 {
@@ -99,19 +105,6 @@ static esp_err_t reg_write(i2c_master_dev_handle_t dev, uint8_t reg, uint8_t val
 {
     uint8_t out[2] = { reg, val };
     return i2c_master_transmit(dev, out, sizeof(out), MAG_TIMEOUT_MS);
-}
-
-/* One table row in the common format. Units: uT; 1 Gauss = 100 uT, and
-   Earth's field is roughly 25-65 uT. The heading assumes the chip lies flat,
-   with its own X axis forward. */
-static void print_field(float fx, float fy, float fz)
-{
-    float heading = atan2f(fy, fx) * 180.0f / (float)M_PI;
-    if (heading < 0) {
-        heading += 360.0f;
-    }
-    printf("%9.2f %9.2f %9.2f %9.2f %9.1f\n",
-           fx, fy, fz, sqrtf(fx * fx + fy * fy + fz * fz), heading);
 }
 
 /* ------------------------------------------------------------- detection */
@@ -146,6 +139,9 @@ static esp_err_t mag_open(int want_addr, i2c_master_dev_handle_t *dev, int *addr
     const int candidates[2] = { HMC5883L_ADDR_DEFAULT, QMC5883L_ADDR_DEFAULT };
     const int n = (want_addr >= 0) ? 1 : 2;
 
+    if (tool_bus_handle == NULL) {
+        return ESP_ERR_NOT_FOUND;
+    }
     for (int i = 0; i < n; i++) {
         int a = (want_addr >= 0) ? want_addr : candidates[i];
         if (i2c_master_probe(tool_bus_handle, a, MAG_TIMEOUT_MS) != ESP_OK) {
@@ -176,172 +172,251 @@ static esp_err_t mag_open(int want_addr, i2c_master_dev_handle_t *dev, int *addr
 
 /* --------------------------------------------------------------- HMC5883L */
 
-static int run_hmc5883l(i2c_master_dev_handle_t dev, int chip_addr, int count, int interval)
+static esp_err_t hmc5883l_configure(mag_dev_t *d)
 {
     /* Set the output rate explicitly rather than inheriting whatever the chip
        happens to hold. An ESP32 reset does not power-cycle this sensor, so its
        config survives a reflash and the first run after a cold power-up starts
        from different state than every run after it. */
-    if (reg_write(dev, HMC5883L_REG_CONFIG_A, HMC5883L_CONFIG_A_DEFAULT) != ESP_OK) {
+    if (reg_write(d->dev, HMC5883L_REG_CONFIG_A, HMC5883L_CONFIG_A_DEFAULT) != ESP_OK) {
         ESP_LOGE(TAG, "failed to set the output rate");
-        return 1;
+        return ESP_ERR_INVALID_RESPONSE;
     }
     /* Continuous mode keeps fresh samples coming without re-triggering each
        read. The power-on default is single-measurement, which takes one
        reading and then idles - leaving the data registers static. */
-    if (reg_write(dev, HMC5883L_REG_MODE, HMC5883L_MODE_CONTINUOUS) != ESP_OK) {
+    if (reg_write(d->dev, HMC5883L_REG_MODE, HMC5883L_MODE_CONTINUOUS) != ESP_OK) {
         ESP_LOGE(TAG, "failed to select continuous mode");
-        return 1;
+        return ESP_ERR_INVALID_RESPONSE;
     }
     uint8_t mode_check = 0xFF;
-    if (reg_read(dev, HMC5883L_REG_MODE, &mode_check, 1) != ESP_OK ||
+    if (reg_read(d->dev, HMC5883L_REG_MODE, &mode_check, 1) != ESP_OK ||
         (mode_check & 0x03) != HMC5883L_MODE_CONTINUOUS) {
         ESP_LOGE(TAG, "mode register reads 0x%02x, not continuous - aborting rather "
                       "than printing a frozen sample repeatedly", mode_check);
-        return 1;
+        return ESP_ERR_INVALID_STATE;
     }
     vTaskDelay(pdMS_TO_TICKS(100)); // first conversion after a mode change
 
     /* Read the gain back rather than assuming the reset default, so scaling
        stays correct if it was changed with 'i2cset'. */
     uint8_t conf_b = 0;
-    if (reg_read(dev, HMC5883L_REG_CONFIG_B, &conf_b, 1) != ESP_OK) {
+    if (reg_read(d->dev, HMC5883L_REG_CONFIG_B, &conf_b, 1) != ESP_OK) {
         ESP_LOGE(TAG, "failed to read the gain configuration");
-        return 1;
+        return ESP_ERR_INVALID_RESPONSE;
     }
-    int gn = (conf_b >> 5) & 0x07;
-
-    printf("HMC5883L @ 0x%02x   range +/-%.2f Ga   %.0f LSB/Ga\n",
-           chip_addr, mag_range_gauss[gn], mag_lsb_per_gauss[gn]);
-    printf("%9s %9s %9s %9s %9s\n", "mx[uT]", "my[uT]", "mz[uT]", "|m|[uT]", "hdg[deg]");
-
-    for (int i = 0; i < count; i++) {
-        /* Wait for DRDY instead of trusting the interval. Reading the data
-           registers clears this bit, so it only comes back when the chip has
-           actually taken a new measurement - which turns a frozen sensor into
-           a reported error rather than a plausible-looking repeated row. */
-        uint8_t status = 0;
-        int waited_ms = 0;
-        while (1) {
-            if (reg_read(dev, HMC5883L_REG_STATUS, &status, 1) != ESP_OK) {
-                ESP_LOGE(TAG, "status read failed at sample %d", i);
-                return 1;
-            }
-            if (status & HMC5883L_STATUS_RDY) {
-                break;
-            }
-            if (waited_ms >= HMC5883L_DRDY_TIMEOUT_MS) {
-                ESP_LOGE(TAG, "no new sample after %d ms (status 0x%02x) - the sensor "
-                              "is not measuring", HMC5883L_DRDY_TIMEOUT_MS, status);
-                return 1;
-            }
-            vTaskDelay(pdMS_TO_TICKS(10));
-            waited_ms += 10;
-        }
-
-        /* Data registers are X, then Z, then Y - not X, Y, Z. */
-        uint8_t raw[6];
-        if (reg_read(dev, HMC5883L_REG_DATA_X_H, raw, sizeof(raw)) != ESP_OK) {
-            ESP_LOGE(TAG, "read failed at sample %d", i);
-            return 1;
-        }
-
-        int16_t mx = (int16_t)((raw[0] << 8) | raw[1]);
-        int16_t mz = (int16_t)((raw[2] << 8) | raw[3]);
-        int16_t my = (int16_t)((raw[4] << 8) | raw[5]);
-
-        if (mx == HMC5883L_OVERFLOW || my == HMC5883L_OVERFLOW || mz == HMC5883L_OVERFLOW) {
-            printf("%9s %9s %9s %9s %9s  (overflow - raise the gain range)\n",
-                   "-", "-", "-", "-", "-");
-        } else {
-            print_field(mx * 100.0f / mag_lsb_per_gauss[gn],
-                        my * 100.0f / mag_lsb_per_gauss[gn],
-                        mz * 100.0f / mag_lsb_per_gauss[gn]);
-        }
-        fflush(stdout);
-
-        if (i + 1 < count) {
-            vTaskDelay(pdMS_TO_TICKS(interval));
-        }
-    }
-    return 0;
+    d->gn = (conf_b >> 5) & 0x07;
+    return ESP_OK;
 }
 
 /* --------------------------------------------------------------- QMC5883L */
 
-static int run_qmc5883l(i2c_master_dev_handle_t dev, int chip_addr, int count, int interval)
+static esp_err_t qmc5883l_configure(mag_dev_t *d)
 {
     /* Soft reset first, for the same reason the HMC5883L path writes its
        config every run: an ESP32 reset does not reach this chip, so whatever
        an earlier run or 'i2cset' left in it would otherwise carry over. */
-    if (reg_write(dev, QMC5883L_REG_CONTROL_2, QMC5883L_SOFT_RESET) != ESP_OK) {
+    if (reg_write(d->dev, QMC5883L_REG_CONTROL_2, QMC5883L_SOFT_RESET) != ESP_OK) {
         ESP_LOGE(TAG, "soft reset failed");
-        return 1;
+        return ESP_ERR_INVALID_RESPONSE;
     }
     vTaskDelay(2);   // at least one full 10 ms tick; power-on time is 350 us
 
-    if (reg_write(dev, QMC5883L_REG_SET_RESET, QMC5883L_SET_RESET_PERIOD) != ESP_OK ||
-        reg_write(dev, QMC5883L_REG_CONTROL_1, QMC5883L_CONTROL_1_DEFAULT) != ESP_OK) {
+    if (reg_write(d->dev, QMC5883L_REG_SET_RESET, QMC5883L_SET_RESET_PERIOD) != ESP_OK ||
+        reg_write(d->dev, QMC5883L_REG_CONTROL_1, QMC5883L_CONTROL_1_DEFAULT) != ESP_OK) {
         ESP_LOGE(TAG, "failed to write the configuration");
-        return 1;
+        return ESP_ERR_INVALID_RESPONSE;
     }
     /* Range and mode decide the scale and whether samples keep coming, so
-       read both back and refuse to print numbers scaled by a guess. */
+       read both back and refuse to report numbers scaled by a guess. */
     uint8_t ctrl1 = 0, setreset = 0;
-    if (reg_read(dev, QMC5883L_REG_CONTROL_1, &ctrl1, 1) != ESP_OK ||
-        reg_read(dev, QMC5883L_REG_SET_RESET, &setreset, 1) != ESP_OK ||
+    if (reg_read(d->dev, QMC5883L_REG_CONTROL_1, &ctrl1, 1) != ESP_OK ||
+        reg_read(d->dev, QMC5883L_REG_SET_RESET, &setreset, 1) != ESP_OK ||
         ctrl1 != QMC5883L_CONTROL_1_DEFAULT || setreset != QMC5883L_SET_RESET_PERIOD) {
         ESP_LOGE(TAG, "configuration did not stick (control 1 reads 0x%02x, want 0x%02x; "
                       "set/reset 0x%02x) - aborting", ctrl1, QMC5883L_CONTROL_1_DEFAULT, setreset);
-        return 1;
+        return ESP_ERR_INVALID_STATE;
+    }
+    return ESP_OK;
+}
+
+/* ---------------------------------------------------------------- driver */
+
+esp_err_t mag_attach(int addr, mag_dev_t **out)
+{
+    if (out == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *out = NULL;
+
+    i2c_master_dev_handle_t dev = NULL;
+    int found = 0;
+    mag_chip_t chip = MAG_CHIP_HMC5883L;
+    esp_err_t err = mag_open(addr, &dev, &found, &chip);
+    if (err != ESP_OK) {
+        return err;
+    }
+    mag_dev_t *d = calloc(1, sizeof(*d));
+    if (d == NULL) {
+        i2c_master_bus_rm_device(dev);
+        return ESP_ERR_NO_MEM;
+    }
+    d->dev  = dev;
+    d->addr = found;
+    d->chip = chip;
+    err = (chip == MAG_CHIP_HMC5883L) ? hmc5883l_configure(d) : qmc5883l_configure(d);
+    if (err != ESP_OK) {
+        mag_detach(d);
+        return err;
+    }
+    *out = d;
+    return ESP_OK;
+}
+
+void mag_info(const mag_dev_t *d, mag_info_t *info)
+{
+    info->chip = d->chip;
+    info->addr = d->addr;
+    if (d->chip == MAG_CHIP_HMC5883L) {
+        info->name          = "HMC5883L";
+        info->range_gauss   = mag_range_gauss[d->gn];
+        info->lsb_per_gauss = mag_lsb_per_gauss[d->gn];
+    } else {
+        info->name          = "QMC5883L";
+        info->range_gauss   = QMC5883L_RANGE_GAUSS;
+        info->lsb_per_gauss = QMC5883L_LSB_PER_GAUSS;
+    }
+}
+
+esp_err_t mag_read(mag_dev_t *d, int timeout_ms, mag_reading_t *r)
+{
+    if (d == NULL || r == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    const bool hmc = (d->chip == MAG_CHIP_HMC5883L);
+    const uint8_t status_reg = hmc ? HMC5883L_REG_STATUS : QMC5883L_REG_STATUS;
+    const uint8_t ready_bit  = hmc ? HMC5883L_STATUS_RDY : QMC5883L_STATUS_DRDY;
+
+    /* Wait for DRDY instead of trusting an interval. Reading the data
+       registers clears this bit, so it only comes back when the chip has
+       actually taken a new measurement - which turns a frozen sensor into a
+       reported error rather than a plausible-looking repeated row. */
+    uint8_t status = 0;
+    int waited_ms = 0;
+    while (1) {
+        esp_err_t err = reg_read(d->dev, status_reg, &status, 1);
+        if (err != ESP_OK) {
+            return err;
+        }
+        if (status & ready_bit) {
+            break;
+        }
+        if (waited_ms >= timeout_ms) {
+            if (timeout_ms > 0) {
+                ESP_LOGE(TAG, "no new sample after %d ms (status 0x%02x) - the sensor "
+                              "is not measuring", timeout_ms, status);
+            }
+            return ESP_ERR_TIMEOUT;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+        waited_ms += 10;
     }
 
-    printf("QMC5883L @ 0x%02x   range +/-%.0f G   %.0f LSB/G   50 Hz, OSR 512\n",
-           chip_addr, QMC5883L_RANGE_GAUSS, QMC5883L_LSB_PER_GAUSS);
+    uint8_t raw[6];
+    int16_t mx, my, mz;
+    float lsb_per_gauss;
+    if (hmc) {
+        /* Data registers are X, then Z, then Y - not X, Y, Z. */
+        esp_err_t err = reg_read(d->dev, HMC5883L_REG_DATA_X_H, raw, sizeof(raw));
+        if (err != ESP_OK) {
+            return err;
+        }
+        mx = (int16_t)((raw[0] << 8) | raw[1]);
+        mz = (int16_t)((raw[2] << 8) | raw[3]);
+        my = (int16_t)((raw[4] << 8) | raw[5]);
+        r->overflow = (mx == HMC5883L_OVERFLOW || my == HMC5883L_OVERFLOW ||
+                       mz == HMC5883L_OVERFLOW);
+        lsb_per_gauss = mag_lsb_per_gauss[d->gn];
+    } else {
+        /* X, Y, Z in order, each little-endian - the opposite of the HMC5883L
+           on both counts. */
+        esp_err_t err = reg_read(d->dev, QMC5883L_REG_DATA_X_L, raw, sizeof(raw));
+        if (err != ESP_OK) {
+            return err;
+        }
+        mx = (int16_t)(raw[0] | (raw[1] << 8));
+        my = (int16_t)(raw[2] | (raw[3] << 8));
+        mz = (int16_t)(raw[4] | (raw[5] << 8));
+        /* The QMC5883L has no magic overflow value; it raises OVL instead,
+           and then the numbers are clipped, not measurements. */
+        r->overflow = (status & QMC5883L_STATUS_OVL) != 0;
+        lsb_per_gauss = QMC5883L_LSB_PER_GAUSS;
+    }
+
+    r->mx_gauss = mx / lsb_per_gauss;
+    r->my_gauss = my / lsb_per_gauss;
+    r->mz_gauss = mz / lsb_per_gauss;
+    float heading = atan2f(r->my_gauss, r->mx_gauss) * 180.0f / (float)M_PI;
+    if (heading < 0) {
+        heading += 360.0f;
+    }
+    r->heading_deg = heading;
+    return ESP_OK;
+}
+
+void mag_detach(mag_dev_t *d)
+{
+    if (d == NULL) {
+        return;
+    }
+    if (d->dev != NULL) {
+        i2c_master_bus_rm_device(d->dev);
+    }
+    free(d);
+}
+
+/* ---------------------------------------------------------------- console */
+
+/* One table row in the common format. Units: uT; 1 Gauss = 100 uT, and
+   Earth's field is roughly 25-65 uT. The heading assumes the chip lies flat,
+   with its own X axis forward. */
+static void print_field(const mag_reading_t *r)
+{
+    float fx = r->mx_gauss * 100.0f, fy = r->my_gauss * 100.0f, fz = r->mz_gauss * 100.0f;
+    printf("%9.2f %9.2f %9.2f %9.2f %9.1f\n",
+           fx, fy, fz, sqrtf(fx * fx + fy * fy + fz * fz), r->heading_deg);
+}
+
+static int run_mag(mag_dev_t *d, int count, int interval)
+{
+    mag_info_t info;
+    mag_info(d, &info);
+    if (info.chip == MAG_CHIP_HMC5883L) {
+        printf("HMC5883L @ 0x%02x   range +/-%.2f Ga   %.0f LSB/Ga\n",
+               info.addr, info.range_gauss, info.lsb_per_gauss);
+    } else {
+        printf("QMC5883L @ 0x%02x   range +/-%.0f G   %.0f LSB/G   50 Hz, OSR 512\n",
+               info.addr, info.range_gauss, info.lsb_per_gauss);
+    }
     printf("%9s %9s %9s %9s %9s\n", "mx[uT]", "my[uT]", "mz[uT]", "|m|[uT]", "hdg[deg]");
 
     for (int i = 0; i < count; i++) {
-        /* Same reasoning as the HMC5883L: DRDY only comes back after a new
-           measurement, and reading the data clears it. */
-        uint8_t status = 0;
-        int waited_ms = 0;
-        while (1) {
-            if (reg_read(dev, QMC5883L_REG_STATUS, &status, 1) != ESP_OK) {
-                ESP_LOGE(TAG, "status read failed at sample %d", i);
-                return 1;
-            }
-            if (status & QMC5883L_STATUS_DRDY) {
-                break;
-            }
-            if (waited_ms >= QMC5883L_DRDY_TIMEOUT_MS) {
-                ESP_LOGE(TAG, "no new sample after %d ms (status 0x%02x) - the sensor "
-                              "is not measuring", QMC5883L_DRDY_TIMEOUT_MS, status);
-                return 1;
-            }
-            vTaskDelay(pdMS_TO_TICKS(10));
-            waited_ms += 10;
+        mag_reading_t r;
+        esp_err_t err = mag_read(d, MAG_DRDY_TIMEOUT_MS, &r);
+        if (err == ESP_ERR_TIMEOUT) {
+            return 1;   /* mag_read already said why */
         }
-
-        /* X, Y, Z in order, each little-endian - the opposite of the HMC5883L
-           on both counts. */
-        uint8_t raw[6];
-        if (reg_read(dev, QMC5883L_REG_DATA_X_L, raw, sizeof(raw)) != ESP_OK) {
+        if (err != ESP_OK) {
             ESP_LOGE(TAG, "read failed at sample %d", i);
             return 1;
         }
-        int16_t mx = (int16_t)(raw[0] | (raw[1] << 8));
-        int16_t my = (int16_t)(raw[2] | (raw[3] << 8));
-        int16_t mz = (int16_t)(raw[4] | (raw[5] << 8));
 
-        /* The QMC5883L has no magic overflow value; it raises OVL instead,
-           and then the numbers are clipped, not measurements. */
-        if (status & QMC5883L_STATUS_OVL) {
-            printf("%9s %9s %9s %9s %9s  (overflow - field beyond +/-8 G)\n",
-                   "-", "-", "-", "-", "-");
+        if (r.overflow) {
+            printf("%9s %9s %9s %9s %9s  (overflow - %s)\n", "-", "-", "-", "-", "-",
+                   info.chip == MAG_CHIP_HMC5883L ? "raise the gain range"
+                                                  : "field beyond +/-8 G");
         } else {
-            print_field(mx * 100.0f / QMC5883L_LSB_PER_GAUSS,
-                        my * 100.0f / QMC5883L_LSB_PER_GAUSS,
-                        mz * 100.0f / QMC5883L_LSB_PER_GAUSS);
+            print_field(&r);
         }
         fflush(stdout);
 
@@ -351,8 +426,6 @@ static int run_qmc5883l(i2c_master_dev_handle_t dev, int chip_addr, int count, i
     }
     return 0;
 }
-
-/* ---------------------------------------------------------------- console */
 
 static struct {
     struct arg_int *chip_address;
@@ -373,24 +446,23 @@ static int do_mag_cmd(int argc, char **argv)
     int count     = mag_args.count->count    ? mag_args.count->ival[0]    : 10;
     int interval  = mag_args.interval->count ? mag_args.interval->ival[0] : 200;
 
-    i2c_master_dev_handle_t dev = NULL;
-    int chip_addr = 0;
-    mag_chip_t chip;
-    esp_err_t err = mag_open(want_addr, &dev, &chip_addr, &chip);
-    if (err != ESP_OK) {
-        if (err == ESP_FAIL) {
-            ESP_LOGE(TAG, "could not add the device to the bus");
-        } else if (want_addr >= 0) {
-            ESP_LOGE(TAG, "no response from 0x%02x - check wiring and 'i2cdetect'", want_addr);
-        } else {
-            ESP_LOGE(TAG, "no magnetometer at 0x1E or 0x0D - check wiring and 'i2cdetect'");
-        }
-        return 1;
-    }
+    /* The stream holds this chip while it runs; borrow it for the command. */
+    sensor_stream_pause();
 
-    int ret = (chip == MAG_CHIP_HMC5883L) ? run_hmc5883l(dev, chip_addr, count, interval)
-                                          : run_qmc5883l(dev, chip_addr, count, interval);
-    i2c_master_bus_rm_device(dev);
+    int ret = 1;
+    mag_dev_t *d = NULL;
+    esp_err_t err = mag_attach(want_addr, &d);
+    if (err == ESP_OK) {
+        ret = run_mag(d, count, interval);
+    } else if (err == ESP_FAIL) {
+        ESP_LOGE(TAG, "could not add the device to the bus");
+    } else if (err == ESP_ERR_NOT_FOUND && want_addr >= 0) {
+        ESP_LOGE(TAG, "no response from 0x%02x - check wiring and 'i2cdetect'", want_addr);
+    } else if (err == ESP_ERR_NOT_FOUND) {
+        ESP_LOGE(TAG, "no magnetometer at 0x1E or 0x0D - check wiring and 'i2cdetect'");
+    }
+    mag_detach(d);
+    sensor_stream_resume();
     return ret;
 }
 

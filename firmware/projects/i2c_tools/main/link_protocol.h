@@ -127,11 +127,12 @@ _Static_assert(sizeof(link_telemetry_t)  == 52, "telemetry layout");
  * per sensor (the barometer is slow, the ToF depends on its timing budget),
  * so the same reading may repeat across packets.
  *
- * Defined ahead of the firmware: as of 2026-10-23 only software/mock_blimp.py
- * sends it. The firmware needs read functions lifted out of cmd_imu.c,
- * cmd_mag.c, cmd_baro.c and cmd_tof.c first (the sensor-fusion plan's
- * Phase 2); when that lands, this layout is the contract. Adding a packet
- * type does not change LINK_PROTO_VERSION: older receivers reject it by type.
+ * Sent by net_link.c from the samples sensor_stream.c keeps, one packet per
+ * new sample, after each TELEMETRY. The stream pauses while a console sensor
+ * command runs, and then nothing is sent: a gap on the ground, never a
+ * frozen number. software/mock_blimp.py sends the same packet for work
+ * without hardware. Adding a packet type did not change LINK_PROTO_VERSION:
+ * older receivers reject it by type.
  */
 #define LINK_SENSORS_IMU    (1u << 0)
 #define LINK_SENSORS_MAG    (1u << 1)
@@ -148,7 +149,10 @@ typedef struct __attribute__((packed)) {
     float    heading_deg;              /* from the magnetometer, 0..360      */
     float    pressure_pa;
     float    baro_temp_c;
-    float    baro_alt_m;               /* pressure altitude, relative        */
+    float    baro_alt_m;               /* standard-atmosphere altitude minus
+                                        * the first reading since boot, so 0
+                                        * at the bench; 'baro' prints the
+                                        * absolute one                       */
     uint16_t tof_mm;
     uint8_t  tof_status;               /* ST ULD range status, 0 = valid     */
     uint8_t  valid;                    /* LINK_SENSORS_* bits                */
