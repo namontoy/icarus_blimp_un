@@ -300,6 +300,10 @@ def main(argv=None):
         sys.exit('the window needs pywebview: pip install pywebview   (or run with --browser)')
     mode = 'none' if a.no_browser else 'browser' if a.browser else \
         'window' if (a.window or window.available()) else 'browser'
+    if mode == 'browser' and not a.browser:
+        # The usual reason: a virtual environment whose Python lacks the package.
+        print('pywebview is not installed for %s: opening the browser instead '
+              '(pip install pywebview gives the window)' % sys.executable, flush=True)
 
     srv = Server(a)
     if mode == 'window':
