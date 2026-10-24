@@ -116,9 +116,16 @@ JSON, one object per WebSocket message. Server to browser:
 | `camstat` | camera link: connected, port, baud, rows/s, frames ok/bad | 2 Hz |
 | `con` / `con_end` | console output chunks and the end of a reply | as it arrives |
 | `ev` | `{level, text}` for the event log | as they happen |
+| `wifistat` | this computer's Wi-Fi toward the blimp: `backend`, `joined`, `ip`, `ssid`, `busy`, `phase`, `error`, `candidates` | in `hello`, on change (checked every 2 s), after a join or leave |
 
 Browser to server: `motor {cmd:[fl,rl,fr,rr]}`, `stop {brake}`, `con {line}`,
-`cam {action: connect|disconnect|grab|live|baud, ...}`.
+`cam {action: connect|disconnect|grab|live|baud, ...}`, `wifi {action: connect|disconnect}`.
+
+The page opens in its own window when pywebview is installed (`window.py`; `--browser` for
+the system browser instead), and the header's **Join blimp Wi-Fi** button has the back end
+join the `ICARUS-…` access point (`wifi.py`: `netsh wlan` on Windows by profile name, since
+Windows 11 withholds scans from consoles without location services; `nmcli` on Linux as in
+`software/drone_gui.py`). Both added 2026-10-24.
 
 ## 5. The sensor packet
 

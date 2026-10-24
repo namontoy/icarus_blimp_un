@@ -5,17 +5,40 @@ Python back end that talks to the S3 firmware over its Wi-Fi access point and to
 over serial. Design, message formats and the safety chain: `docs/ground-station-plan.md`.
 
 ```
-pip install tornado pyserial                   # once; pyserial only for the camera
+pip install tornado pywebview pyserial         # once; pywebview for the window, pyserial for the camera
 
 python -m software.ground_station --demo       # no hardware: mock blimp + demo camera, from the repo root
-python -m software.ground_station              # the real blimp (join its Wi-Fi first), no camera
+python -m software.ground_station              # the real blimp, no camera; "Join blimp Wi-Fi" is in the header
 python -m software.ground_station --cam COM5   # plus the camera on a serial port (/dev/ttyUSB0 on Linux)
+python -m software.ground_station --browser    # the system browser instead of the window
 python -m software.ground_station --bind 0.0.0.0   # also lets a tablet on the same Wi-Fi open the page
 ```
 
-It prints `http://127.0.0.1:8765/` and opens it. The page also runs with no back end at all
-(open `web/index.html` from disk, or add `?demo` to the address): it then shows demo data and
-says so with an orange DEMO DATA pill. That copy of the page never reaches a blimp.
+With pywebview installed it opens as its own window (WebView2 on Windows, WebKitGTK on
+Linux): no tabs or address bar, and ⛶ or F11 goes full screen. Without it, or with
+`--browser`, it prints `http://127.0.0.1:8765/` and opens the browser. The page also runs
+with no back end at all (open `web/index.html` from disk, or add `?demo` to the address): it
+then shows demo data and says so with an orange DEMO DATA pill. That copy never reaches a
+blimp.
+
+## Joining the blimp's Wi-Fi from the page
+
+**Join blimp Wi-Fi** in the header makes this computer join the `ICARUS-…` access point and
+the WI-FI pill shows its address on that network (192.168.4.x); the button then reads
+**Leave**. The join is done by the back end (`wifi.py`): `netsh wlan` on Windows, `nmcli` on
+Linux as `software/drone_gui.py` does it, and the pill is judged from the computer's own
+address toward the blimp, so a network joined by hand shows as joined too.
+
+- **Windows 11** no longer lets a console list networks or report the current SSID unless
+  location services are on for console apps, so the back end never relies on a scan. It joins
+  by profile name: a profile left by a manual join, or `--wifi-ssid ICARUS-XXXXXX` (the suffix
+  is in the blimp's boot log and in its `wifi` command). With neither, the page says so. The
+  profile it creates is set to manual connection, so Windows never jumps to the blimp on its
+  own; `--wifi-password` must match the key in the firmware's menuconfig.
+- **Linux**: scans for the strongest `ICARUS-…`, connects, then turns autoconnect off.
+- Anything else: the button is disabled and the page asks you to join by hand.
+- Leaving the blimp's network means leaving the internet with it, on a laptop with one
+  radio; the back end does not reconnect the previous network.
 
 ## Using it
 
@@ -53,6 +76,8 @@ says so with an orange DEMO DATA pill. That copy of the page never reaches a bli
 | `server.py` | Tornado: static page, WebSocket, the 10 Hz push, the console worker |
 | `blimp_bridge.py` | `blimp_link.BlimpLink` and `BlimpConsole` with the setpoint deadman; `DemoBlimp` runs `mock_blimp.py` in-process |
 | `camera.py` | `SerialCamera` (the target_cam viewer's parser over pyserial), `DemoCamera`, PNG and RGB565 helpers |
+| `wifi.py` | joins the blimp's access point: `netsh wlan` on Windows, `nmcli` on Linux; `python wifi.py status` from the command line |
+| `window.py` | the page in its own window through pywebview; full screen on request |
 | `web/index.html`, `web/app.css`, `web/app.js` | the page: no framework, no build step |
 
 The camera parser is `tcview/protocol.py` from `firmware/projects/target_cam/host/viewer`, which

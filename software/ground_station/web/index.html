@@ -16,13 +16,19 @@
     <div class="wordmark">ICARUS</div>
     <div class="brand-sub">Universidad Nacional de Colombia <span class="dot">·</span> blimp ground station</div>
   </div>
+  <div class="wifi">
+    <button type="button" class="btn wifi-btn" id="btn-wifi" disabled title="join the blimp's access point from this computer">Join blimp Wi-Fi</button>
+    <span class="wifi-note mono" id="wifi-note">—</span>
+  </div>
   <div class="pills">
+    <span class="pill idle" id="pill-wifi" title="this computer's connection to the blimp's access point">WI-FI <b>—</b></span>
     <span class="pill idle" id="pill-link" title="UDP link to the blimp: age of the last packet">LINK <b>—</b></span>
     <span class="pill idle" id="pill-fs" title="motor driver failsafe on the blimp">FAILSAFE <b>—</b></span>
     <span class="pill idle" id="pill-sta" title="stations on the blimp's access point">STA <b>—</b></span>
     <span class="pill idle" id="pill-cam" title="camera link">CAM <b>—</b></span>
     <span class="pill demo" id="pill-demo" hidden>DEMO DATA</span>
   </div>
+  <button type="button" class="btn full" id="btn-full" title="full screen (F11)" aria-label="toggle full screen">&#x26F6;</button>
   <button class="stop" id="btn-stop" type="button" title="Coast all four motors (Space or Esc)">STOP</button>
 </header>
 

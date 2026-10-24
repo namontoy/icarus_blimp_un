@@ -1,12 +1,18 @@
 """The ground station's back end: one Tornado process serving the page and a
-WebSocket, bridging the blimp link, the camera and the console to it.
+WebSocket, bridging the blimp link, the camera, the console and the
+computer's Wi-Fi to it.
 
 Messages are JSON, one object per WebSocket frame, with a `t` field; the
 table is in docs/ground-station-plan.md §4. Everything that arrives from the
 bridges' threads is hopped onto the IOLoop with add_callback, so handlers
 never touch Tornado from another thread.
+
+Two ways to show the page: its own window (window.py, pywebview) when that is
+installed, or the system browser. In window mode Tornado runs on a thread
+and the window takes the main thread, which is what pywebview requires.
 """
 import argparse
+import asyncio
 import base64
 import collections
 import json
@@ -21,11 +27,14 @@ import tornado.ioloop
 import tornado.web
 import tornado.websocket
 
+from . import window
 from .blimp_bridge import DEADMAN_S, STREAM_HZ, BlimpBridge, DemoBlimp
 from .camera import make_camera
+from .wifi import Wifi, WifiError
 
 WEB = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'web')
 TICK_MS = 100           # telemetry/sensor push to the browser
+WIFI_TICKS = 20         # Wi-Fi state check every 2 s: a routing lookup, no subprocess
 
 
 def _clean(obj):
@@ -40,17 +49,21 @@ def _clean(obj):
 
 
 class Hub:
-    def __init__(self, loop, demo, blimp_host, cam_spec):
+    def __init__(self, loop, demo, blimp_host, cam_spec, wifi=None):
         self.loop = loop
         self.demo = demo
         self.clients = set()
         self.events = collections.deque(maxlen=200)
         self._last_sensors_rx = -1
+        self._ticks = 0
+        self._wifi_last = None
         if demo:
             self.blimp = DemoBlimp(self.event)
             cam_spec = cam_spec or 'demo'
+            self.wifi = None            # the demo blimp is on localhost: no radio to join
         else:
             self.blimp = BlimpBridge(blimp_host, 7200, 7201, self.event)
+            self.wifi = wifi
         self.blimp.start()
         self.camera = make_camera(cam_spec, self._cam_frame, self._cam_row, self._cam_status, self.event)
         self.camera.start()
@@ -60,6 +73,8 @@ class Hub:
         self._console_worker.start()
         self.event('info', 'ground station up: %s' % ('demo blimp and demo camera' if demo else
                                                       'blimp at %s, camera %s' % (blimp_host, cam_spec or 'none')))
+        if self.wifi is not None and self.wifi.error:
+            self.event('warn', 'wifi: %s' % self.wifi.error)
 
     # ------------------------------------------------------------ broadcast
 
@@ -91,6 +106,12 @@ class Hub:
         if snap['sen'] is not None and snap['sensors_rx'] != self._last_sensors_rx:
             self._last_sensors_rx = snap['sensors_rx']
             self.broadcast(dict(snap['sen'], t='sen'))
+        self._ticks += 1
+        if self.wifi is not None and self._ticks % WIFI_TICKS == 0:
+            st = self.wifi_status()
+            if st != self._wifi_last:           # a manual join or drop shows up here too
+                self._wifi_last = st
+                self.broadcast(st)
 
     # ------------------------------------------------------------- camera
 
@@ -103,6 +124,38 @@ class Hub:
 
     def _cam_status(self, st):
         self._post(dict(st, t='camstat'))
+
+    # -------------------------------------------------------------- wi-fi
+
+    def wifi_status(self):
+        if self.wifi is None:
+            return {'t': 'wifistat', 'backend': 'none', 'phase': 'demo', 'joined': False}
+        return dict(self.wifi.status(), t='wifistat')
+
+    def wifi_action(self, action):
+        """From the IOLoop thread; the join itself runs on its own thread
+        because it blocks for up to half a minute."""
+        if self.wifi is None:
+            self.event('warn', 'wifi: demo mode has no radio to join')
+            return
+        if self.wifi.busy:
+            self.event('warn', 'wifi: already %s' % self.wifi.phase)
+            return
+        threading.Thread(target=self._wifi_run, args=(action,), daemon=True, name='wifi').start()
+
+    def _wifi_run(self, action):
+        push = lambda: self._post(self.wifi_status())
+        try:
+            if action == 'connect':
+                self.event('info', 'wifi: joining the blimp network...')
+                ssid = self.wifi.connect(on_phase=push)
+                self.event('ok', 'wifi: joined %s, this computer is %s' % (ssid, self.wifi.status()['ip']))
+            elif action == 'disconnect':
+                self.wifi.disconnect(on_phase=push)
+                self.event('info', 'wifi: left the blimp network')
+        except WifiError as e:
+            self.event('warn', 'wifi: %s' % e)
+        push()
 
     # ------------------------------------------------------------ console
 
@@ -126,7 +179,7 @@ class Hub:
     def hello(self):
         return {'t': 'hello', 'demo': self.demo, 'blimp': self.blimp.host,
                 'camera': self.camera.status(), 'deadman_s': DEADMAN_S, 'stream_hz': STREAM_HZ,
-                'events': list(self.events)}
+                'wifi': self.wifi_status(), 'events': list(self.events)}
 
     def close(self):
         self.camera.stop()
@@ -165,6 +218,8 @@ class WSHandler(tornado.websocket.WebSocketHandler):
             ok, text = self.hub.camera.command(str(m.get('action', '')), **kw)
             self.hub.event('info' if ok else 'warn', 'camera: %s' % text)
             self.hub.broadcast(dict(self.hub.camera.status(), t='camstat'))
+        elif t == 'wifi':
+            self.hub.wifi_action(str(m.get('action', '')))
 
 
 class PageHandler(tornado.web.StaticFileHandler):
@@ -179,6 +234,49 @@ def make_app(hub):
     ])
 
 
+class Server:
+    """Tornado on whichever thread calls run(); ready is set once it listens
+    (or failed, with error set), so the window can wait for the address."""
+
+    def __init__(self, args):
+        self.a = args
+        self.loop = None
+        self.hub = None
+        self.url = None
+        self.error = None
+        self.ready = threading.Event()
+        self.open_browser = False
+
+    def run(self):
+        a = self.a
+        try:
+            asyncio.set_event_loop(asyncio.new_event_loop())
+            self.loop = tornado.ioloop.IOLoop.current()
+            wifi = None if a.demo else Wifi(prefix=a.wifi_prefix, password=a.wifi_password,
+                                            ssid=a.wifi_ssid, blimp_ip=a.blimp)
+            self.hub = Hub(self.loop, a.demo, a.blimp, a.cam, wifi)
+            make_app(self.hub).listen(a.port, address=a.bind)
+        except (OSError, RuntimeError) as e:
+            self.error = str(e)
+            self.ready.set()
+            return
+        self.url = 'http://%s:%d/' % ('127.0.0.1' if a.bind == '0.0.0.0' else a.bind, a.port)
+        print('ground station at %s   (Ctrl+C stops)' % self.url, flush=True)
+        tornado.ioloop.PeriodicCallback(self.hub.tick, TICK_MS).start()
+        if self.open_browser:
+            self.loop.call_later(0.5, lambda: webbrowser.open(self.url))
+        self.ready.set()
+        try:
+            self.loop.start()
+        finally:
+            self.hub.close()
+
+    def stop(self):
+        """Any thread."""
+        if self.loop is not None:
+            self.loop.add_callback(self.loop.stop)
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description='Ground station for the blimp (see docs/ground-station-plan.md)')
     p.add_argument('--demo', action='store_true', help='mock blimp and demo camera in-process, no hardware')
@@ -187,27 +285,40 @@ def main(argv=None):
     p.add_argument('--port', type=int, default=8765, help='HTTP port (default %(default)s)')
     p.add_argument('--bind', default='127.0.0.1',
                    help='address to listen on; 0.0.0.0 lets a tablet on the same Wi-Fi open the page')
-    p.add_argument('--no-browser', action='store_true')
+    g = p.add_mutually_exclusive_group()
+    g.add_argument('--window', action='store_true',
+                   help='show the page in its own window (the default when pywebview is installed)')
+    g.add_argument('--browser', action='store_true', help='open the system browser instead of a window')
+    g.add_argument('--no-browser', action='store_true', help='serve only; open the address yourself')
+    p.add_argument('--wifi-ssid', default=None,
+                   help="the blimp's network, ICARUS-XXXXXX; otherwise a stored profile or a scan decides")
+    p.add_argument('--wifi-password', default='icarusblimp', help='its WPA2 key (default %(default)s)')
+    p.add_argument('--wifi-prefix', default='ICARUS', help='SSID prefix to look for (default %(default)s)')
     a = p.parse_args(argv)
 
-    loop = tornado.ioloop.IOLoop.current()
+    if a.window and not window.available():
+        sys.exit('the window needs pywebview: pip install pywebview   (or run with --browser)')
+    mode = 'none' if a.no_browser else 'browser' if a.browser else \
+        'window' if (a.window or window.available()) else 'browser'
+
+    srv = Server(a)
+    if mode == 'window':
+        t = threading.Thread(target=srv.run, name='tornado', daemon=True)
+        t.start()
+        srv.ready.wait()
+        if srv.error:
+            sys.exit('cannot start: %s' % srv.error)
+        try:
+            window.run(srv.url)             # blocks until the window closes
+        finally:
+            srv.stop()
+            t.join(timeout=5)
+        return
+
+    srv.open_browser = (mode == 'browser')
     try:
-        hub = Hub(loop, a.demo, a.blimp, a.cam)
-    except (OSError, RuntimeError) as e:
-        sys.exit('cannot start: %s' % e)
-    app = make_app(hub)
-    try:
-        app.listen(a.port, address=a.bind)
-    except OSError as e:
-        sys.exit('cannot listen on %s:%d: %s' % (a.bind, a.port, e))
-    url = 'http://%s:%d/' % ('127.0.0.1' if a.bind == '0.0.0.0' else a.bind, a.port)
-    print('ground station at %s   (Ctrl+C stops)' % url, flush=True)
-    tornado.ioloop.PeriodicCallback(hub.tick, TICK_MS).start()
-    if not a.no_browser:
-        loop.call_later(0.5, lambda: webbrowser.open(url))
-    try:
-        loop.start()
+        srv.run()
     except KeyboardInterrupt:
         pass
-    finally:
-        hub.close()
+    if srv.error:
+        sys.exit('cannot start: %s' % srv.error)

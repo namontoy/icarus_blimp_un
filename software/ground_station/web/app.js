@@ -37,6 +37,7 @@ const state = {
   events: [],
   conHistory: [], conIndex: -1,
   dockTab: 'console',
+  wifi: null,
 };
 
 // ------------------------------------------------------------------ utils
@@ -188,12 +189,14 @@ function handle(m) {
     case 'con': conWrite(m.text); break;
     case 'con_end': conDone(); break;
     case 'ev': pushEvent(m); break;
+    case 'wifistat': onWifi(m); break;
   }
 }
 
 function onHello(m) {
   state.demo = !!m.demo;
   $('#pill-demo').hidden = !m.demo;
+  onWifi(m.wifi || null);
   $('#cam-note').textContent = m.camera && m.camera.source !== 'none'
     ? `source: ${m.camera.source}${m.camera.port ? ' · ' + m.camera.port : ''}` : 'no camera configured (--cam PORT or --cam demo)';
   (m.events || []).forEach(pushEvent);
@@ -247,6 +250,35 @@ function onCamStat(st) {
   if (!st.source || st.source === 'none') setPill('#pill-cam', 'idle', 'NONE');
   else setPill('#pill-cam', st.connected ? (st.live ? 'live' : 'ok') : 'warn', st.connected ? (st.live ? 'LIVE' : 'UP') : 'DOWN');
   renderCameraSide();
+}
+
+// ------------------------------------------------------------------ wi-fi
+// The back end joins the blimp's access point on request (wifi.py); the
+// page only shows the state and offers the one button. Joined or not is
+// judged by the back end from its own address, so the pill is honest even
+// when the network was joined by hand.
+
+function onWifi(w) {
+  state.wifi = w;
+  const b = $('#btn-wifi'), note = $('#wifi-note');
+  if (state.demo) {
+    b.disabled = true; b.className = 'btn wifi-btn'; b.textContent = 'Join blimp Wi-Fi';
+    note.textContent = 'demo: no radio involved'; setPill('#pill-wifi', 'idle', 'DEMO'); return;
+  }
+  if (!w || w.backend === 'none') {
+    b.disabled = true; b.className = 'btn wifi-btn'; b.textContent = 'Join blimp Wi-Fi';
+    note.textContent = (w && w.error) || 'no Wi-Fi control on this system: join ICARUS-… by hand';
+    setPill('#pill-wifi', w && w.joined ? 'ok' : 'idle', w && w.joined ? w.ip : '—'); return;
+  }
+  b.disabled = !!w.busy;
+  if (w.busy) { b.textContent = w.phase === 'leaving' ? 'Leaving…' : 'Joining…'; b.className = 'btn wifi-btn busy'; }
+  else if (w.joined) { b.textContent = 'Leave blimp Wi-Fi'; b.className = 'btn wifi-btn up'; }
+  else { b.textContent = 'Join blimp Wi-Fi'; b.className = 'btn wifi-btn'; }
+  if (w.joined) note.textContent = `${w.ssid || 'on the blimp network'} · this computer is ${w.ip}`;
+  else if (w.error) note.textContent = w.error;
+  else note.textContent = w.candidates && w.candidates.length ? 'known: ' + w.candidates.join(', ') : 'no ICARUS-… network known yet';
+  note.title = note.textContent;
+  setPill('#pill-wifi', w.busy ? 'live' : w.joined ? 'ok' : 'warn', w.busy ? w.phase.toUpperCase() : w.joined ? w.ip : 'DOWN');
 }
 
 // ----------------------------------------------------------------- events
@@ -572,6 +604,14 @@ function wire() {
     if (e.key === 'ArrowDown') { e.preventDefault(); if (state.conIndex < 0) return; state.conIndex = Math.min(h.length, state.conIndex + 1); e.target.value = state.conIndex === h.length ? '' : h[state.conIndex]; if (state.conIndex === h.length) state.conIndex = -1; }
   });
   $('#btn-stop').addEventListener('click', () => stopAll(false));
+  $('#btn-wifi').addEventListener('click', () => { const w = state.wifi; link.send({ t: 'wifi', action: w && w.joined ? 'disconnect' : 'connect' }); });
+  // Full screen: the native window (pywebview) does it itself; a browser uses the Fullscreen API.
+  const fullscreen = () => {
+    if (window.pywebview && window.pywebview.api) window.pywebview.api.toggle_fullscreen();
+    else if (document.fullscreenElement) document.exitFullscreen();
+    else document.documentElement.requestFullscreen();
+  };
+  $('#btn-full').addEventListener('click', fullscreen);
   $('#chk-enable').addEventListener('change', (e) => { if (!e.target.checked) { stopAll(false); } else setEnabled(true); });
   $('#in-limit').addEventListener('change', (e) => { state.limit = clamp(Number(e.target.value) / 100, 0.05, 1); e.target.value = Math.round(state.limit * 100); addEvent(state.limit > 0.5 ? 'warn' : 'info', `thrust limit ${Math.round(state.limit * 100)} %`); sendMotors(); });
   $('#chk-pairs').addEventListener('change', (e) => { state.pairs = e.target.checked; });
@@ -584,6 +624,7 @@ function wire() {
   document.addEventListener('keydown', (e) => {
     const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) && e.target.type !== 'range' && e.target.type !== 'checkbox';
     if (e.key === 'Escape' || (e.key === ' ' && !typing)) { e.preventDefault(); stopAll(false); }
+    if (e.key === 'F11') { e.preventDefault(); fullscreen(); }
   });
   window.addEventListener('beforeunload', () => { if (state.enabled) link.send({ t: 'stop', brake: false }); });
   // animation: plots, staleness, camera verdict ageing

@@ -78,6 +78,12 @@ button { cursor: pointer; }
 .wordmark::first-letter { color: var(--un-green); }
 .brand-sub { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.12em; margin-top: 4px; }
 .brand-sub .dot { color: var(--papaya); }
+.wifi { display: flex; align-items: center; gap: 10px; margin-left: 12px; min-width: 0; }
+.wifi-btn { white-space: nowrap; }
+.wifi-btn.up { border-color: var(--un-green); color: var(--un-green); }
+.wifi-btn.busy { border-color: var(--papaya); color: var(--papaya); }
+.wifi-note { color: var(--faint); font-size: 11px; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.btn.full { padding: 5px 9px; font-size: 15px; line-height: 1; }
 .pills { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto; }
 .pill {
   font-size: 11px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase;
