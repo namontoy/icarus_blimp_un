@@ -36,6 +36,7 @@ const state = {
   cam: { status: null, frame: null, row: null, rowAt: 0, rotate: false, live: false, rowsSeen: 0, rowTimes: [] },
   events: [],
   conHistory: [], conIndex: -1,
+  dockTab: 'console',
 };
 
 // ------------------------------------------------------------------ utils
@@ -259,7 +260,11 @@ function pushEvent(ev) {
   const list = $('#ev-list'); list.appendChild(li); while (list.children.length > 200) list.removeChild(list.firstChild);
   list.parentElement.scrollTop = list.parentElement.scrollHeight;
   const n = (lv) => state.events.filter((e) => e.level === lv).length;
-  $('#ev-counts').textContent = `${n('crit')} crit · ${n('warn')} warn`;
+  const nc = n('crit'), nw = n('warn');
+  const badge = $('#ev-counts'); badge.textContent = `${nc} crit · ${nw} warn`;
+  badge.className = 'badge mono' + (nc ? ' crit' : nw ? ' warn' : '');
+  // the tab is not in view: mark it so the dot says there is something to read
+  if (state.dockTab !== 'events') $('#tab-events').classList.add('new');
 }
 
 function escapeHtml(s) { return String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
@@ -499,10 +504,65 @@ function conSend(line) {
 
 const QUICK = ['help', 'motor --status', 'wifi', 'link', 'imu -n 3', 'tof -n 3', 'mag -n 3', 'baro', 'motor -s'];
 
+// ------------------------------------------------------------------- dock
+// The console and the event log share one strip under the panels: two tabs,
+// a handle on the top edge that drags the height, a button that collapses it
+// to the tab bar. Height, tab and collapsed state persist in localStorage,
+// which is a per-browser convenience: every read and write is guarded, and
+// the page works the same when storage is empty or unavailable.
+
+const DOCK_MIN_PX = 110;
+// First-run height: about a quarter of the window, 230 px on a 1080p screen,
+// less on a laptop with the browser chrome showing.
+const dockDefaultPx = () => clamp(Math.round(window.innerHeight * 0.23), 140, 230);
+
+function wireDock() {
+  const dock = $('#dock'), handle = $('#dock-handle'), toggle = $('#dock-toggle');
+  const store = (k, v) => { try { localStorage.setItem('icarus.dock.' + k, String(v)); } catch (e) { /* storage unavailable */ } };
+  const load = (k) => { try { return localStorage.getItem('icarus.dock.' + k); } catch (e) { return null; } };
+  // leave the panels above at least ~320 px, whatever the window
+  const maxPx = () => Math.max(DOCK_MIN_PX, window.innerHeight - 320);
+  const setHeight = (px) => { px = clamp(Math.round(px), DOCK_MIN_PX, maxPx()); dock.style.setProperty('--dock-h', px + 'px'); return px; };
+  let height = setHeight(Number(load('h')) || dockDefaultPx());
+
+  const setCollapsed = (c) => {
+    dock.classList.toggle('collapsed', c);
+    toggle.setAttribute('aria-expanded', String(!c));
+    toggle.innerHTML = c ? '&#9652;' : '&#9662;';
+    toggle.title = c ? 'expand the console and events' : 'collapse to the tab bar';
+    store('collapsed', c ? 1 : 0);
+  };
+  setCollapsed(load('collapsed') === '1');
+  toggle.addEventListener('click', () => setCollapsed(!dock.classList.contains('collapsed')));
+
+  const tabs = [...dock.querySelectorAll('.tab')];
+  const show = (name) => {
+    tabs.forEach((t) => { const on = t.dataset.tab === name; t.setAttribute('aria-selected', String(on)); $('#pane-' + t.dataset.tab).hidden = !on; });
+    $('#note-console').hidden = name !== 'console'; $('#note-events').hidden = name !== 'events';
+    state.dockTab = name; store('tab', name);
+    if (name === 'events') { $('#tab-events').classList.remove('new'); const p = $('#pane-events'); p.scrollTop = p.scrollHeight; }
+    else $('#con-in').focus({ preventScroll: true });
+  };
+  tabs.forEach((t) => t.addEventListener('click', () => { if (dock.classList.contains('collapsed')) setCollapsed(false); show(t.dataset.tab); }));
+  show(load('tab') === 'events' ? 'events' : 'console');
+
+  let drag = null;
+  handle.addEventListener('pointerdown', (e) => {
+    if (dock.classList.contains('collapsed')) return;
+    drag = { y: e.clientY, h: dock.getBoundingClientRect().height };
+    handle.setPointerCapture(e.pointerId); document.body.classList.add('resizing'); e.preventDefault();
+  });
+  handle.addEventListener('pointermove', (e) => { if (drag) height = setHeight(drag.h + (drag.y - e.clientY)); });
+  const end = () => { if (!drag) return; drag = null; document.body.classList.remove('resizing'); store('h', height); };
+  handle.addEventListener('pointerup', end); handle.addEventListener('pointercancel', end);
+  handle.addEventListener('dblclick', () => { height = setHeight(dockDefaultPx()); store('h', height); });
+  window.addEventListener('resize', () => { height = setHeight(height); });
+}
+
 // ----------------------------------------------------------------- wiring
 
 function wire() {
-  buildTower(); buildGauges();
+  buildTower(); buildGauges(); wireDock();
   const chips = $('#chips');
   for (const q of QUICK) { const b = document.createElement('button'); b.type = 'button'; b.className = 'chip'; b.textContent = q; b.addEventListener('click', () => conSend(q)); chips.appendChild(b); }
   $('#con-form').addEventListener('submit', (e) => { e.preventDefault(); const i = $('#con-in'); conSend(i.value); i.value = ''; });

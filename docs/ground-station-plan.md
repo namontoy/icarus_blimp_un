@@ -90,9 +90,17 @@ timing tower. Dark only: a ground station is a pit-wall display, and the venue i
 |  pair controls    |  grab / live / connect, FOV plot  |  heading dial        |
 |  limit, enable    |  blob table, link health          |  ToF gauge, baro     |
 +-------------------+-----------------------------------+----------------------+
-| CONSOLE  input, output, quick commands                 | EVENTS               |
+| ===== drag handle =====                                                      |
+| [CONSOLE] [EVENTS 0 crit · 1 warn]                                        ▾ |
+|  the selected tab: console input, output, quick commands / the event log     |
 +------------------------------------------------------------------------------+
 ```
+
+The three panels take all the height under the header; the dock below them holds the
+console and the event log as tabs (2026-10-24). Its handle drags the height, ▾ collapses it to
+the tab bar, and the browser remembers height, tab and collapsed state. The IMU plots and the
+camera frame are the flexible elements, so at 1080p no panel needs a scrollbar; a short window
+gets smaller gauges and the motor hint disappears.
 
 ## 4. Messages between browser and back end
 

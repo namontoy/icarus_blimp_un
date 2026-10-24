@@ -36,9 +36,15 @@ says so with an orange DEMO DATA pill. That copy of the page never reaches a bli
 - **Camera**: Connect, Grab frame, Live, Rotate 180° (display only), and the baud rate. The
   frame is the camera's 160 × 120 pixels at four times with the detector's box, the verdict
   tile, the blob table and the field-of-view plot come from the camera's own CSV rows.
+- **Console** and **Events** share the dock under the three panels, as two tabs. Drag the
+  handle on the dock's top edge to set its height (double-click resets it), and the ▾ button
+  collapses it to the tab bar. Height, tab and collapsed state are remembered by the browser.
+  The three panels above take whatever height is left, so at 1080p nothing needs a scrollbar;
+  on a short screen, collapse the dock or let a panel scroll.
 - **Console**: any firmware command; Enter sends, ↑/↓ recall history, the chips are the usual
   ones. One command runs at a time, on the air and on the blimp.
-- **Events**: link up and down, failsafe trips, stale setpoints, camera link changes.
+- **Events**: link up and down, failsafe trips, stale setpoints, camera link changes. The tab
+  shows the crit and warn counts, and a papaya dot while there is something unread.
 
 ## Files
 
