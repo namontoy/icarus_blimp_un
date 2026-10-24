@@ -186,6 +186,9 @@ python -m software.ground_station                   # the real blimp at 192.168.
 python -m software.ground_station --cam COM5        # plus the camera on a serial port
 ```
 
-It prints the address to open, `http://127.0.0.1:8765/`, and opens it in the default browser
-unless `--no-browser`. Tornado is the one dependency beyond the standard library
-(`pip install tornado`); pyserial is needed for the camera.
+With pywebview installed it opens as its own window; otherwise it prints the address,
+`http://127.0.0.1:8765/`, and opens the default browser (`--browser` forces that, `--no-browser`
+serves only). Dependencies are pinned in `software/ground_station/requirements.txt` (tornado,
+pywebview, pyserial for the camera); the per-platform steps, including the system packages
+Linux needs for the window and how the Wi-Fi join differs between Windows and Linux, are in
+`software/ground_station/README.md` under "Installing".

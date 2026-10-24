@@ -5,7 +5,7 @@ Python back end that talks to the S3 firmware over its Wi-Fi access point and to
 over serial. Design, message formats and the safety chain: `docs/ground-station-plan.md`.
 
 ```
-pip install tornado pywebview pyserial         # once; pywebview for the window, pyserial for the camera
+pip install -r software/ground_station/requirements.txt   # once; see "Installing" for your platform
 
 python -m software.ground_station --demo       # no hardware: mock blimp + demo camera, from the repo root
 python -m software.ground_station              # the real blimp, no camera; "Join blimp Wi-Fi" is in the header
@@ -20,6 +20,73 @@ Linux): no tabs or address bar, and ⛶ or F11 goes full screen. Without it, or 
 with no back end at all (open `web/index.html` from disk, or add `?demo` to the address): it
 then shows demo data and says so with an orange DEMO DATA pill. That copy never reaches a
 blimp.
+
+## Installing
+
+Python 3.9 or newer (3.12 on the Windows laptop; the 3.10 conda environment of
+`software/SETUP.md` also works) and the repo cloned with the `s3-wireless-link` branch
+checked out. Everything the ground station needs is pinned in
+`software/ground_station/requirements.txt`; the esp-drone tools' `software/requirements.txt`
+includes it, so one `pip install -r` of either file covers it. Install into the Python you will
+run with: inside a virtual environment, `python` is that environment's interpreter, and if the
+browser opens instead of a window the terminal names the interpreter that lacks pywebview.
+
+### Windows 10 and 11
+
+```
+cd C:\path\to\icarus_blimp_un
+python -m pip install -r software\ground_station\requirements.txt
+python -m software.ground_station
+```
+
+- The window is Microsoft's WebView2, which Windows 11 ships. On Windows 10, if no window
+  appears, install the "WebView2 Evergreen runtime" from Microsoft once.
+- The Wi-Fi button needs no administrator rights. Windows 11 withholds the list of networks
+  from console programs unless location services are on, so the button joins by name: the
+  profile Windows kept from a manual join, or `--wifi-ssid ICARUS-XXXXXX` (the suffix is in the
+  blimp's boot log and its `wifi` command). The profile the page creates is manual-connect,
+  so Windows never jumps to the blimp by itself.
+- Serial ports are `COM5` and the like (Device Manager, Ports): `--cam COM5`.
+
+### Linux (Debian 12, Ubuntu 22.04 or newer)
+
+```
+sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-3.0 gir1.2-webkit2-4.1
+cd ~/icarus_blimp_un
+python3 -m pip install -r software/ground_station/requirements.txt
+python3 -m software.ground_station
+```
+
+- The window is WebKitGTK through PyGObject; the apt line provides both (older releases call
+  the last package `gir1.2-webkit2-4.0`). Without it the page opens in the browser, which also
+  works. The Qt alternative needs no apt access: `pip install "pywebview[qt6]"`.
+- A conda environment does not see the system PyGObject, so the `blimp-tools` environment of
+  `SETUP.md` gets the browser, or the Qt alternative installed into it.
+- The Wi-Fi button needs NetworkManager (`nmcli`) managing the Wi-Fi interface, which a
+  desktop install has. It scans for the strongest `ICARUS-…`, joins with the key, then turns
+  autoconnect off so the laptop does not keep going back to the blimp. A local session is
+  normally allowed to do this without a password.
+- Serial ports are `/dev/ttyUSB0` or `/dev/ttyACM0`, and your user must be in `dialout`
+  (`sudo usermod -aG dialout $USER`, then log in again).
+
+### macOS
+
+`pip install -r` works and the window is WebKit (pyobjc comes with pywebview), but the Wi-Fi
+button is disabled: join `ICARUS-…` from the menu bar. Not tried.
+
+### Windows and Linux side by side
+
+| | Windows | Linux |
+|---|---|---|
+| Window | WebView2, in Windows 11 | WebKitGTK via `python3-gi` + `gir1.2-webkit2-4.1`, or `pywebview[qt6]` |
+| Without it | the default browser | the default browser |
+| Wi-Fi join | `netsh wlan connect` by profile name; a profile is created from the key if none exists | `nmcli dev wifi connect`, the strongest `ICARUS-…` in range |
+| Finding the SSID | stored profile or `--wifi-ssid`; a scan only with location services on | a scan |
+| Leaving | `netsh wlan disconnect` | `nmcli connection down`; autoconnect was turned off |
+| Rights | none | NetworkManager's rules; a local desktop session normally passes |
+| Camera port | `COM5` | `/dev/ttyUSB0`, user in `dialout` |
+| Full screen | ⛶ or F11 | ⛶ or F11 |
+| Tested | 2026-10-24, this laptop | not yet; written from `drone_gui.py`'s nmcli flow |
 
 ## Joining the blimp's Wi-Fi from the page
 

@@ -1,4 +1,12 @@
-# Python tools in software/ (esp-drone bench tools). Tested with Python 3.10.
+# Python tools in software/.
+#
+# The blimp's own ground station (software/ground_station) keeps its pins in its own file,
+# included here so one `pip install -r software/requirements.txt` covers both tools. Its
+# per-platform steps (Linux needs system packages for the window) are in
+# software/ground_station/README.md, "Installing".
+-r ground_station/requirements.txt
+
+# Below: the esp-drone bench tools (drone_gui.py, motor_diag.py). Tested with Python 3.10.
 # Same versions as the original PC2 virtualenv; scipy is the version resolved on the laptop.
 numpy==1.26.4
 scipy==1.15.3

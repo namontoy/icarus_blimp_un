@@ -1,5 +1,10 @@
 # Setting up the Python tools (laptop)
 
+This page is about the esp-drone tools. The blimp's own ground station
+(`software/ground_station/`) has its setup, per platform, in
+`software/ground_station/README.md` under "Installing"; it runs in this conda environment
+too, but Linux needs system packages for its window, as that page explains.
+
 The tools in this folder (`drone_gui.py`, `drone_dynamics.py`, `motor_diag.py`) were written on a second PC for the esp-drone firmware, at `esp-drone@560e17b`. Their protocol, design and known issues are in `docs/esp-drone-tools-report.md`; the raw session reports are in `docs/history/`.
 
 ## 1. Conda environment
