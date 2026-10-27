@@ -22,9 +22,10 @@ race courses, and the analysis behind the design.
 |---|---|
 | **Control core** · `core/` | ✅ 11,276 unit checks pass, including a sweep of 114,244 actuator demands proving the 100 gf cap cannot be exceeded |
 | **Simulation** · `sim/` | ✅ Completes both courses: every loop with a downward range sensor, about two in three without one |
-| **Firmware** · `firmware/` | 🟡 Builds and links for the ESP32-S3 with the real pin map; not yet flashed |
-| **Ground station** | ⬜ Not started: perception, search hint, altitude fix |
-| **Hardware** | 🟡 Flight controller confirmed; motor thrust not yet measured; perception sensor and final electronics still being chosen |
+| **Bench firmware** · `firmware/projects/i2c_tools/` | 🟡 Runs on the ESP32-S3-Zero: every sensor and the four reversible motors from a console, Wi-Fi link proven on hardware; no control loop yet |
+| **Flight shell, previous board** · `firmware/projects/espfly/` | 🟡 Builds and links for the ESP-FLY board; never flashed; kept as the reference for the S3-Zero control task |
+| **Ground station** · `software/ground_station/` | 🟡 Shows telemetry and sensors over Wi-Fi; perception, search hint and altitude fix not started |
+| **Hardware** | 🟡 ESP32-S3-Zero, two DRV8833, MPU-6050, QMC5883L, BME280, VL53L1X, ESP32-CAM; one motor thrust-tested (14.7–16.8 gf); the controller still assumes 35 gf |
 
 ### Simulated lap times
 
@@ -196,13 +197,16 @@ flowchart LR
   searches, aligns, approaches, touches, confirms the contact and coasts; PID loops for altitude,
   yaw and surge; and a mixer that enforces the thrust budget. It is freestanding, with no dynamic
   allocation, no global state and deterministic output, so flight logs can be replayed.
-- **Firmware** (`firmware/`, ESP-IDF): sensor and motor drivers, the ESP-NOW radio link, and three
-  FreeRTOS tasks that call `blimp_step()` at 200 Hz. No control logic lives here.
-- **Ground station** (not written yet): each command packet carries the target balloon's bearing,
-  elevation and range; a search-hint heading; and an altitude fix computed from any balloon in
-  view, since they all hang at 2 m ([protocol.h](firmware/main/net/protocol.h),
-  [docs/10 §4](docs/10-known-issues.md)). Which onboard sensor feeds it is still open; a 360°
-  lidar is being evaluated.
+- **Firmware** (`firmware/projects/`, ESP-IDF): `i2c_tools/` is the live ESP32-S3-Zero firmware
+  (sensor drivers, reversible motor driver, Wi-Fi link, console); its fixed-rate control task that
+  will call `blimp_step()` is the next step. `espfly/` is the previous board's shell (ESP-NOW link,
+  three FreeRTOS tasks calling `blimp_step()` at 200 Hz), kept as the reference. No control logic
+  lives in either.
+- **Ground station** (`software/`): today a telemetry and sensor display. The planned command
+  packet carries the target balloon's bearing, elevation and range; a search-hint heading; and an
+  altitude fix computed from any balloon in view, since they all hang at 2 m
+  ([protocol.h](firmware/projects/espfly/main/net/protocol.h), [docs/10 §4](docs/10-known-issues.md)).
+  The onboard sensor is an ESP32-CAM (OV2640, 58 × 45° lens); the lidar was ruled out as too heavy.
 - **Simulation** (`sim/`, MuJoCo): replaces everything around the core. It builds the arena from
   the rulebook, synthesises noisy IMU, ToF and target observations from ground truth, applies the
   core's motor commands, and runs its own judge that times laps from real balloon contacts.
@@ -223,8 +227,11 @@ core/               Portable C11 flight controller and its host unit tests
   include/blimp/      Public headers; blimp.h is the single entry point
   src/                Estimator, guidance, PID, mixer, parameters, FFI shim
   tests/              One test program per module
-firmware/           ESP-IDF project for the ESP32-S3
-  main/               RTOS shell, board pin map, drivers, ESP-NOW link and protocol
+firmware/projects/  ESP-IDF projects
+  i2c_tools/          Live ESP32-S3-Zero firmware: drivers, reversible motors, Wi-Fi link, console
+  optflow_cam/        ESP32-CAM optical-flow experiment
+  espfly/             Previous board's flight shell (ESP-FLY): RTOS loop, ESP-NOW link, protocol
+  blink/              Toolchain smoke test
 sim/                Closed-loop MuJoCo simulation that drives the compiled core
   scene/              Course generator and physics checks, from the rulebook geometry
 tools/              Build, verify and environment-setup scripts
@@ -232,6 +239,8 @@ tools/              Build, verify and environment-setup scripts
 docs/               Design, strategy, setup and status documents
 research/           The research behind the docs, with sources and fact-checks
 reference/          Where to download the rulebook and the baseline paper
+software/           Ground tools: blimp_link.py, mock_blimp.py, ground_station/
+scripts/            idf.bat, the ESP-IDF v5.5.5 wrapper for the S3-Zero projects on Windows
 ```
 
 ---
@@ -242,7 +251,8 @@ Verified on Windows 11. You need:
 
 - **Python 3.12** for the simulation
 - **clang** (LLVM) on `PATH` for the core's unit tests and the simulation DLL
-- **ESP-IDF v5.3**, only for the firmware; see [docs/08](docs/08-firmware-setup.md)
+- **ESP-IDF v5.5.5** for the S3-Zero firmware (`scripts\idf.bat`, see [CLAUDE.md](CLAUDE.md));
+  **v5.3** only for the previous board's shell, see [docs/08](docs/08-firmware-setup.md)
 
 ```powershell
 python tools/setup_env.py        # once: creates .venv with the pinned MuJoCo build
@@ -283,20 +293,22 @@ python tools/build.py module mixer      # or: pid, params, estimator, guidance, 
 
 ### Build and flash the firmware
 
-```powershell
-tools\idf_build.bat                     # build, with the ESP-IDF PATH traps handled
+The live firmware is the ESP32-S3-Zero project. On Windows:
 
-. .\tools\idf_env.ps1                   # or enter the ESP-IDF environment in PowerShell
-cd firmware
-idf.py -p COM5 flash monitor
+```powershell
+scripts\idf.bat i2c_tools build                   # ESP-IDF v5.5.5; any idf.py arguments after the project name
+scripts\idf.bat i2c_tools -p COM5 flash monitor
+```
+
+On Linux, see [CLAUDE.md](CLAUDE.md). The previous board's shell still builds on its own:
+
+```powershell
+tools\idf_build.bat                     # ESP-IDF v5.3, firmware/projects/espfly
 ```
 
 > [!WARNING]
-> Before the first powered test, set `BLIMP_BOOT_MOTOR_ID_MODE` to `1` in
-> [board_config.h](firmware/main/board_config.h), flash with **the props off**, and write down
-> which motor actually spins for each position; then set it back to `0`. Measure real motor
-> thrust on a thrust stand too: the controller still assumes a 35 gf-per-motor placeholder, and
-> Rule 13 compliance depends on the real number.
+> Measure real motor thrust through the DRV8833 before any closed-loop flight: the controller
+> still assumes a 35 gf-per-motor placeholder, and Rule 13 compliance depends on the real number.
 
 ### Working with coding agents
 
