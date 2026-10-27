@@ -1,0 +1,5 @@
+# Managed dependencies, fetched by the IDF component manager on the first build
+# (needs internet once; they land in managed_components/, which is gitignored).
+dependencies:
+  idf: ">=5.1"
+  espressif/esp32-camera: "^2.0.4"

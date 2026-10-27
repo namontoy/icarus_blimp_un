@@ -1,19 +1,32 @@
+@AGENTS.md
+
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+AGENTS.md above is the project rulebook, shared with every coding agent; put project rules there,
+not here. This file holds what is specific to working on this repo in Claude Code.
+
+- Skills run as `/core-change`, `/sim-sweep` and `/flash-firmware`; the last runs only when a
+  person types it. Their files in `.claude/skills/` are the originals for the Codex copies, so
+  after editing one, run `python tools/sync_skills.py`.
+- Personal notes go in `CLAUDE.local.md` (gitignored), not in this file.
 
 ## What this is
 
-An indoor autonomous blimp that has to hover at 2 m (band 1.85–2.25 m). It is a two-chip system:
+An autonomous blimp for IAR-LARC 2026; the race, the rules and the vehicle are in AGENTS.md. On
+2026-10-27 the DroneUN repo (flight controller, simulator, design docs) was merged into this one,
+so the repo now has a host side and two chips:
 
-| Path | Chip | Role |
+| Path | Chip / host | Role |
 |---|---|---|
+| `core/` | host and ESP32 | The flight controller as portable C11: `blimp_step()`. Unit-tested on the host, compiled into the simulator, and later into the S3 firmware. Control logic lives only here. |
+| `sim/`, `tools/` | host (verified on Windows) | MuJoCo closed loop around the compiled core, plus the build, verify and sweep scripts. `python tools/setup_env.py` once, then `python tools/verify.py` after any change. |
 | `firmware/projects/i2c_tools/` | ESP32-S3 (Waveshare ESP32-S3-Zero) | The flight-controller-to-be: IMU, magnetometer and barometer (stand-alone breakouts since the GY-88 burned; see below), altimeter, four DRV8833 thrusters, and since the `s3-wireless-link` work its own Wi-Fi access point carrying the console and a UDP packet link (`docs/wireless-link.md`). The name comes from the Espressif `i2c_tools` example it grew out of, and the console prompt is still `i2c-tools>`. |
 | `firmware/projects/optflow_cam/` | ESP32-CAM (AI-Thinker, original ESP32) | Downward optical flow. It prints CSV over UART to a laptop. |
+| `firmware/projects/espfly/` | XIAO ESP32-S3 on the ESP-FLY board | DroneUN's previous flight shell for the previous board: an `esp_timer`-driven control task around `blimp_step()`, an ESP-NOW link and `net/protocol.h`. Not built here; kept as the reference for the S3-Zero control task until that supersedes it (ESP-IDF v5.3, `tools\idf_build.bat`). |
 | `firmware/projects/blink/` | — | Stock ESP-IDF example, kept as a toolchain smoke test. |
 | `software/` | host | `blimp_link.py` is the ground tool for this repo's firmware (standard library only; `mock_blimp.py` fakes the firmware on localhost). The other Python tools were imported from a **separate quadcopter project (esp-drone)**: they speak CRTP-over-UDP to esp-drone firmware, **not** to anything in this repo. See `docs/esp-drone-tools-report.md` §8 for what would need to change to use them here. |
 
-The two chips are not linked yet. `docs/inter-board-link-plan.md` (untracked draft) proposes UART links. `docs/sensor-fusion-plan.md` is a proposal (`blimp_ins`) that is **not implemented**. `hardware/`, `scripts/`, `simulation/`, `tests/` and `external/` are empty placeholders, and the top-level `README.md` is empty.
+The two chips are not linked yet. `docs/inter-board-link-plan.md` (untracked draft) proposes UART links. `docs/sensor-fusion-plan.md` is a proposal (`blimp_ins`) that is **not implemented**. `hardware/` and `external/` are empty placeholders (`external/` is where a read-only esp-drone clone goes, gitignored); `scripts/` holds `idf.bat`. The top-level `README.md` is the project front page, from DroneUN.
 
 ## Building firmware (ESP-IDF v5.5.5)
 
@@ -41,6 +54,8 @@ $IDF_PY -C firmware/projects/optflow_cam -p /dev/ttyUSB0 flash
 - **Windows:** `scripts\idf.bat i2c_tools build` (or any `idf.py` arguments after the project name). It expects ESP-IDF v5.5.5 at `%USERPROFILE%\esp\esp-idf-v5.5.5` and Python 3.11 at its per-user default, and works around `export.bat` bailing out silently under Git Bash's `MSYSTEM` variable; see `docs/wireless-link.md` §10.
 
 ## Tests
+
+The controller and the simulator are checked with `python tools/verify.py` (about 20 s: the `core/` unit tests including the Rule 13 thrust sweep, the DLL build, the skill sync, and a simulator smoke test); `--full` adds both courses. Run it after any change under `core/`, `sim/` or `tools/`. It needs clang on `PATH` and the `.venv` from `python tools/setup_env.py`; the simulator itself is verified on Windows only so far.
 
 The `pytest_*.py` files under `firmware/projects/` are Espressif's stock example tests for other hardware (a CCS811 and an LED). They are not this project's tests.
 
@@ -108,4 +123,4 @@ The GUI labels are in Spanish. `optflow_cam/host/flow_monitor.py` is a separate 
 
 ## Docs conventions
 
-`docs/` holds long-form technical reports. They are dated, they keep "measured" separate from "reasoned", and they list claims that couldn't be verified. Raw session reports go in `docs/history/`. Reference PDFs in `docs/reference/` are gitignored, and their citations are in `docs/reference/README.md`. Code comments follow the same style: prose explaining *why*, including the hardware reasoning. Match that density when editing.
+`docs/` holds long-form technical reports. They are dated, they keep "measured" separate from "reasoned", and they list claims that couldn't be verified. Raw session reports go in `docs/history/`. Reference PDFs in `docs/reference/` are gitignored, and their citations are in `docs/reference/README.md`. The numbered `docs/0x-*.md` files and `docs/10-known-issues.md` came from DroneUN; AGENTS.md says which of them describe the current vehicle. The rulebook and the MochiSwarm paper go in `reference/` (see `reference/README.md`), also gitignored. Code comments follow the same style: prose explaining *why*, including the hardware reasoning. Match that density when editing.

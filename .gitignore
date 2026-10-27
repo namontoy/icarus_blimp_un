@@ -21,3 +21,46 @@ __pycache__/
 
 # Configuracion local de vscode
 .vscode/
+
+# --- From DroneUN (merged 2026-10-27) ---
+
+# Host test/DLL build output (tools/build.py); build/ itself is ignored above
+build_tmp/
+
+# Python
+*.pyc
+
+# Project-local virtual environment (recreate with: python tools/setup_env.py)
+.venv/
+venv/
+
+# Tool caches
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+
+# MuJoCo
+MUJOCO_LOG.TXT
+
+# Transient logs
+build_log.txt
+
+# Third-party documents: kept locally, not committed (see reference/README.md)
+reference/*.pdf
+reference/*.txt
+
+# Read-only clone of esp-drone for the reuse task (never committed)
+external/esp-drone/
+
+# Personal scratch space
+_scratch/
+
+# Personal Claude Code files (the shared ones are CLAUDE.md and .claude/skills/)
+CLAUDE.local.md
+.claude/settings.local.json
+
+# OS / editor clutter
+Thumbs.db
+desktop.ini
+.DS_Store
+*.swp

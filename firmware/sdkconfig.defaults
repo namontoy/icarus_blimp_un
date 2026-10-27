@@ -1,0 +1,31 @@
+# firmware/sdkconfig.defaults - initial sdkconfig seed values.
+#
+# UNCOMPILED / UNVERIFIED: applied only the first time `idf.py build` (or
+# `idf.py set-target`/`idf.py reconfigure`) generates sdkconfig from scratch
+# for this project - it has never actually happened here. Exact option
+# names are believed correct for ESP-IDF v5.x but not checked against a real
+# Kconfig tree. If any name below is wrong, the safe fallback for all of
+# them is `idf.py menuconfig` and setting the equivalent option by hand
+# (docs/08-firmware-setup.md documents where each one lives in the menu).
+
+# Belt-and-braces alongside firmware/CMakeLists.txt's `set(IDF_TARGET esp32s3)`
+# - see that file's comment on why both exist.
+CONFIG_IDF_TARGET="esp32s3"
+
+# Raises the FreeRTOS tick rate from the ESP-IDF default of 100 Hz to 1 kHz.
+# main.c's control loop does NOT depend on this (it uses esp_timer, whose
+# resolution is independent of the FreeRTOS tick - see main.c's header
+# comment) - this is a general RTOS-responsiveness improvement (finer
+# vTaskDelay/timeout granularity everywhere else: comms_task's 10 ms poll,
+# semaphore timeouts, etc.), not a substitute for that design.
+CONFIG_FREERTOS_HZ=1000
+
+# The Seeed XIAO ESP32S3 has no separate UART-to-USB bridge chip: its USB-C
+# port is wired directly to the ESP32-S3's native USB Serial/JTAG peripheral.
+# The default console (CONFIG_ESP_CONSOLE_UART_DEFAULT, UART0 on GPIO43/44)
+# is therefore not reachable over that USB-C cable at all. Route the console
+# over USB Serial/JTAG instead so `idf.py monitor` works over the same cable
+# used for flashing. This also frees GPIO43/44 (UART0 TX/RX) for other use -
+# board_config.h assigns GPIO43 to the red status LED
+# (BLIMP_BOARD_LED_RED_GPIO); GPIO44 is unclaimed.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y

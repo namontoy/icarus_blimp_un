@@ -1,0 +1,6 @@
+# Extra packages for tools/lens_test/lens_test.py, on top of the project venv
+# (requirements.txt at the repo root). Installed on demand because the simulator
+# needs neither:
+#     .venv\Scripts\python -m pip install -r tools\lens_test\requirements.txt
+opencv-python==4.10.0.84   # live view, clicks, sharpness/vignetting maths
+pyserial==3.5              # --port mode: the board over its USB cable
