@@ -98,8 +98,12 @@ gauges shrink, as the page's `max-height` media query does.
 - **Motors**: `TopView` (the envelope ellipse and gondola, front arrows that scale with
   readback, rear rings that grow), four tower rows (name, slider −100…100 with double-click to
   zero, readback value, 20-segment bar, green, or blue when reversed). Controls: a `Switch`
-  (painted toggle) for "Motors enabled", the limit spinbox, a "Move pairs together" switch,
-  "Zero all", and the hint.
+  (painted toggle) for "Motors enabled", the limit spinbox,
+  "Zero all", and the hint. Since 2026-10-27 each slider row has − and + step buttons at its ends
+  (one slider unit, 1 % of the limit, auto-repeat), and the "Move pairs together" switch, which
+  links FL with FR and RL with RR, sits in its own row above the sliders and starts off: it had
+  been on by default among the controls below, where it went unnoticed and made one slider look
+  like it moved two motors.
 - **Camera**: `CameraView` (the 160×120 frame scaled without smoothing and letterboxed; the
   green box, papaya crosshair and range label from the row; rotate 180°; the "no frame yet"
   text and the frame stamp). Buttons: Connect/Disconnect, Grab frame, Live (papaya when on),

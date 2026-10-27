@@ -459,62 +459,138 @@ class _ViewBox(QWidget):
 
 
 class TopView(_ViewBox):
-    """The blimp from above: envelope, gondola, and the four thrusters. The
-    front arrows scale with readback (blue when reversed); the rear rings grow
-    with lift."""
-    VB = (240, 190)
-    POS = {'FL': (74, 70), 'FR': (166, 70), 'RL': (74, 122), 'RR': (166, 122)}
+    """The blimp from above, to scale: the "Dónde van los motores" layout
+    (2026-10-10) with the bar shortened to 24 cm between the thrusters. One
+    transverse bar under the two DRV8833s at the back of the 14 × 6 cm
+    gondola carries all four motors: lift M1 (RL) and M2 (RR) at ±5.5 cm,
+    just outside the gondola, and thrust M4 (FL) and M3 (FR) at ±12 cm. The
+    camera and magnetometer stay alone at the front, away from the motors.
+    The envelope is the 66 cm rounded cube from the design basis, cropped
+    to its sides so the gondola can be drawn large enough to read.
+
+    The F/R names are the firmware's (motor_id_t), kept from the corner
+    layout; on this bar F means thrust and R means lift. Thrust arrows scale
+    with readback, forward from the propeller or backward from the motor
+    (blue when reversed); the lift rings grow with readback."""
+    VB = (320, 192)
+    CX, CY, K = 160, 76, 4.6                   # origin at the gondola centre, 4.6 units per cm
+    ENVELOPE_CM, CORNER = 66.0, 0.35            # width, corner radius as a fraction of it
+    GONDOLA_CM = (6.0, 14.0)
+    BAR_Y_CM = -5.0                             # behind the gondola centre
+    PROP_R_CM = 2.0                             # 40 mm propellers
+    POS = {'FL': -12.0, 'FR': 12.0, 'RL': -5.5, 'RR': 5.5}      # x along the bar, cm
+    MNUM = {'FL': 'M4', 'FR': 'M3', 'RL': 'M1', 'RR': 'M2'}
+    ARROW_MAX = 40.0                            # arrow length at full readback, units
+    RING_GROW = 12.0                            # lift ring growth at full readback, units
 
     def __init__(self):
-        super().__init__(260)
+        super().__init__(340)
         self.v = {m: float('nan') for m in self.POS}
 
     def set(self, values):
         self.v = dict(values)
         self.update()
 
+    def pt(self, x_cm, y_cm):
+        """Body coordinates (cm, x right, y forward) to viewBox units."""
+        return QPointF(self.CX + x_cm * self.K, self.CY - y_cm * self.K)
+
+    def rect(self, x0, y0, x1, y1):
+        """A rectangle from two body-coordinate corners."""
+        return QRectF(self.pt(x0, y1), self.pt(x1, y0))
+
     def paintEvent(self, e):
         p = self.begin()
         # SVG user units: px values from the CSS are in these units too
         dpi_fix = 72.0 / self.logicalDpiY()
+        k, h = self.K, self.ENVELOPE_CM / 2
+
+        p.setClipRect(QRectF(0, 0, *self.VB))         # the envelope runs past the top and bottom
         p.setPen(QPen(C(T.BORDER), 1.5))
         p.setBrush(C(T.RAISED))
-        p.drawEllipse(QPointF(120, 95), 96, 72)
-        p.setPen(QPen(C(T.BORDER), 1))
+        p.drawRoundedRect(self.rect(-h, -h, h, h), self.CORNER * 2 * h * k, self.CORNER * 2 * h * k)
+        self.text(p, self.CX, 15, 'FRONT', 9 * dpi_fix, T.FAINT, spacing=0.12)
+        self.text(p, self.CX, 31, 'envelope ≈ 66 cm wide', 8.5 * dpi_fix, T.FAINT)
+        self.text(p, self.CX, 185, 'outer pair: surge and yaw · inner pair: lift', 9 * dpi_fix, T.FAINT,
+                  spacing=0.12)
+
+        # The bar first: it runs under the board.
+        by = self.BAR_Y_CM
+        p.setPen(QPen(C(T.MUTED), 2.5, cap=Qt.PenCapStyle.RoundCap))
+        p.drawLine(self.pt(self.POS['FL'], by), self.pt(self.POS['FR'], by))
+        gw, gl = self.GONDOLA_CM[0] / 2, self.GONDOLA_CM[1] / 2
+        p.setPen(QPen(C(T.FAINT), 1))
         p.setBrush(C(T.RAISED_2))
-        p.drawRoundedRect(QRectF(88, 78, 64, 34), 4, 4)
-        self.text(p, 120, 24, 'FRONT', 9 * dpi_fix, T.FAINT, spacing=0.12)
-        self.text(p, 120, 176, 'front pair: surge and yaw · rear pair: lift', 9 * dpi_fix, T.FAINT, spacing=0.12)
-        for m, (cx, cy) in self.POS.items():
-            p.save()
-            p.translate(cx, cy)
-            p.setPen(QPen(C(T.MUTED), 1.5))
-            p.setBrush(C(T.RAISED_2))
-            p.drawEllipse(QPointF(0, 0), 7, 7)
-            self.text(p, 0, -11 if m[0] == 'F' else 20, m, 10 * dpi_fix, T.MUTED, weight=700)
+        p.drawRoundedRect(self.rect(-gw, -gl, gw, gl), 3, 3)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(C(T.FAINT))
+        for x0 in (-1.8, 0.2):                                   # the two DRV8833s
+            p.drawRect(self.rect(x0, by - 0.7, x0 + 1.6, by + 0.7))
+        p.setPen(QPen(C(T.MUTED), 0.8))
+        p.setBrush(C(T.BG))
+        p.drawRect(self.rect(-0.9, gl - 0.4, 0.9, gl + 0.3))      # camera at the front edge
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(C(T.AMBER))
+        c = self.pt(0, gl - 1.0)                                   # magnetometer
+        p.drawPolygon(hline_polygon((c.x(), c.y() - 3), (c.x() + 3, c.y()), (c.x(), c.y() + 3),
+                                    (c.x() - 3, c.y())))
+
+        # Dimension: thruster to thruster.
+        dy = self.pt(0, by).y() + 56
+        x0, x1 = self.pt(self.POS['FL'], 0).x(), self.pt(self.POS['FR'], 0).x()
+        p.setPen(QPen(C(T.FAINT), 1))
+        p.drawLine(QPointF(x0, dy), QPointF(x1, dy))
+        for x in (x0, x1):
+            p.drawLine(QPointF(x, dy - 4), QPointF(x, dy + 4))
+        self.text(p, self.CX, dy + 13, '%.0f cm' % (self.POS['FR'] - self.POS['FL']), 9 * dpi_fix,
+                  T.FAINT, mono=True)
+
+        pr = self.PROP_R_CM * k
+        for m, x in self.POS.items():
+            o = self.pt(x, by)
             v = self.v.get(m)
+            col = C(T.S_Y if isnum(v) and v < 0 else T.UN_GREEN)
             if m[0] == 'F':
-                ln = v * 34 if isnum(v) else 0
-                if abs(ln) >= 2:
-                    col = C(T.S_Y if v < 0 else T.UN_GREEN)
-                    y1, y2 = -9, -9 - ln
-                    d = -1 if y2 < y1 else 1                # direction of the arrow along y
-                    # marker: a 15-unit triangle whose tip sits 3 units past the line end
+                # motor body along the bar, propeller seen edge-on in front of it
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(C(T.MUTED))
+                p.drawRoundedRect(self.rect(x - 0.45, by - 1.0, x + 0.45, by + 0.8), 1.5, 1.5)
+                prop_y = self.pt(0, by + 1.2).y()
+                p.setPen(QPen(C(T.MUTED), 2.5, cap=Qt.PenCapStyle.RoundCap))
+                p.drawLine(QPointF(o.x() - pr, prop_y), QPointF(o.x() + pr, prop_y))
+                ln = abs(v) * self.ARROW_MAX if isnum(v) else 0
+                if ln >= 2:
+                    d = 1 if v < 0 else -1                       # +1 is backward (down)
+                    y1 = self.pt(0, by - 1.0).y() if v < 0 else prop_y - 1.5
+                    tip = y1 + d * ln
+                    head = min(12.0, ln)
                     p.setPen(QPen(col, 3, cap=Qt.PenCapStyle.FlatCap))
-                    p.drawLine(QPointF(0, y1), QPointF(0, y2 - d * 3))
+                    p.drawLine(QPointF(o.x(), y1), QPointF(o.x(), tip - d * (head - 1)))
                     p.setPen(Qt.PenStyle.NoPen)
                     p.setBrush(col)
-                    tip = y2 + d * 3
-                    p.drawPolygon(hline_polygon((0, tip), (7.5, tip - d * 15), (-7.5, tip - d * 15)))
+                    p.drawPolygon(hline_polygon((o.x(), tip), (o.x() + 6, tip - d * head),
+                                                (o.x() - 6, tip - d * head)))
+                lx = o.x() + (-1 if x < 0 else 1) * (pr + 5)
+                align = 'end' if x < 0 else 'start'
+                self.text(p, lx, o.y() + 3, m, 11 * dpi_fix, T.MUTED, weight=700, align=align)
+                self.text(p, lx, o.y() + 13, self.MNUM[m], 8.5 * dpi_fix, T.FAINT, align=align)
             else:
-                r = 7 + abs(v) * 16 if isnum(v) else 7
-                if r >= 8:
+                # propeller disc seen from above, the hub at its centre
+                p.setPen(QPen(C(T.MUTED), 1, Qt.PenStyle.DashLine))
+                p.setBrush(C(T.RAISED_2, 0.6))
+                p.drawEllipse(o, pr, pr)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(C(T.MUTED))
+                p.drawEllipse(o, 2, 2)
+                grow = abs(v) * self.RING_GROW if isnum(v) else 0
+                if grow >= 1:
                     p.setOpacity(0.9)
-                    p.setPen(QPen(C(T.UN_GREEN), 3))
+                    p.setPen(QPen(col, 3))
                     p.setBrush(Qt.BrushStyle.NoBrush)
-                    p.drawEllipse(QPointF(0, 0), r, r)
+                    p.drawEllipse(o, pr + grow, pr + grow)
                     p.setOpacity(1)
-            p.restore()
+                self.text(p, o.x(), o.y() + pr + self.RING_GROW + 12, m, 11 * dpi_fix, T.MUTED, weight=700)
+                self.text(p, o.x(), o.y() + pr + self.RING_GROW + 22, self.MNUM[m], 8.5 * dpi_fix, T.FAINT)
 
 
 class Compass(_ViewBox):

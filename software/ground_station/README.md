@@ -99,8 +99,9 @@ address toward the blimp, so a network joined by hand shows as joined too.
 - **STOP**: the orange button, Space or Esc. Coasts all four motors and switches the motor
   controls off. Always available, even while the console is busy. Esc works from any field;
   Space is left to the console line and the limit box while one has the focus.
-- **Motors**: tick *Motors enabled*, then move a slider; *Move pairs together* links FL with
-  FR and RL with RR. The limit (30 % by default) clamps every slider. The segmented bars and the
+- **Motors**: tick *Motors enabled*, then move a slider or step it with its − and + buttons (1 % of
+  the limit per click; hold to repeat). Each slider drives its own motor unless *Move pairs
+  together* (above the sliders, off at start) is on: then FL moves FR and RL moves RR. The limit (30 % by default) clamps every slider. The segmented bars and the
   arrows on the top view are the blimp's readback, not the slider. The window repeats the
   setpoint 10 times a second; the bridge stops repeating it 0.5 s after the window goes quiet,
   and the firmware coasts on its own timers after that. Closing the window stops the motors. Remove the propellers on the bench.
