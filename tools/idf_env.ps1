@@ -15,7 +15,7 @@
 #
 # USAGE (must be DOT-SOURCED so the environment persists in your shell):
 #     . .\tools\idf_env.ps1
-#     cd firmware
+#     cd firmware\projects\espfly      # the previous board's shell (ESP-IDF v5.3)
 #     idf.py build
 
 $ErrorActionPreference = "Stop"
