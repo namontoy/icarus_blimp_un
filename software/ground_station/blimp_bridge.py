@@ -1,21 +1,22 @@
-"""The back end's side of the blimp link: packets in, setpoints out, with the deadman.
+"""The ground station's side of the blimp link: packets in, setpoints out, with the deadman.
 
 Wraps blimp_link.BlimpLink (UDP packets: heartbeat out, telemetry and sensors
 in) and blimp_link.BlimpConsole. The one piece of logic that matters for safety
-lives here: the browser's motor setpoint is repeated to the blimp at STREAM_HZ
-only while the browser keeps refreshing it. A page that froze, a tab that
+lives here: the GUI's motor setpoint is repeated to the blimp at STREAM_HZ
+only while the GUI keeps refreshing it. A window that froze, a GUI that
 closed or a laptop that died all stop the stream within DEADMAN_S, and the
 firmware's own timeouts take it from there (docs/ground-station-plan.md §6).
 
-Everything is thread-based, like blimp_link itself; the server hops results
-onto its event loop. on_event(level, text) may be called from any thread.
+Everything is thread-based, like blimp_link itself; the station's Qt signals
+carry results onto the GUI thread. on_event(level, text) may be called from
+any thread.
 """
 import threading
 import time
 
 import blimp_link as bl
 
-DEADMAN_S = 0.5     # the browser must refresh its setpoint within this
+DEADMAN_S = 0.5     # the GUI must refresh its setpoint within this
 STREAM_HZ = 20.0    # MOTOR_SET rate to the blimp while the setpoint is fresh
 
 
@@ -78,7 +79,7 @@ class BlimpBridge:
     # ---------------------------------------------------------- setpoints out
 
     def set_motors(self, cmd):
-        """cmd: four signed commands in FL, RL, FR, RR order. The page clamps to
+        """cmd: four signed commands in FL, RL, FR, RR order. The GUI clamps to
         its limit; this clamps to the driver's range so a bug cannot exceed it."""
         vals = []
         for c in list(cmd)[:4]:
@@ -105,7 +106,7 @@ class BlimpBridge:
         self.on_event('ok', 'STOP sent: all motors %s' % ('braked' if brake else 'coasting'))
 
     def release(self):
-        """The last browser went away: nothing is driving any more."""
+        """The GUI went away: nothing is driving any more."""
         with self._lock:
             self._cmd = None
 
@@ -132,7 +133,7 @@ class BlimpBridge:
                     except OSError:
                         pass
                 if driven:
-                    self.on_event('warn', 'setpoint from the page went stale for %d ms: '
+                    self.on_event('warn', 'setpoint from the GUI went stale for %d ms: '
                                           'motors released' % int(DEADMAN_S * 1000))
 
     # ---------------------------------------------------------------- console
@@ -146,7 +147,7 @@ class BlimpBridge:
 
 class DemoBlimp(BlimpBridge):
     """mock_blimp.MockBlimp in-process on localhost, with the same bridge on top,
-    so the page can be developed and shown with nothing plugged in."""
+    so the GUI can be developed and shown with nothing plugged in."""
 
     def __init__(self, on_event, on_packet=None, port=bl.LINK_PORT, console_port=bl.CONSOLE_PORT):
         import mock_blimp

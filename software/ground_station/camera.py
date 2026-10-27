@@ -1,32 +1,30 @@
-"""Camera sources for the ground station: the ESP32-CAM over serial, or a demo.
+"""Camera sources for the ground station: for now only a demo.
+
+The cameras are wired to the S3, never to this computer: each ESP32-CAM sends
+the S3 what it extracts from its pictures (detections, optical flow), and the
+S3 is the only thing the ground station talks to, over Wi-Fi
+(docs/inter-board-link-plan.md). The link has no packet for camera data yet,
+so outside --demo the source is CameraSource, which has nothing to show. A
+source fed by the S3 slots in here when that packet exists.
 
 Each source runs its own thread and calls back with frames, rows and status:
 
     on_frame(png_bytes, w, h, seq, t_ms, row_or_None)
-    on_row(row_dict)                 the camera's CSV row (tcview.protocol.COLUMNS)
-    on_status(dict)                  connection, baud, counters
+    on_row(row_dict)                 one detection row, target_cam's CSV columns
+    on_status(dict)                  connection, counters
     on_event(level, text)
 
-Frames are delivered as PNG (the browser decodes that natively) built here from
-the camera's raw RGB565, so the page never sees the sensor's byte order.
-
-SerialCamera reuses the parser from the target_cam viewer,
-firmware/projects/target_cam/host/viewer/tcview/protocol.py, which is Qt-free.
-That project lives on the target-cam branches; until it is merged this source
-reports it as missing and the page runs on DemoCamera instead.
+The frame callback is kept for the on-demand calibration grabs the
+inter-board plan expects to relay through the S3; not implemented yet, and
+only DemoCamera draws frames today. Frames are delivered as PNG (the station
+decodes them with Qt's QImage.fromData), so the GUI never sees a camera's
+pixel format.
 """
 import math
-import os
 import struct
-import sys
 import threading
 import time
 import zlib
-
-try:
-    import numpy as np
-except ImportError:                 # pure-Python fallbacks below, slower but fine at QQVGA
-    np = None
 
 W, H = 160, 120
 FOV_DEG = 54.0                      # target_cam default horizontal field of view
@@ -46,28 +44,6 @@ def png_rgb(w, h, rgb):
             + chunk(b'IDAT', zlib.compress(raw, 6)) + chunk(b'IEND', b''))
 
 
-def rgb565_to_rgb(data, w, h, big_endian):
-    """Raw RGB565 words -> packed RGB888 bytes, replicating the top bits into the
-    low ones as the viewer does, so full scale is 255 and not 248."""
-    n = w * h
-    if np is not None:
-        px = np.frombuffer(data, dtype='>u2' if big_endian else '<u2', count=n).astype(np.uint32)
-        r, g, b = (px >> 11) & 0x1F, (px >> 5) & 0x3F, px & 0x1F
-        out = np.empty((n, 3), dtype=np.uint8)
-        out[:, 0] = (r << 3) | (r >> 2)
-        out[:, 1] = (g << 2) | (g >> 4)
-        out[:, 2] = (b << 3) | (b >> 2)
-        return out.tobytes()
-    fmt = ('>' if big_endian else '<') + '%dH' % n
-    out = bytearray(n * 3)
-    for i, px in enumerate(struct.unpack(fmt, data[:n * 2])):
-        r, g, b = (px >> 11) & 0x1F, (px >> 5) & 0x3F, px & 0x1F
-        out[3 * i] = (r << 3) | (r >> 2)
-        out[3 * i + 1] = (g << 2) | (g >> 4)
-        out[3 * i + 2] = (b << 3) | (b >> 2)
-    return bytes(out)
-
-
 # ------------------------------------------------------------------ sources
 
 class CameraSource:
@@ -84,7 +60,7 @@ class CameraSource:
 
     def command(self, action, **kw):
         """Returns (ok, text)."""
-        return False, 'no camera configured (start with --cam PORT or --cam demo)'
+        return False, 'no camera source: the link carries no camera data yet'
 
     def status(self):
         return {'source': self.name, 'connected': False, 'live': False}
@@ -93,7 +69,7 @@ class CameraSource:
 class DemoCamera(CameraSource):
     """A red balloon drifting over a wall with a wood patch, at the camera's own
     12.5 frames per second: rows every tick, frames when asked. The verdict and
-    the blob geometry follow the drawn disc, so the page's overlay lines up."""
+    the blob geometry follow the drawn disc, so the GUI's overlay lines up."""
     name = 'demo'
     TICK_S = 0.08                   # the sensor's frame period (80 ms at XCLK 20 MHz)
 
@@ -123,11 +99,15 @@ class DemoCamera(CameraSource):
         return self
 
     def stop(self):
+        # Joined, not just signalled, so no frame callback reaches the GUI
+        # after it has closed.
         self._stop.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout=1.0)
 
     def status(self):
-        return {'source': self.name, 'connected': True, 'live': self._live, 'baud': 0,
-                'port': 'demo', 'frames_ok': self._seq, 'frames_bad': 0}
+        return {'source': self.name, 'connected': True, 'live': self._live,
+                'frames_ok': self._seq, 'frames_bad': 0}
 
     def command(self, action, **kw):
         if action == 'grab':
@@ -137,12 +117,6 @@ class DemoCamera(CameraSource):
             self._live = bool(kw.get('on', not self._live))
             self.on_status(self.status())
             return True, 'live %s' % ('on' if self._live else 'off')
-        if action in ('connect', 'disconnect'):
-            return True, 'demo camera is always connected'
-        if action == 'baud':
-            return True, 'demo camera has no baud rate'
-        if action == 'send':
-            return True, 'demo camera ignores raw commands'
         return False, 'unknown camera action %r' % action
 
     def _scene(self, t):
@@ -208,206 +182,7 @@ class DemoCamera(CameraSource):
                 self.on_row(row)
 
 
-class SerialCamera(CameraSource):
-    """The ESP32-CAM on its USB serial port, speaking the target_cam protocol.
-
-    Not yet run against hardware from here (docs/ground-station-plan.md §8):
-    the parser is the viewer's and is tested there; the serial handling below
-    follows the two lessons recorded in tcview/link.py, DTR and RTS low before
-    opening so the board is not reset, and one command at a time."""
-    name = 'serial'
-    BOOT_BAUD = 115200
-    REVERT_S = 3.0
-
-    def __init__(self, port, *cbs):
-        super().__init__(*cbs)
-        self.port = port
-        self.baud = self.BOOT_BAUD
-        self._P = _load_tcview_protocol()
-        import serial  # pyserial
-        self._serial_mod = serial
-        self._ser = None
-        self._live = False
-        self._pending_frame = None      # (png, w, h, seq, t_ms, arrived) waiting for its row
-        self._want_baud = None
-        self._baud_at = 0.0
-        self._last_row_at = 0.0
-        self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._loop, daemon=True, name='serial_cam')
-        self.parser = self._P.StreamParser()
-        self.rows = 0
-
-    def start(self):
-        self._thread.start()
-        return self
-
-    def stop(self):
-        self._stop.set()
-
-    def status(self):
-        p = self.parser
-        return {'source': self.name, 'connected': self._ser is not None, 'live': self._live,
-                'port': self.port, 'baud': self.baud, 'rows': self.rows,
-                'frames_ok': p.frames_ok, 'frames_bad': p.frames_bad, 'junk': p.junk_lines}
-
-    def _write(self, text):
-        if self._ser is None:
-            return False
-        try:
-            self._ser.write(b'\n' + text.encode('ascii') + b'\n')   # a newline first flushes a half-line
-            return True
-        except (OSError, ValueError):
-            return False
-
-    def command(self, action, **kw):
-        if action == 'connect':
-            return (True, 'connecting') if self._ser is None else (True, 'already open')
-        if action == 'disconnect':
-            self._disconnect()
-            return True, 'port closed'
-        if self._ser is None:
-            return False, 'camera port is not open'
-        if action == 'grab':
-            return (self._write('g'), 'frame requested')
-        if action == 'live':
-            on = bool(kw.get('on', not self._live))
-            ok = self._write('v1' if on else 'v0')
-            if ok:
-                self._live = on
-            return ok, 'live %s' % ('on' if on else 'off')
-        if action == 'baud':
-            b = int(kw.get('baud', self.BOOT_BAUD))
-            if b not in self._P.BAUDS:
-                return False, 'baud must be one of %s' % self._P.BAUDS
-            self._want_baud = b
-            return self._write('B%d' % b), 'asked the camera for %d baud' % b
-        if action == 'send':
-            return self._write(str(kw.get('text', ''))), 'sent'
-        return False, 'unknown camera action %r' % action
-
-    def _open(self):
-        try:
-            ser = self._serial_mod.Serial()
-            ser.port = self.port
-            ser.baudrate = self.BOOT_BAUD
-            ser.timeout = 0.05
-            ser.dtr = False
-            ser.rts = False
-            ser.exclusive = True
-            ser.open()
-        except (OSError, ValueError) as e:
-            self.on_event('crit', 'camera port %s: %s' % (self.port, e))
-            return False
-        self._ser = ser
-        self.baud = self.BOOT_BAUD
-        self.parser.reset()
-        self.on_event('ok', 'camera port %s open at %d' % (self.port, self.baud))
-        self.on_status(self.status())
-        return True
-
-    def _disconnect(self):
-        if self._ser is not None:
-            try:
-                if self.baud != self.BOOT_BAUD:
-                    self._write('B%d' % self.BOOT_BAUD)
-                    time.sleep(0.2)
-                self._ser.close()
-            except OSError:
-                pass
-            self._ser = None
-            self._live = False
-            self.on_status(self.status())
-
-    def _set_baud(self, baud):
-        self._ser.baudrate = baud
-        self.baud = baud
-        self.parser.reset()
-        self._write('k')                # tells the camera we can hear it here
-        self._baud_at = time.monotonic()
-        self.on_event('ok', 'camera link now at %d baud' % baud)
-        self.on_status(self.status())
-
-    def _loop(self):
-        P = self._P
-        last_status = 0.0
-        while not self._stop.is_set():
-            if self._ser is None:
-                if not self._open():
-                    time.sleep(2.0)
-                    continue
-            try:
-                data = self._ser.read(4096)
-            except (OSError, ValueError) as e:
-                self.on_event('crit', 'camera port lost: %s' % e)
-                self._ser = None
-                continue
-            now = time.monotonic()
-            events = self.parser.feed(data, now) if data else []
-            events += self.parser.expire(now, self.baud)
-            for ev in events:
-                self._dispatch(ev, now)
-            # The camera reverts to 115200 by itself if it hears nothing valid
-            # for 3 s after a switch; follow it down if rows stopped.
-            if self.baud != self.BOOT_BAUD and now - max(self._last_row_at, self._baud_at) > self.REVERT_S + 1.0:
-                self.on_event('warn', 'nothing heard at %d baud, back to %d' % (self.baud, self.BOOT_BAUD))
-                self._set_baud(self.BOOT_BAUD)
-            if self._pending_frame and now - self._pending_frame[5] > 0.5:
-                png, w, h, seq, t_ms, _ = self._pending_frame
-                self._pending_frame = None
-                self.on_frame(png, w, h, seq, t_ms, None)
-            if now - last_status > 1.0:
-                last_status = now
-                self.on_status(self.status())
-
-    def _dispatch(self, ev, now):
-        P = self._P
-        if isinstance(ev, P.Row):
-            self.rows += 1
-            self._last_row_at = now
-            if self._pending_frame and abs(ev.v.get('t_ms', -1) - self._pending_frame[4]) < 1:
-                png, w, h, seq, t_ms, _ = self._pending_frame
-                self._pending_frame = None
-                self.on_frame(png, w, h, seq, t_ms, ev.v)
-            else:
-                self.on_row(ev.v)
-        elif isinstance(ev, P.Frame):
-            rgb = rgb565_to_rgb(ev.data, ev.w, ev.h, ev.big_endian)
-            self._pending_frame = (png_rgb(ev.w, ev.h, rgb), ev.w, ev.h, ev.seq, ev.t_ms, now)
-        elif isinstance(ev, P.FrameError):
-            self.on_event('warn', 'camera %s %s: %s' % (ev.kind.lower(), ev.seq, ev.reason))
-        elif isinstance(ev, P.Baud):
-            if self._want_baud == ev.baud:
-                self._want_baud = None
-                self._set_baud(ev.baud)
-        elif isinstance(ev, P.Nak):
-            self.on_event('warn', 'camera refused %r: %s' % (ev.cmd, ev.reason))
-        elif isinstance(ev, P.Cfg):
-            self._live = bool(ev.v.get('v', ev.v.get('image', 0)))
-            self.on_status(dict(self.status(), cfg=ev.v))
-        elif isinstance(ev, P.Comment):
-            if ev.text.startswith('#!') or ev.text.startswith('# '):
-                self.on_event('info', 'camera: %s' % ev.text[:120])
-
-
-def _load_tcview_protocol():
-    """tcview.protocol from the target_cam viewer, wherever this checkout has it."""
-    here = os.path.dirname(os.path.abspath(__file__))
-    repo = os.path.dirname(os.path.dirname(here))
-    viewer = os.path.join(repo, 'firmware', 'projects', 'target_cam', 'host', 'viewer')
-    if not os.path.isdir(os.path.join(viewer, 'tcview')):
-        raise RuntimeError('the target_cam viewer (firmware/projects/target_cam/host/viewer) is not '
-                           'on this branch; the camera protocol parser lives there. Use --cam demo, '
-                           'or merge the target-cam branch.')
-    if viewer not in sys.path:
-        sys.path.insert(0, viewer)
-    from tcview import protocol
-    return protocol
-
-
-def make_camera(spec, *cbs):
-    """spec: None, 'demo', or a serial port name."""
-    if not spec:
-        return CameraSource(*cbs)
-    if spec.lower() == 'demo':
-        return DemoCamera(*cbs)
-    return SerialCamera(spec, *cbs)
+def make_camera(demo, *cbs):
+    """The demo camera in demo mode; otherwise no source, until the S3 relays
+    the cameras' data over the link."""
+    return DemoCamera(*cbs) if demo else CameraSource(*cbs)
