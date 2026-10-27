@@ -54,9 +54,11 @@ if errorlevel 1 (
   exit /b 1
 )
 
-REM Project directory: the flight firmware unless a wrapper points elsewhere
-REM (tools\lens_test\build.bat sets IDF_PROJECT to its ESP32-CAM bench project).
-if not defined IDF_PROJECT set "IDF_PROJECT=%~dp0..\firmware"
+REM Project directory: the previous board's flight shell (ESP-FLY, ESP-IDF v5.3)
+REM unless a wrapper points elsewhere (tools\lens_test\build.bat sets IDF_PROJECT
+REM to its ESP32-CAM bench project). The live S3-Zero firmware builds with
+REM scripts\idf.bat instead (ESP-IDF v5.5.5).
+if not defined IDF_PROJECT set "IDF_PROJECT=%~dp0..\firmware\projects\espfly"
 cd /d "%IDF_PROJECT%"
 echo [idf_build] === idf.py %SUBCMD% in %CD% ===
 call idf.py %SUBCMD%

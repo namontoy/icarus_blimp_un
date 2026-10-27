@@ -1,10 +1,15 @@
 ---
 # Generated from .claude/skills/flash-firmware/SKILL.md by tools/sync_skills.py - edit that file, not this one.
 name: flash-firmware
-description: Build and flash the ESP32-S3 firmware to the blimp's ESP-FLY board on Windows, optionally in motor-identification mode. Touches real hardware, so it runs only when a person explicitly asks for it.
+description: Build and flash the previous board's flight shell (firmware/projects/espfly) to an ESP-FLY board on Windows, optionally in motor-identification mode. Not for the live ESP32-S3-Zero firmware. Touches real hardware, so it runs only when a person explicitly asks for it.
 ---
 
 # Flash the firmware
+
+This skill flashes the previous board's shell, `firmware/projects/espfly/` (XIAO ESP32-S3 on the
+ESP-FLY PCB, ESP-IDF v5.3). The live ESP32-S3-Zero firmware, `firmware/projects/i2c_tools/`, builds
+and flashes as CLAUDE.md describes (`scripts\idf.bat i2c_tools build` on Windows) and has no
+motor-identification mode; if the request is about that board, say so and stop.
 
 The request may name a COM port, and may ask for motor-identification mode.
 
@@ -12,7 +17,7 @@ This drives real hardware. Before any step that can spin a motor, confirm with t
 
 ## 1. Check what will be flashed
 
-- Read `BLIMP_BOOT_MOTOR_ID_MODE` in `firmware/main/board_config.h`. It must be `0` unless the
+- Read `BLIMP_BOOT_MOTOR_ID_MODE` in `firmware/projects/espfly/main/board_config.h`. It must be `0` unless the
   person asked for motor-identification mode. Say which mode is about to be flashed.
 - Run `git status`. Flashing uncommitted code is allowed, but mention it in the report so the
   flashed build can be traced.
@@ -52,7 +57,7 @@ If it still fails, have the person hold BOOT, tap RESET, release BOOT, then retr
 
 ```
 . .\tools\idf_env.ps1
-cd firmware
+cd firmware\projects\espfly
 idf.py -p COM5 monitor
 ```
 

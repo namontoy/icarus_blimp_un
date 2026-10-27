@@ -186,7 +186,7 @@ def main(argv: list[str] | None = None) -> int:
         if gate():
             if os.name != "nt":
                 print(f"  {YELLOW}SKIP{OFF}  firmware build is Windows-only here "
-                      f"(tools/idf_build.bat); on Linux run idf.py build in firmware/")
+                      f"(tools/idf_build.bat); on Linux run idf.py build in firmware/projects/espfly/")
             else:
                 # Invoked through cmd.exe deliberately: idf_build.bat handles four
                 # documented environment traps (inherited MSYSTEM, an undefined
