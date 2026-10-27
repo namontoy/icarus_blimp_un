@@ -3,7 +3,11 @@
 **Date:** 2026-10-23
 **Branch:** `s3-wireless-link`
 **Status:** plan agreed in conversation; implementation in `software/ground_station/`, see
-section 8 for what exists and what is pending.
+section 8 for what exists and what is pending. **2026-10-27:** the browser stack of section 2
+was replaced by a native PyQt6 window (`docs/ground-station-native-plan.md`); sections 2, 4, 8
+and 9 are updated to match, and the design brief and safety chain still apply. Also
+2026-10-27: the cameras talk only to the S3, never to this computer, so the serial camera
+source is gone and section 7 is rewritten.
 
 ## 1. What it has to do
 
@@ -18,13 +22,20 @@ them:
    readback from the blimp so a command that did not arrive is visible.
 3. **Do what the camera viewer does with images.** Show the ESP32-CAM's frames with the
    detector's boxes, the target verdict and the blob list, grab one frame or stream, and show
-   the link's health. Colour calibration, frame labelling and the classifier dataset stay in
+   the link's health. (Amended 2026-10-27, section 7: the detections are what reaches the
+   station, through the S3; frames only as occasional calibration grabs, not yet implemented.) Colour calibration, frame labelling and the classifier dataset stay in
    `tcview` on the `target-cam` branches: those are tooling for the detector, not flight.
 
 Plus the console, since every bench command already works over the air, and an event log for
 the things a person must not miss (link lost, failsafe tripped, a station leaving).
 
-## 2. Stack: browser front end, Python back end
+## 2. Stack
+
+**Superseded 2026-10-27.** The ground station is now one PyQt6 process with custom-painted
+widgets (no web server, no browser, no pywebview); the reasons and the file-by-file plan are in
+`docs/ground-station-native-plan.md`. The browser version below is in the git history up to
+commit `57eebe9`. The original comparison is kept because it records why the browser was chosen
+first:
 
 | Option | For | Against |
 |---|---|---|
@@ -43,6 +54,15 @@ browser (any)  <-- WebSocket, JSON -->  python -m ground_station  <-- UDP 7200/7
                                                  |
                                                  +-- pyserial (tcview protocol) --> ESP32-CAM
 ```
+
+Since 2026-10-27 the WebSocket is gone: the window and the back end share one process, and
+`station.py`'s Qt signals carry what the messages carried (section 4).
+
+```
+PyQt6 window (app.py, panels.py)  <-- Qt signals -->  Station (station.py)  <-- Wi-Fi, UDP 7200/7201 -->  S3 firmware  <-- UART -->  ESP32-CAMs
+```
+
+The S3 is the only device the station talks to (section 7).
 
 ## 3. Design brief
 
@@ -102,30 +122,33 @@ the tab bar, and the browser remembers height, tab and collapsed state. The IMU 
 camera frame are the flexible elements, so at 1080p no panel needs a scrollbar; a short window
 gets smaller gauges and the motor hint disappears.
 
-## 4. Messages between browser and back end
+## 4. Signals between the station and the window
 
-JSON, one object per WebSocket message. Server to browser:
+`station.Station` is a `QObject` that owns the blimp bridge, the camera, the Wi-Fi control and
+the console relay. The bridges call back from their own threads; Qt queues a signal emitted off
+the GUI thread onto it, so every slot runs on the GUI thread. Station to window:
 
-| `t` | Content | Rate |
+| Signal | Content | Rate |
 |---|---|---|
-| `hello` | demo flag, blimp address, camera port, protocol limits | once |
-| `tel` | the telemetry packet decoded (`motor`, `failsafe`, `link_alive`, counters) plus `age_s` | 10 Hz |
-| `sen` | the sensors packet decoded (section 5) | 10 Hz |
-| `cam` | one frame as a PNG data URI with its width, height, sequence and the CSV row of the same capture | per frame |
-| `camrow` | a CSV row without a frame (flight data) | per row |
-| `camstat` | camera link: connected, port, baud, rows/s, frames ok/bad | 2 Hz |
-| `con` / `con_end` | console output chunks and the end of a reply | as it arrives |
-| `ev` | `{level, text}` for the event log | as they happen |
-| `wifistat` | this computer's Wi-Fi toward the blimp: `backend`, `joined`, `ip`, `ssid`, `busy`, `phase`, `error`, `candidates` | in `hello`, on change (checked every 2 s), after a join or leave |
+| `tel(dict)` | link state (`alive`, `age_s`, `rx`, `bad`, `streaming`) and the telemetry packet decoded (`motor`, `failsafe`, `link_alive`, counters) | 10 Hz |
+| `sen(dict)` | the sensors packet decoded (section 5), only when a new one has arrived | up to 10 Hz |
+| `cam_frame(QImage, dict)` | one frame, decoded on the camera thread, with `{seq, t_ms, w, h, row}` (the CSV row of the same capture) | per frame |
+| `cam_row(dict)` | a CSV row without a frame (flight data) | per row |
+| `cam_status(dict)` | camera source: `source`, `connected`, `live`, frames ok/bad | on every change or command |
+| `con_text(str)` / `con_end()` | console output chunks and the end of a reply | as it arrives |
+| `ev(dict)` | `{ts, level, text}` for the event log (named `ev` because `event` would shadow `QObject.event`) | as they happen |
+| `wifi(dict)` | this computer's Wi-Fi toward the blimp: `backend`, `joined`, `ip`, `ssid`, `busy`, `phase`, `error`, `candidates` | at start, on change (checked every 2 s), after a join or leave |
 
-Browser to server: `motor {cmd:[fl,rl,fr,rr]}`, `stop {brake}`, `con {line}`,
-`cam {action: connect|disconnect|grab|live|baud, ...}`, `wifi {action: connect|disconnect}`.
+Window to station, as plain method calls: `set_motors([fl, rl, fr, rr])`, `stop(brake)`,
+`console(line)`, `camera_command(action, **kw)` with `action` grab or live (the demo camera
+only, for now), `wifi_action('connect' | 'disconnect')`, and `close()`. The demo flag and the blimp
+address that the old `hello` message carried are attributes of the station (`demo`,
+`blimp_host`), and so are the deadman and stream rate (`deadman_s`, `stream_hz`).
 
-The page opens in its own window when pywebview is installed (`window.py`; `--browser` for
-the system browser instead), and the header's **Join blimp Wi-Fi** button has the back end
-join the `ICARUS-…` access point (`wifi.py`: `netsh wlan` on Windows by profile name, since
-Windows 11 withholds scans from consoles without location services; `nmcli` on Linux as in
-`software/drone_gui.py`). Both added 2026-10-24.
+The header's **Join blimp Wi-Fi** button has the station join the `ICARUS-…` access point
+(`wifi.py`: `netsh wlan` on Windows by profile name, since Windows 11 withholds scans from
+consoles without location services; `nmcli` on Linux as in `software/drone_gui.py`). Added
+2026-10-24 and kept unchanged in the native version.
 
 ## 5. The sensor packet
 
@@ -157,14 +180,22 @@ what it found.
 
 ## 7. Camera
 
-The ESP32-CAM talks the protocol in `firmware/projects/target_cam/host/viewer/tcview/protocol.py`
-over its own USB serial port: CSV rows (target verdict, bearing, elevation, range, blobs,
-timings) at 115200 baud and `#!FRAME` packets of raw RGB565 160 × 120 pixels when asked (`g` for
-one, `v1`/`v0` for live), with a baud handshake up to 460800. The back end reuses that parser
-when the `target_cam` project is present on the branch (it is not on `master` yet) and the
-pyserial reader is its own; frames are converted to PNG for the browser. Without the camera
-project the camera panel runs on the demo source. When the inter-board link lands, frames and
-rows will come through the S3 over UDP instead, and only the back end's source changes.
+**Rewritten 2026-10-27.** The cameras are wired to the S3 and never to this computer
+(`docs/inter-board-link-plan.md`). Each ESP32-CAM extracts what it needs from its own pictures
+and sends the S3 only that: the forward camera its detections (target verdict, bearing,
+elevation, range, blobs, in target_cam's CSV columns), the downward camera its optical flow. The
+station talks only to the S3, over Wi-Fi, so camera data will reach it as a packet on the UDP
+link, which does not exist yet. Until then the camera panel runs on the demo source in `--demo`
+and is empty otherwise.
+
+The inter-board plan also expects occasional single-frame grabs for calibration, relayed by the
+S3; not implemented on either chip. The panel keeps its picture view, Grab frame and Live for
+that, and the station's `cam_frame` signal carries a frame as a `QImage`, so a future source
+only has to deliver PNG bytes (or anything `QImage.fromData` reads).
+
+Earlier versions of this section, and of the code, read the ESP32-CAM directly over a USB
+serial port with the target_cam viewer's parser (`--cam PORT`, pyserial). That was removed on
+2026-10-27; it is in the git history.
 
 ## 8. Phases
 
@@ -173,22 +204,21 @@ rows will come through the S3 over UDP instead, and only the back end's source c
 | 1 | Sensor packet in the protocol, mock sends it | done 2026-10-23 |
 | 2 | Back end: Tornado server, blimp bridge with the deadman, demo source, console relay | done 2026-10-23 |
 | 3 | Front end: layout, identity, motors, sensors, camera, console, events, keyboard | done 2026-10-23; first run against the blimp 2026-10-24 (link and motors live, sensors empty) |
-| 4 | Camera over serial with the tcview parser | after the `target-cam` branch merges |
+| 4 | Camera data through the S3: a link packet for the forward camera's detections (and the downward camera's flow), then a station source for it; calibration frame grabs after that | after the camera-to-S3 link (`docs/inter-board-link-plan.md`); the serial-port version was dropped 2026-10-27 |
 | 5 | Firmware: sensor task and `LINK_PKT_SENSORS` | done 2026-10-24 (`sensor_stream.c`), not yet run on hardware |
 | 6 | Bench: run against the real blimp with the stream, record what the page gets wrong | next |
-| 7 | Logging to CSV, parameter tuning from the page, Spanish labels if wanted | later |
+| 7 | Logging to CSV, parameter tuning from the window, Spanish labels if wanted | later |
+| 8 | Native PyQt6 window in place of the Tornado server and the page (`docs/ground-station-native-plan.md`) | done 2026-10-27 in demo and against `mock_blimp.py`; not yet run against the blimp |
 
 ## 9. Running it
 
 ```
 python -m software.ground_station --demo            # no hardware: mock blimp and mock camera in-process
 python -m software.ground_station                   # the real blimp at 192.168.4.1, join its Wi-Fi first
-python -m software.ground_station --cam COM5        # plus the camera on a serial port
 ```
 
-With pywebview installed it opens as its own window; otherwise it prints the address,
-`http://127.0.0.1:8765/`, and opens the default browser (`--browser` forces that, `--no-browser`
-serves only). Dependencies are pinned in `software/ground_station/requirements.txt` (tornado,
-pywebview, pyserial for the camera); the per-platform steps, including the system packages
-Linux needs for the window and how the Wi-Fi join differs between Windows and Linux, are in
-`software/ground_station/README.md` under "Installing".
+It opens as its own window; the full-screen button in the header or F11 toggles full screen,
+and the window size and the dock height are remembered between runs (QSettings). Dependencies
+are pinned in `software/ground_station/requirements.txt` (PyQt6 only); the
+install is the same `pip install -r` line on every OS, and how the Wi-Fi join differs between
+Windows and Linux is in `software/ground_station/README.md` under "Installing".

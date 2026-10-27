@@ -16,7 +16,7 @@ Linux uses nmcli the way software/drone_gui.py does: scan for the strongest
 SSID with the prefix, connect with the password, then turn autoconnect off
 so the laptop does not keep jumping back to the blimp after the session.
 
-Anything else reports no backend and the page says to join by hand.
+Anything else reports no backend and the window says to join by hand.
 """
 import os
 import re

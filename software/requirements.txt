@@ -1,9 +1,9 @@
 # Python tools in software/.
 #
 # The blimp's own ground station (software/ground_station) keeps its pins in its own file,
-# included here so one `pip install -r software/requirements.txt` covers both tools. Its
-# per-platform steps (Linux needs system packages for the window) are in
-# software/ground_station/README.md, "Installing".
+# included here so one `pip install -r software/requirements.txt` covers both tools. It
+# pins the same PyQt6 as the list below, so the repeat is harmless; installing it is the
+# same pip line on every OS (software/ground_station/README.md, "Installing").
 -r ground_station/requirements.txt
 
 # Below: the esp-drone bench tools (drone_gui.py, motor_diag.py). Tested with Python 3.10.

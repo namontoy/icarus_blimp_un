@@ -1,0 +1,415 @@
+"""The ground station's window: header, three panels, the dock, and main().
+
+    python -m software.ground_station --demo                  # no hardware
+    python -m software.ground_station                         # the blimp at 192.168.4.1
+
+One process: the Station (station.py) runs the blimp link, the camera and the
+Wi-Fi on their own threads and signals the window on the GUI thread.
+
+Safety on this side, as on the page it replaces: setpoints go out 10 times a
+second only while "Motors enabled" is on; STOP (the button, Esc, or Space
+when no text field has focus) sends a stop and switches the motors off;
+closing the window stops the motors first. Behind that, the bridge releases
+the motors if the setpoint stops for 0.5 s, and the blimp coasts on its own
+timers if the link stops.
+"""
+import argparse
+import signal
+import sys
+import time
+
+from PyQt6 import sip
+from PyQt6.QtCore import QEvent, QObject, QRect, QSettings, Qt, QTimer
+from PyQt6.QtGui import QPainter
+from PyQt6.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QLineEdit, QMainWindow, QSizePolicy,
+                             QVBoxLayout, QWidget)
+
+from . import theme as T
+from .panels import CameraPanel, Dock, MotorsPanel, SensorsPanel, button, load_dock, save_dock
+from .station import Station
+from .widgets import (C, DockSplitter, ElidedLabel, FullScreenButton, Pill, StopButton, Wordmark, clamp, hbox,
+                      hline_polygon, label, set_color)
+
+TEL_STALE_S = 1.5
+FRAME_MS = 33               # plots, staleness and camera ageing, about 30 Hz
+DOCK_MIN_PX = 110
+PANELS_MIN_PX = 320         # the dock never squeezes the window's top part below this
+COMPACT_BELOW_PX = 860      # a laptop screen: smaller gauges, no motor hint
+
+
+def dock_default_px(h):
+    """First-run height: about a quarter of the window, 230 px on a 1080p screen."""
+    return clamp(round(h * 0.23), 140, 230)
+
+
+class Header(QWidget):
+    """Wordmark, the Wi-Fi join, the status pills, full screen and STOP, over
+    the papaya stripe and a hairline."""
+
+    def __init__(self, demo):
+        super().__init__()
+        self.demo = demo
+        sub = label('Universidad Nacional de Colombia <span style="color:%s">·</span> blimp ground station'
+                    % T.PAPAYA, 12, color=T.MUTED, spacing=0.12, caps=True)
+        brand = QVBoxLayout()
+        brand.setSpacing(4)
+        brand.setContentsMargins(0, 0, 0, 0)
+        brand.addWidget(Wordmark())
+        brand.addWidget(sub)
+        self.wifi_b = button('Join blimp Wi-Fi', tip="join the blimp's access point from this computer")
+        self.wifi_b.setEnabled(False)
+        self.wifi_note = ElidedLabel('—')
+        self.wifi_note.setFont(T.font(11, mono=True))
+        set_color(self.wifi_note, T.FAINT)
+        self.wifi_note.setMaximumWidth(300)
+        self.wifi_note.setMinimumWidth(60)
+        self.pills = {
+            'wifi': Pill('Wi-Fi', "this computer's connection to the blimp's access point"),
+            'link': Pill('Link', 'UDP link to the blimp: age of the last packet'),
+            'fs': Pill('Failsafe', 'motor driver failsafe on the blimp'),
+            'sta': Pill('STA', "stations on the blimp's access point"),
+            'cam': Pill('Cam', 'camera link'),
+            'demo': Pill('Demo data', 'nothing here touches a real blimp', 'demo', ''),
+        }
+        self.pills['demo'].setVisible(demo)
+        self.full_b = FullScreenButton()
+        self.full_b.setToolTip('full screen (F11)')
+        self.full_b.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+        self.stop_b = StopButton()
+        self.stop_b.setToolTip('Coast all four motors (Space or Esc)')
+        lay = hbox(brand, 12, self.wifi_b, 10, self.wifi_note, None, spacing=0, margins=(4, 14, 4, 10))
+        lay.setStretchFactor(self.wifi_note, 1)
+        for p in self.pills.values():
+            lay.addWidget(p)
+            lay.addSpacing(8)
+        lay.addSpacing(10)
+        lay.addWidget(self.full_b)
+        lay.addSpacing(18)
+        lay.addWidget(self.stop_b)
+        self.setLayout(lay)
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(C(T.PAPAYA))         # the one McLaren line in the window
+        p.drawPolygon(hline_polygon((0, 0), (260, 0), (254, 3), (0, 3)))
+        p.fillRect(QRect(0, self.height() - 1, self.width(), 1), C(T.BORDER))
+
+    def on_wifi(self, w):
+        """Joined or not is judged by the station from this computer's own
+        address, so the pill is honest even when the network was joined by hand."""
+        b, note, pill = self.wifi_b, self.wifi_note, self.pills['wifi']
+        if self.demo:
+            b.setEnabled(False)
+            T.restyle(b, state='')
+            note.setText('demo: no radio involved')
+            pill.set('idle', 'DEMO')
+            return
+        if not w or w.get('backend') == 'none':
+            b.setEnabled(False)
+            T.restyle(b, state='')
+            note.setText((w or {}).get('error') or 'no Wi-Fi control on this system: join ICARUS-… by hand')
+            pill.set('ok' if w and w.get('joined') else 'idle', w['ip'] if w and w.get('joined') else '—')
+            return
+        busy = bool(w.get('busy'))
+        b.setEnabled(not busy)
+        if busy:
+            b.setText('Leaving…' if w.get('phase') == 'leaving' else 'Joining…')
+            T.restyle(b, state='busy')
+        elif w.get('joined'):
+            b.setText('Leave blimp Wi-Fi')
+            T.restyle(b, state='up')
+        else:
+            b.setText('Join blimp Wi-Fi')
+            T.restyle(b, state='')
+        if w.get('joined'):
+            note.setText('%s · this computer is %s' % (w.get('ssid') or 'on the blimp network', w.get('ip')))
+        elif w.get('error'):
+            note.setText(w['error'])
+        else:
+            c = w.get('candidates') or []
+            note.setText('known: ' + ', '.join(c) if c else 'no ICARUS-… network known yet')
+        note.setToolTip(note.text())
+        pill.set('live' if busy else 'ok' if w.get('joined') else 'warn',
+                 (w.get('phase') or '').upper() if busy else w.get('ip') if w.get('joined') else 'DOWN')
+
+    def on_tel(self, m):
+        tel = m.get('tel')
+        if m.get('alive') and tel:
+            age = m.get('age_s')
+            self.pills['link'].set('ok' if tel.get('link_alive') else 'warn',
+                                   '%d ms' % round(age * 1000) if age is not None else '—')
+            fs = tel.get('failsafe')
+            self.pills['fs'].set('crit' if fs == 'TRIPPED' else 'live' if fs == 'armed' else 'ok', fs)
+            self.pills['sta'].set('ok' if tel.get('stations', 0) > 0 else 'warn', str(tel.get('stations')))
+        else:
+            self.pills['link'].set('crit', 'NO TELEMETRY')
+            self.pills['fs'].set('idle', '—')
+            self.pills['sta'].set('idle', '—')
+
+    def on_cam_status(self, st):
+        if not st.get('source') or st['source'] == 'none':
+            self.pills['cam'].set('idle', 'NONE')
+        elif st.get('connected'):
+            self.pills['cam'].set('live' if st.get('live') else 'ok', 'LIVE' if st.get('live') else 'UP')
+        else:
+            self.pills['cam'].set('warn', 'DOWN')
+
+
+class MainWindow(QMainWindow):
+    def __init__(self, station, settings):
+        super().__init__()
+        self.station, self.settings = station, settings
+        self.setWindowTitle('Icarus Ground Station')
+        self.tel_at, self.alive = 0.0, False
+        self.wifi = None
+        self._compact = None
+        self._dock_h = None
+        self._was_maximized = False
+
+        self.header = Header(station.demo)
+        self.motors = MotorsPanel(station)
+        self.camera = CameraPanel(station)
+        self.sensors = SensorsPanel(station.demo)
+        self.motors.setFixedWidth(340)
+        self.sensors.setFixedWidth(400)
+        grid = QWidget()
+        grid.setLayout(hbox(self.motors, self.camera, self.sensors, spacing=12, margins=(0, 12, 0, 0)))
+        grid.layout().setStretchFactor(self.camera, 1)
+        grid.setMinimumHeight(200)
+        self.dock = Dock(station)
+        self.split = DockSplitter()
+        self.split.addWidget(grid)
+        self.split.addWidget(self.dock)
+        self.split.setStretchFactor(0, 1)
+        self.split.setStretchFactor(1, 0)
+        self.split.splitterMoved.connect(self._dock_moved)
+        self.split.handle_released.connect(self._save_dock_h)
+        self.split.handle_reset.connect(self._reset_dock_h)
+        self.dock.collapsed_changed.connect(self._collapsed)
+
+        root = QWidget()
+        # Clicking empty space takes the focus out of the console's input, so
+        # Space works as STOP again without hunting for a neutral spot.
+        root.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        rl = QVBoxLayout(root)
+        rl.setContentsMargins(16, 0, 16, 10)
+        rl.setSpacing(0)
+        rl.addWidget(self.header)
+        rl.addWidget(self.split, 1)
+        self.setCentralWidget(root)
+
+        h = self.header
+        h.stop_b.clicked.connect(self.stop)
+        h.full_b.clicked.connect(self.toggle_full)
+        h.wifi_b.clicked.connect(lambda: station.wifi_action(
+            'disconnect' if self.wifi and self.wifi.get('joined') else 'connect'))
+
+        station.tel.connect(self.on_tel)
+        station.sen.connect(self.sensors.on_sen)
+        station.cam_frame.connect(self.camera.on_frame)
+        station.cam_row.connect(self.camera.on_row)
+        station.cam_status.connect(self.camera.on_status)
+        station.cam_status.connect(h.on_cam_status)
+        station.con_text.connect(self.dock.write)
+        station.con_end.connect(self.dock.con_end)
+        station.ev.connect(self.dock.add_event)
+        station.wifi.connect(self.on_wifi)
+
+        self._frame = QTimer(self)
+        self._frame.timeout.connect(self.frame)
+        self._frame.start(FRAME_MS)
+
+        geo = settings.value('window/geometry')
+        if geo is None or not self.restoreGeometry(geo):
+            scr = QApplication.primaryScreen().availableGeometry()
+            self.resize(min(1680, scr.width()), min(1000, scr.height()))
+        load_dock(settings, self.dock)
+        # value(..., type=int) turns a missing key into 0, not None, and 0
+        # would pin the dock at its minimum on a first run.
+        h = settings.value('dock/h')
+        self._dock_h = int(h) if h not in (None, '') else None
+
+    # ------------------------------------------------------------ station in
+
+    def on_tel(self, m):
+        self.tel_at, self.alive = time.monotonic(), bool(m.get('alive'))
+        self.header.on_tel(m)
+        self.motors.on_tel(m)
+        self.sensors.on_tel_alive(self.alive)
+
+    def on_wifi(self, w):
+        self.wifi = w
+        self.header.on_wifi(w)
+
+    def frame(self):
+        self.sensors.frame()
+        self.camera.age()
+        if self.alive and self.tel_at and time.monotonic() - self.tel_at > TEL_STALE_S:
+            self.alive = False
+            self.motors.set_stale()
+            self.sensors.on_tel_alive(False)
+            self.header.pills['link'].set('crit', 'STALE')
+
+    # ---------------------------------------------------------------- safety
+
+    def stop(self):
+        self.motors.stop_all(False)
+        self.header.stop_b.flash()
+
+    # ---------------------------------------------------------- window, dock
+
+    def toggle_full(self):
+        if self.isFullScreen():
+            self.showMaximized() if self._was_maximized else self.showNormal()
+        else:
+            self._was_maximized = self.isMaximized()
+            self.showFullScreen()
+
+    def _dock_max(self):
+        return max(DOCK_MIN_PX, self.height() - PANELS_MIN_PX)
+
+    def _apply_dock_h(self):
+        if self.dock.collapsed:
+            bar = self.dock.bar_height()
+            self.dock.setFixedHeight(bar)
+            self.split.handle(1).setEnabled(False)
+            self.split.handle(1).update()
+            return
+        self.dock.setMinimumHeight(DOCK_MIN_PX)
+        self.dock.setMaximumHeight(self._dock_max())
+        self.split.handle(1).setEnabled(True)
+        # _dock_h stays what the user chose (None: the default for this
+        # height). Storing the clamped value would keep whatever this computed
+        # before the window had its size, which is the 110 px floor.
+        want = self._dock_h if self._dock_h is not None else dock_default_px(self.height())
+        h = clamp(want, DOCK_MIN_PX, self._dock_max())
+        total = sum(self.split.sizes())
+        self.split.setSizes([total - h, h])
+
+    def _dock_moved(self, pos, index):
+        if not self.dock.collapsed:
+            self._dock_h = self.split.sizes()[1]
+
+    def _save_dock_h(self):
+        if self._dock_h is not None:
+            self.settings.setValue('dock/h', self._dock_h)
+
+    def _reset_dock_h(self):
+        self._dock_h = None
+        self._apply_dock_h()
+        self.settings.remove('dock/h')
+
+    def _collapsed(self, on):
+        self._apply_dock_h()
+        save_dock(self.settings, self.dock)
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        QTimer.singleShot(0, self._apply_dock_h)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        compact = self.height() < COMPACT_BELOW_PX
+        if compact != self._compact:
+            self._compact = compact
+            self.motors.compact(compact)
+            self.sensors.compact(compact)
+        if self.isVisible():
+            self._apply_dock_h()
+
+    def closeEvent(self, e):
+        if self.motors.enabled:
+            self.motors.stop_all(False)
+        self.settings.setValue('window/geometry', self.saveGeometry())
+        save_dock(self.settings, self.dock)
+        self._save_dock_h()
+        self._frame.stop()
+        self.station.close()
+        super().closeEvent(e)
+
+
+class Keys(QObject):
+    """Esc always stops; Space stops unless a text field has focus; F11 toggles
+    full screen. On the application, so they work whatever has focus."""
+    TYPING = (QLineEdit, QAbstractSpinBox, QComboBox)
+
+    def __init__(self, win):
+        super().__init__(win)
+        self.win = win
+
+    def eventFilter(self, obj, e):
+        if e.type() != QEvent.Type.KeyPress or not isinstance(obj, QWidget) or obj.window() is not self.win:
+            return False
+        k = e.key()
+        if k == Qt.Key.Key_Escape or (k == Qt.Key.Key_Space and
+                                      not isinstance(QApplication.focusWidget(), self.TYPING)):
+            self.win.stop()
+            return True
+        if k == Qt.Key.Key_F11:
+            self.win.toggle_full()
+            return True
+        return False
+
+
+def parse_args(argv=None):
+    ap = argparse.ArgumentParser(prog='python -m software.ground_station',
+                                 description='Icarus blimp ground station (one native window).')
+    ap.add_argument('--demo', action='store_true', help='mock blimp and demo camera in-process, no hardware')
+    ap.add_argument('--blimp', default='192.168.4.1', help='blimp address (default %(default)s)')
+    ap.add_argument('--wifi-ssid', default=None,
+                    help="the blimp's network, ICARUS-XXXXXX; otherwise a stored profile or a scan decides")
+    ap.add_argument('--wifi-password', default='icarusblimp', help='its WPA2 key (default %(default)s)')
+    ap.add_argument('--wifi-prefix', default='ICARUS', help='SSID prefix to look for (default %(default)s)')
+    return ap.parse_args(argv)
+
+
+def wifi_opts(args):
+    return {'prefix': args.wifi_prefix, 'password': args.wifi_password, 'ssid': args.wifi_ssid,
+            'blimp_ip': args.blimp}
+
+
+def build(args, app):
+    """The station and its window, not yet started: main() and the tests share this."""
+    T.apply(app)
+    station = Station(args.demo, args.blimp, wifi_opts(args))
+    win = MainWindow(station, QSettings('Icarus', 'GroundStation'))
+    app.installEventFilter(Keys(win))
+    return station, win
+
+
+def teardown(station, win):
+    """Destroy the window and station while Python is still whole: main() and
+    the tests share this. Left to the interpreter's exit, PyQt destroys them
+    while walking its own map of wrappers, and the Python methods a dying
+    widget still calls (the app-wide Keys filter sees every event) add
+    wrappers mid-walk. The map is reallocated under the walk and the exit
+    segfaults: 7 runs in 8 under PYTHONMALLOC=debug before this, 2026-10-27."""
+    station.close()
+    sip.delete(win)         # Keys is its child, so the app-wide filter goes with it
+    sip.delete(station)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    app = QApplication(sys.argv[:1])
+    app.setApplicationName('Icarus Ground Station')
+    station, win = build(args, app)
+    win.show()
+    station.start()
+    # Ctrl-C in the terminal closes the window (and so stops the motors). Qt's
+    # loop never returns to Python on its own, so a timer lets the handler run.
+    signal.signal(signal.SIGINT, lambda *_: win.close())
+    tick = QTimer()
+    tick.timeout.connect(lambda: None)
+    tick.start(200)
+    rc = app.exec()
+    tick.stop()
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    teardown(station, win)
+    sys.exit(rc)
+
+
+if __name__ == '__main__':
+    main()

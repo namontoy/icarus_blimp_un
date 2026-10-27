@@ -1,8 +1,10 @@
-"""Ground station for the blimp: a browser page served by a small Python back end.
+"""Ground station for the blimp: one native PyQt6 window.
 
-The back end (server.py) bridges the UDP packet link and console of blimp_link.py,
-the ESP32-CAM's serial protocol (camera.py) and a demo mode to a WebSocket; the
-page in web/ draws it all. Design and message formats: docs/ground-station-plan.md.
+The station (station.py) bridges the UDP packet link and console of
+blimp_link.py, the camera data (camera.py: a demo until the S3 relays it),
+this computer's Wi-Fi (wifi.py) and a demo mode to Qt signals; the window (app.py, panels.py,
+widgets.py, theme.py) draws it all. Design: docs/ground-station-native-plan.md,
+signal table in docs/ground-station-plan.md §4.
 
     python -m software.ground_station --demo      # from the repo root, no hardware
     python -m software.ground_station             # the real blimp at 192.168.4.1

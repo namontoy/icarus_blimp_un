@@ -1,14 +1,11 @@
 # The blimp's ground station (software/ground_station). Python 3.9 or newer.
-# Pins are the versions `pip freeze` reported on the Windows laptop on 2026-10-24
-# (Python 3.12); check with `pip install --dry-run -r software/ground_station/requirements.txt`.
+# PyQt6 is the pin the esp-drone tools in software/requirements.txt already use.
+# Nothing else: the station talks only to the S3, over Wi-Fi, with the standard
+# library's sockets; the cameras are wired to the S3, never to this computer.
 #
 #   pip install -r software/ground_station/requirements.txt
 #
-# Linux also needs a web engine for the window, from the system packages:
-#   sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-3.0 gir1.2-webkit2-4.1
-# or, with no apt access, the Qt alternative:  pip install "pywebview[qt6]"
-# Without either the page opens in the browser instead (README, "Installing").
+# The same line on Windows, Linux and macOS: the PyQt6 wheels carry Qt itself,
+# so there is no system package or web engine to install (README, "Installing").
 
-tornado==6.4          # the back end: static page, WebSocket, the 10 Hz push
-pywebview==6.2.1      # the window; pulls in pythonnet on Windows and pyobjc on macOS by itself
-pyserial==3.5         # the camera over a serial port (SerialCamera); unused without --cam
+PyQt6==6.11.0         # the window
