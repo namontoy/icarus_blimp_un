@@ -1,4 +1,4 @@
-/* blimp_ffi.c - __declspec(dllexport) glue so the host-side MuJoCo sim can
+/* blimp_ffi.c - exported glue so the host-side MuJoCo sim can
  * drive the REAL compiled C core through Python's ctypes, per blimp.h's own
  * design goal: whatever the sim exercises is the exact same code that runs
  * on the vehicle, not a reimplementation.
@@ -6,8 +6,9 @@
  * THIS FILE IS NOT PORTABLE core/ CODE. core/CMakeLists.txt excludes it by
  * name (`*_ffi.c`) from the ESP-IDF component build, and tools/build.py's
  * build_dll() drops -Wconversion for it specifically - both say so in their
- * own comments. It is Windows/MSVC-ABI glue for a host-only DLL
- * (build/libblimp.dll), compiled only by tools/build.py's `dll` command,
+ * own comments. It is glue for a host-only shared library (build/libblimp.dll
+ * on Windows, build/libblimp.so on Linux), compiled only by tools/build.py's
+ * `dll` command,
  * and must never be compiled by xtensa-gcc. Accordingly, and ONLY here,
  * this file uses <stddef.h>'s size_t and standard, boring value/pointer
  * passing - nothing an embedded target would ever see.
@@ -81,7 +82,14 @@
 
 #include <stddef.h>
 
+/* Windows exports only what is marked dllexport; on Linux and macOS every
+ * non-static symbol is visible by default, and the attribute keeps it so if
+ * the library is ever built with -fvisibility=hidden. */
+#if defined(_WIN32)
 #define BLIMP_API __declspec(dllexport)
+#else
+#define BLIMP_API __attribute__((visibility("default")))
+#endif
 
 BLIMP_API size_t blimp_ffi_sizeof(void)
 {

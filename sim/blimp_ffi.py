@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import ctypes as C
 import os
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -47,7 +48,11 @@ from typing import Optional
 # Locating the DLL
 # ---------------------------------------------------------------------------
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_DLL_PATH = REPO_ROOT / "build" / "libblimp.dll"
+# Named by the same rule as LIB_NAME in tools/build.py, which builds it.
+DEFAULT_DLL_PATH = REPO_ROOT / "build" / (
+    "libblimp.dll" if os.name == "nt"
+    else "libblimp.dylib" if sys.platform == "darwin"
+    else "libblimp.so")
 
 
 class BlimpFFIError(RuntimeError):
@@ -396,7 +401,7 @@ class BlimpController:
         path = Path(dll_path) if dll_path is not None else DEFAULT_DLL_PATH
         if not path.exists():
             raise BlimpFFIError(
-                f"libblimp.dll not found at {path}.\n"
+                f"{path.name} not found at {path}.\n"
                 "Build it first:\n"
                 "    cd " + str(REPO_ROOT) + " && python tools/build.py dll\n"
                 "(That step compiles core/src/*.c, including core/src/blimp_ffi.c, "

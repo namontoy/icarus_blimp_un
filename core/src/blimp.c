@@ -131,6 +131,9 @@
 #include "blimp/blimp.h"
 
 #include <math.h>
+/* NULL. MSVC's <math.h> happens to define it, glibc's does not; a Linux build
+ * failed on that, so name the header that actually owns it. */
+#include <stddef.h>
 
 /* Anything from here to the next control tick this large is not a real
  * gap - a missed/late tick, a paused debugger, or (on the very first ever

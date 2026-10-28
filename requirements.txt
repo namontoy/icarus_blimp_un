@@ -25,7 +25,8 @@
 # the behaviour of 3.13.0 specifically (it documents two MuJoCo behaviours
 # that were established by direct experiment against this exact build).
 #
-# Verified working together on 2026-09-22, Python 3.12.10, Windows 11.
+# Verified working together on 2026-09-22, Python 3.12.10, Windows 11, and on
+# 2026-10-27, Python 3.12 (conda), Ubuntu 22.04.
 
 # --- direct dependencies ---------------------------------------------------
 mujoco==3.13.0        # physics engine; sim/sim_main.py, sim/scene/*.py

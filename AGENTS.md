@@ -62,9 +62,12 @@ CLAUDE.md, and others). Keep it tool-neutral; tool-specific notes belong in that
 
 ## Commands
 
-Windows 11 is the verified platform for the host side: Python 3.12 and clang on PATH. The S3-Zero
-firmware builds on Windows and Linux with ESP-IDF v5.5.5 (see CLAUDE.md); the espfly shell needs
-v5.3.
+The host side is verified on Windows 11 and, since 2026-10-27, on Ubuntu 22.04: Python 3.12 and
+clang on PATH. The controller library is `build/libblimp.dll` on Windows and `build/libblimp.so`
+on Linux; the same seed gives different lap times on the two (the maths libraries round
+differently and the closed loop amplifies it), so compare a platform's sweep with the same
+platform's table, or compare across seeds. The S3-Zero firmware builds on Windows and Linux
+with ESP-IDF v5.5.5 (see CLAUDE.md); the espfly shell needs v5.3.
 
 ```
 python tools/setup_env.py                     # once: .venv with the pinned MuJoCo
@@ -72,9 +75,10 @@ python tools/verify.py                        # fast checks (~20 s), after any c
 python tools/verify.py --full                 # adds both courses, with and without ToF (~1-2 min)
 python tools/verify.py --firmware             # adds the espfly shell build (ESP-IDF v5.3)
 python tools/build.py module <name>           # one module: pid params mixer estimator guidance blimp
-python tools/build.py dll                     # rebuild build/libblimp.dll after any core/ change
+python tools/build.py dll                     # rebuild build/libblimp.{dll,so} after any core/ change
 python tools/sim_sweep.py                     # lap times across seeds 0-4, both courses, none + tof
 .venv/Scripts/python sim/run_course.py --course 1 --max-time 220 --altitude-source tof --seed 3
+.venv/bin/python sim/run_course.py ...        # the same on Linux
 scripts\idf.bat i2c_tools build               # S3-Zero firmware on Windows; Linux: see CLAUDE.md
 tools\idf_build.bat                           # espfly shell build; handles the ESP-IDF PATH traps
 ```
@@ -105,7 +109,8 @@ tools\idf_build.bat                           # espfly shell build; handles the 
 - Changing a struct in `core/include/blimp/*.h` means updating its ctypes mirror and
   `_EXPECTED_LAYOUT` in `sim/blimp_ffi.py`; the import-time check against the DLL fails otherwise.
 - `tools/build.py` compiles with `-std=c11 -Wall -Werror`. On Windows clang targets MSVC, so never
-  add `-lm`.
+  add `-lm` there; on Linux `build.py` adds it itself (`LDLIBS`). Include the header that owns
+  what you use (`<stddef.h>` for `NULL`): MSVC's headers pull in more than glibc's.
 - Motor names and order: FL, RL, FR, RR is `motor_id_t` order in the S3-Zero driver and in the
   link packets; `core/` names them thrust_fl/fr/rl/rr. Never introduce M1..M4 or another order.
 - In the S3-Zero firmware, persistent config goes in `sdkconfig.defaults*`, never in the gitignored

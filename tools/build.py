@@ -11,10 +11,12 @@ Usage:
     python tools/build.py dll             build libblimp shared lib for sim
     python tools/build.py clean
 
-Requires clang on PATH. On Windows clang targets MSVC, so do NOT pass -lm.
+Requires clang on PATH. On Windows clang targets MSVC, so do NOT pass -lm
+there; on Linux and macOS libm is a separate library and -lm is required.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -48,6 +50,19 @@ CFLAGS = [
     "-g",
     f"-I{INC}",
 ]
+
+# What the host platform needs on top of CFLAGS. clang on Windows targets the
+# MSVC runtime, which has the maths functions built in and rejects -lm; glibc
+# keeps them in libm, and an ELF shared library must be position-independent.
+WINDOWS = os.name == "nt"
+LDLIBS: list[str] = [] if WINDOWS else ["-lm"]
+SHARED_FLAGS: list[str] = ["-shared"] if WINDOWS else ["-shared", "-fPIC"]
+
+# The library the sim loads through ctypes; sim/blimp_ffi.py and
+# tools/sim_sweep.py name the same file by the same rule.
+LIB_NAME = ("libblimp.dll" if WINDOWS
+            else "libblimp.dylib" if sys.platform == "darwin"
+            else "libblimp.so")
 
 GREEN, RED, YEL, DIM, OFF = "\033[32m", "\033[31m", "\033[33m", "\033[2m", "\033[0m"
 
@@ -91,7 +106,7 @@ def build_module(name: str) -> bool:
 
     BUILD.mkdir(exist_ok=True)
     exe = BUILD / f"test_{name}.exe"
-    cmd = ["clang", *CFLAGS, *[str(s) for s in srcs], str(test), "-o", str(exe)]
+    cmd = ["clang", *CFLAGS, *[str(s) for s in srcs], str(test), *LDLIBS, "-o", str(exe)]
     rc, out = run(cmd)
     if rc != 0:
         print(f"{RED}COMPILE FAIL{OFF} {name}")
@@ -110,8 +125,9 @@ def build_dll() -> bool:
     """Shared library the MuJoCo sim loads via ctypes.
 
     Exports come from core/src/blimp_ffi.c, which wraps the public API in
-    __declspec(dllexport). Keeping exports in one file means the portable
-    headers stay free of platform attributes.
+    __declspec(dllexport) on Windows (default visibility elsewhere). Keeping
+    exports in one file means the portable headers stay free of platform
+    attributes.
     """
     ffi = SRC / "blimp_ffi.c"
     if not ffi.exists():
@@ -122,12 +138,13 @@ def build_dll() -> bool:
         print(f"{RED}FAIL{OFF} dll: no sources")
         return False
     BUILD.mkdir(exist_ok=True)
-    dll = BUILD / "libblimp.dll"
+    dll = BUILD / LIB_NAME
     # -Wconversion is deliberately dropped here only to keep third-party-free
     # FFI glue simple; the same sources still build clean under the full
     # warning set in the per-module test builds above.
     flags = [f for f in CFLAGS if f != "-Wconversion"]
-    rc, out = run(["clang", *flags, "-shared", *[str(s) for s in srcs], "-o", str(dll)])
+    rc, out = run(["clang", *flags, *SHARED_FLAGS, *[str(s) for s in srcs], *LDLIBS,
+                   "-o", str(dll)])
     if rc != 0:
         print(f"{RED}FAIL{OFF} dll")
         print(DIM + out.strip()[:4000] + OFF)

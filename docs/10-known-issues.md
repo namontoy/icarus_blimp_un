@@ -9,7 +9,7 @@ the ESP-FLY board) now lives in `firmware/projects/espfly/` as the previous boar
 firmware is `firmware/projects/i2c_tools/` on the ESP32-S3-Zero (two DRV8833, reversible motors,
 stand-alone MPU-6050 / QMC5883L / BME280 / VL53L1X breakouts, ESP32-CAM); its fixed-rate control
 task, which will call `blimp_step()`, is the next step (`docs/control-loop-plan.md`). `core/`, `sim/` and
-`tools/verify.py` are unchanged by the merge and still verified on Windows only. Section 2's
+`tools/verify.py` are unchanged by the merge. Section 2's
 "unmeasured vehicle" caveat still holds: one motor was thrust-tested at 14.7-16.8 gf on a lab
 supply, and `core/src/params.c` still carries the 35 gf placeholder.
 
@@ -44,6 +44,22 @@ on the confirmed hardware alone it completes about half the loops.
 Every number above is a simulation of an unmeasured vehicle; see section 2.
 The default `--max-time` (150 s) includes the 60 s gyro-bias convergence, so it
 usually ends a run before the third loop - use 220 s to compare against this table.
+
+The tables above were measured on Windows 11. The same sweep on Ubuntu 22.04
+(2026-10-27, clang 14, glibc, MuJoCo 3.13.0, same settings) gives different runs
+per seed, because the two maths libraries round differently and the closed loop
+amplifies the difference; runs on one platform stay deterministic per seed:
+
+```
+                     NO altitude sensor                downward ToF
+course 1              9/15 loops, best 19.0-34.6 s     15/15 loops, best 21.8-28.1 s
+course 2              5/15 loops, best 27.9-105.3 s    15/15 loops, best 21.9-24.2 s
+failsafe tripped     in 10 of 10 runs                  in 0 of 10 runs
+```
+
+The conclusions hold on both platforms: with the ToF every loop completes and the
+failsafe never trips; without it about half the loops complete and every run
+trips the failsafe. Compare a change against the sweep of the platform it ran on.
 
 ---
 

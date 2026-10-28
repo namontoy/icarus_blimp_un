@@ -42,7 +42,10 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 VENV_DIR = REPO_ROOT / ".venv"
 SWEEP_DIR = REPO_ROOT / "build" / "sweep"
-DLL = REPO_ROOT / "build" / "libblimp.dll"
+# Named by the same rule as LIB_NAME in tools/build.py, which builds it.
+DLL = REPO_ROOT / "build" / ("libblimp.dll" if os.name == "nt"
+                             else "libblimp.dylib" if sys.platform == "darwin"
+                             else "libblimp.so")
 
 ROW_RE = re.compile(r"^\s*(\d+)\s*\|\s*(COMPLETED|incomplete)\s*\|\s*([\d.]+)?s?\s*(?:--)?\s*\|", re.M)
 BEST_RE = re.compile(r"BEST TIME:\s*([\d.]+)s")

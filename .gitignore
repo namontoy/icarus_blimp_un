@@ -5,6 +5,8 @@ build/
 managed_components/
 sdkconfig
 sdkconfig.old
+# Dated local copies of a generated sdkconfig, kept as a fallback
+sdkconfig_*
 dependencies.lock
 
 # Host test binaries

@@ -140,7 +140,7 @@ def main(argv: list[str] | None = None) -> int:
         ok &= r.step("unit tests, incl. the Rule 13 thrust sweep",
                      [host, "tools/build.py", "all"])
     if gate():
-        ok &= r.step("build libblimp.dll for the simulation",
+        ok &= r.step("build libblimp for the simulation",
                      [host, "tools/build.py", "dll"])
 
     print(f"{DIM}simulation{OFF}")

@@ -19,7 +19,7 @@ so the repo now has a host side and two chips:
 | Path | Chip / host | Role |
 |---|---|---|
 | `core/` | host and ESP32 | The flight controller as portable C11: `blimp_step()`. Unit-tested on the host, compiled into the simulator, and later into the S3 firmware. Control logic lives only here. |
-| `sim/`, `tools/` | host (verified on Windows) | MuJoCo closed loop around the compiled core, plus the build, verify and sweep scripts. `python tools/setup_env.py` once, then `python tools/verify.py` after any change. |
+| `sim/`, `tools/` | host (verified on Windows and Linux) | MuJoCo closed loop around the compiled core, plus the build, verify and sweep scripts. `python tools/setup_env.py` once, then `python tools/verify.py` after any change. |
 | `firmware/projects/i2c_tools/` | ESP32-S3 (Waveshare ESP32-S3-Zero) | The flight-controller-to-be: IMU, magnetometer and barometer (stand-alone breakouts since the GY-88 burned; see below), altimeter, four DRV8833 thrusters, and since the `s3-wireless-link` work its own Wi-Fi access point carrying the console and a UDP packet link (`docs/wireless-link.md`). The name comes from the Espressif `i2c_tools` example it grew out of, and the console prompt is still `i2c-tools>`. |
 | `firmware/projects/optflow_cam/` | ESP32-CAM (AI-Thinker, original ESP32) | Downward optical flow. It prints CSV over UART to a laptop. |
 | `firmware/projects/espfly/` | XIAO ESP32-S3 on the ESP-FLY board | DroneUN's previous flight shell for the previous board: an `esp_timer`-driven control task around `blimp_step()`, an ESP-NOW link and `net/protocol.h`. Not built here; kept as the reference for the S3-Zero control task until that supersedes it (ESP-IDF v5.3, `tools\idf_build.bat`). |
@@ -55,7 +55,7 @@ $IDF_PY -C firmware/projects/optflow_cam -p /dev/ttyUSB0 flash
 
 ## Tests
 
-The controller and the simulator are checked with `python tools/verify.py` (about 20 s: the `core/` unit tests including the Rule 13 thrust sweep, the DLL build, the skill sync, and a simulator smoke test); `--full` adds both courses. Run it after any change under `core/`, `sim/` or `tools/`. It needs clang on `PATH` and the `.venv` from `python tools/setup_env.py`; the simulator itself is verified on Windows only so far.
+The controller and the simulator are checked with `python tools/verify.py` (about 20 s: the `core/` unit tests including the Rule 13 thrust sweep, the DLL build, the skill sync, and a simulator smoke test); `--full` adds both courses. Run it after any change under `core/`, `sim/` or `tools/`. It needs clang on `PATH` and the `.venv` from `python tools/setup_env.py`. On Linux, run `setup_env.py` with a Python 3.12 interpreter (the `.venv` inherits its version); the verify and sweep scripts then run with any Python 3 and pick up `.venv` themselves. A Linux run gives different per-seed lap times from a Windows run (AGENTS.md, Commands), so compare sweeps, not single seeds, across the two.
 
 The `pytest_*.py` files under `firmware/projects/` are Espressif's stock example tests for other hardware (a CCS811 and an LED). They are not this project's tests.
 
