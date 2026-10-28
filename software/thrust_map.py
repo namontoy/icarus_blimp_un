@@ -33,7 +33,11 @@ The fit is F(u) = a u^2 + b u through the origin (a brushed motor's thrust
 goes with rpm^2 and rpm about with the voltage, so with the duty) and, as the
 check, the affine F = c (u - u0) above a dead band u0. The quadratic goes to
 thrust-map.json, which step_response.py reads to turn a step fit into
-core/'s units. Standard library only.
+core/'s units. `fit` also takes a CSV written by hand from a sweep made
+without this tool: columns motor, duty, thrust_gf, and direction when
+reverse was measured too (blank means forward); a ';' separator and decimal
+commas are understood, and duties above 1 are taken as percent. Standard
+library only.
 """
 import argparse
 import csv
@@ -304,14 +308,36 @@ def r_squared(points, fn):
     return 1.0 - sr / ss if ss > 0 else float('nan')
 
 
+NUMERIC = ('duty', 'reading_g', 'tare_g', 'lever', 'thrust_gf', 'bat_v', 'readback', 'vib_g')
+
+
 def read_rows(files):
+    """Rows of run CSVs, or of a CSV written by hand: only motor, duty and
+    thrust_gf are needed (direction blank or missing means forward), the
+    separator may be ';' or a tab, decimal commas are read, and duties above
+    1 are percent."""
     rows = []
     for path in files:
-        with open(path, newline='') as f:
-            for r in csv.DictReader(f):
-                rows.append({k: (float(v) if k in ('duty', 'reading_g', 'tare_g', 'lever', 'thrust_gf', 'bat_v',
-                                                    'readback', 'vib_g') and v not in ('', 'nan') else v)
-                             for k, v in r.items()})
+        with open(path, newline='', encoding='utf-8-sig') as f:
+            text = f.read()
+        head = text.splitlines()[0] if text.strip() else ''
+        sep = max(',;\t', key=head.count)
+        for r in csv.DictReader(text.splitlines(), delimiter=sep):
+            row = {k: '' for k in FIELDS}
+            row.update({k.strip().lower(): (v or '').strip() for k, v in r.items() if k})
+            for k in NUMERIC:
+                v = row[k]
+                if isinstance(v, str) and v not in ('', 'nan'):
+                    try:
+                        row[k] = float(v.replace(',', '.') if sep != ',' else v)
+                    except ValueError:
+                        sys.exit('%s: %r is not a number in column %s' % (path, v, k))
+            d = (row['direction'] or 'forward').lower()
+            row['direction'] = 'forward' if d.startswith('f') else 'reverse' if d.startswith('r') else d
+            row['motor'] = (row['motor'] or '?').upper()
+            if isinstance(row['duty'], float) and abs(row['duty']) > 1.0:
+                row['duty'] /= 100.0              # a sweep noted in percent
+            rows.append(row)
     return rows
 
 
@@ -320,7 +346,8 @@ def fit_rows(rows, files=()):
     fit, F at full and at 0.3 duty, the mean cell voltage; then Rule 13."""
     groups = {}
     for r in rows:
-        if r['direction'] not in ('forward', 'reverse') or r.get('thrust_gf') is None:
+        if r['direction'] not in ('forward', 'reverse') or not isinstance(r.get('thrust_gf'), float) \
+                or not isinstance(r.get('duty'), float) or r['duty'] == 0:
             continue
         groups.setdefault((r['motor'], r['direction']), []).append(r)
     motors = {}
@@ -456,6 +483,17 @@ def selftest():
     good = abs(thrust_gf(m, 'XX', 1.0) - 16.1) < 0.5     # an unmeasured motor gets the mean curve
     ok = ok and good
     print('  mean curve for a motor without one: %s' % ('ok' if good else 'FAIL'))
+    # a sweep written by hand: ';', decimal commas, percent duties, no direction column
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, 'sweep.csv')
+        with open(path, 'w') as f:
+            f.write('motor;duty;thrust_gf\n' + ''.join('FL;%d;%s\n' % (int(100 * u), ('%.2f' % (9 * u * u + 7 * u))
+                                                           .replace('.', ',')) for u in DUTIES))
+        hm = fit_rows(read_rows([path]), [path])
+    e = hm['motors']['FL']['forward']
+    good = e['n'] == 10 and abs(e['f_full_gf'] - 16.0) < 0.1 and 'rule13' in hm
+    ok = ok and good
+    print('  hand-written sweep (; and decimal commas, percent): F(1) %.2f: %s' % (e['f_full_gf'], 'ok' if good else 'FAIL'))
     print('selftest: %s' % ('ok' if ok else 'FAIL'))
     return ok
 
