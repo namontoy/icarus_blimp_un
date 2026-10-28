@@ -231,6 +231,21 @@ menu "Sensor stream (the packet the ground station plots)"
 
 endmenu
 
+menu "Control task"
+
+    config CTL_STATS_AT_BOOT
+        bool "Print the control task's timing line once a second from boot"
+        default n
+        help
+            ctl_task.c measures its own period and execution time in
+            one-second windows. Printed every second, that line buries
+            everything else typed on the USB console, so it starts off:
+            'ctl' shows the last window on demand, and 'ctl --stats on'
+            turns the line on until the next reset (the increment 1 bench
+            check). Say y for a session spent watching the timing.
+
+endmenu
+
 menu "Capture (the control loop's records, kept in PSRAM)"
 
     # capture.c stores one 72-byte log record per 20 ms tick of the control

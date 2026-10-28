@@ -231,7 +231,8 @@ Props off. USB console open in a second window so the logs are visible.
 | No brownout of the sensor rail with the radio on | ❓ **never tested**; item 8 above |
 | Image fits its partition | ✅ measured 2026-10-21: 929 KB (`-Og` debug build) in the factory partition, which `partitions_example.csv` grows from 1 MB (11 % free) to 2 MB (56 % free); the FAT `storage` partition moves up and reformats once |
 | 2.4 GHz behaviour at the venue | ❓ unknown; channel is a Kconfig setting for that reason |
-| Capture packets (`LOG_CMD`, `LOG_INFO`, `LOG_CHUNK`) and the chunked download with re-request | ✅ against `mock_blimp.py` 2026-10-27 (`blimp_link.py capture`, `blimp_log.py`, the Bench page offscreen); ❓ on hardware, where PSRAM is also unproven |
+| Capture packets (`LOG_CMD`, `LOG_INFO`, `LOG_CHUNK`) and the chunked download with re-request | ✅ against `mock_blimp.py` 2026-10-27 (`blimp_link.py capture`, `blimp_log.py`, the Bench page offscreen); ✅ on hardware 2026-10-28: a 60 s capture downloaded over the air, 3000 records, 0 gaps |
+| Link stays up with the control task running | ✅ 2026-10-28, after the fix: 2 × 600 s soaks (`tools/wifi_soak.py`), 0 beacon losses, 0 seconds without telemetry. Before it, the AP dropped the laptop every ~14 s: esp_timer ISR dispatch, esp-idf #18808, see `docs/wifi-drop-report.md` |
 
 Built since the first cut: the sensor stream (`sensor_stream.c` sampling through the
 attach/read/detach drivers lifted out of `cmd_imu.c`, `cmd_mag.c`, `cmd_baro.c` and `cmd_tof.c`,

@@ -17,15 +17,16 @@
  * the motor driver's readback standing in for pwm_out()'s own throttles.
  * Nothing here drives the I2C bus or the motors yet.
  *
- * Clock. A periodic esp_timer dispatched from the timer interrupt
- * (ESP_TIMER_ISR, enabled by CONFIG_ESP_TIMER_SUPPORTS_ISR_DISPATCH_METHOD)
- * gives this task a notification; the task does nothing but wait for it.
- * The esp_timer's resolution is independent of the FreeRTOS tick, and the
- * ISR dispatch does not queue behind the esp_timer task, which Wi-Fi
- * (priority 23 on core 0) can hold off for milliseconds. The ESP-FLY shell
- * (firmware/projects/espfly/main/main.c) used the same timer with task
- * dispatch; this is that pattern with less jitter. If the Kconfig option is
- * missing the code falls back to task dispatch and says so at boot.
+ * Clock. A periodic esp_timer gives this task a notification; the task does
+ * nothing but wait for it. The esp_timer's resolution is independent of the
+ * FreeRTOS tick. It is dispatched from the esp_timer task, as in the ESP-FLY
+ * shell (firmware/projects/espfly/main/main.c), so a tick can queue behind
+ * Wi-Fi (priority 23 on core 0) for a while. ISR dispatch would avoid that,
+ * and the code still uses it when CONFIG_ESP_TIMER_SUPPORTS_ISR_DISPATCH_METHOD
+ * is on, but sdkconfig.defaults keeps it off: in ESP-IDF v5.5.5 an ISR alarm
+ * landing next to a task alarm can leave the esp_timer task un-notified, and
+ * Wi-Fi's own timers then stall (esp-idf issue #18808; on 2026-10-28 the
+ * access point dropped the laptop every ~14 s until this was turned off).
  *
  * Placement. Core 1, priority 20: core 0 keeps Wi-Fi, lwIP, esp_timer, the
  * USB console and the main task; 20 is above every task of ours (link 4,
@@ -56,7 +57,9 @@
 #include "esp_console.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#if CONFIG_SPIRAM
 #include "esp_psram.h"
+#endif
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -67,6 +70,20 @@
 #include "sensor_stream.h"
 
 static const char *TAG = "ctl";
+
+/* esp_psram_* only links with CONFIG_SPIRAM; a build without it (the
+   2026-10-28 Wi-Fi bisect) then reports no PSRAM, as IGNORE_NOTFOUND would. */
+static bool psram_ready(size_t *size)
+{
+#if CONFIG_SPIRAM
+    if (esp_psram_is_initialized()) {
+        *size = esp_psram_get_size();
+        return true;
+    }
+#endif
+    (void)size;
+    return false;
+}
 
 #define CTL_TASK_CORE       1
 #define CTL_TASK_PRIO       20
@@ -97,7 +114,13 @@ static struct {
     setpoint_t    sp;
     ctrl_out_t    out;
     motor_cmd_t   cmd;
-} s = { .mux = portMUX_INITIALIZER_UNLOCKED, .print = true };
+} s = {
+    .mux = portMUX_INITIALIZER_UNLOCKED,
+    /* Off unless asked for: once a second it drowns the console. */
+#if CONFIG_CTL_STATS_AT_BOOT
+    .print = true,
+#endif
+};
 
 /* ---------------------------------------------------------------- stages */
 
@@ -275,18 +298,24 @@ static void stats_add(uint32_t period_us, bool have_period, uint32_t exec_us,
 }
 
 /*
- * Runs in the timer interrupt (ISR dispatch) on core 0, or in the esp_timer
- * task on the fallback path. Either way it only hands the control task its
+ * Runs in the esp_timer task, or in the timer interrupt on core 0 if ISR
+ * dispatch is enabled. Either way it only hands the control task its
  * notification; the FreeRTOS port raises the cross-core interrupt itself
- * when the woken task lives on the other core.
+ * when the woken task lives on the other core. An ISR-dispatched callback
+ * must not call portYIELD_FROM_ISR() (esp_timer's docs): it asks esp_timer
+ * to yield once all its ISR timers have run.
  */
 static void IRAM_ATTR tick_cb(void *arg)
 {
     (void)arg;
     if (xPortInIsrContext()) {
+#if CONFIG_ESP_TIMER_SUPPORTS_ISR_DISPATCH_METHOD
         BaseType_t woken = pdFALSE;
         vTaskNotifyGiveFromISR(s.task, &woken);
-        portYIELD_FROM_ISR(woken);
+        if (woken == pdTRUE) {
+            esp_timer_isr_dispatch_need_yield();
+        }
+#endif
     } else {
         xTaskNotifyGive(s.task);
     }
@@ -413,6 +442,15 @@ esp_err_t ctl_task_start(void)
         return ESP_OK;
     }
 
+    /* Before the task exists: its first line reports the dispatch. */
+#if CONFIG_ESP_TIMER_SUPPORTS_ISR_DISPATCH_METHOD
+    s.isr_dispatch = true;
+    ESP_LOGW(TAG, "esp_timer ISR dispatch is on: on ESP-IDF v5.5.x it can stall Wi-Fi's "
+                  "timers (esp-idf issue #18808); see sdkconfig.defaults");
+#else
+    s.isr_dispatch = false;
+#endif
+
     if (xTaskCreatePinnedToCore(ctl_task, "ctl", CTL_TASK_STACK, NULL, CTL_TASK_PRIO,
                                 &s.task, CTL_TASK_CORE) != pdPASS) {
         ESP_LOGE(TAG, "could not create the control task");
@@ -433,13 +471,6 @@ esp_err_t ctl_task_start(void)
         .dispatch_method = ESP_TIMER_TASK,
 #endif
     };
-#if CONFIG_ESP_TIMER_SUPPORTS_ISR_DISPATCH_METHOD
-    s.isr_dispatch = true;
-#else
-    s.isr_dispatch = false;
-    ESP_LOGW(TAG, "CONFIG_ESP_TIMER_SUPPORTS_ISR_DISPATCH_METHOD is off: the period comes "
-                  "from the esp_timer task and will jitter under Wi-Fi load");
-#endif
     esp_err_t err = esp_timer_create(&args, &s.timer);
     if (err == ESP_OK) {
         err = esp_timer_start_periodic(s.timer, CTL_PERIOD_US);
@@ -452,9 +483,10 @@ esp_err_t ctl_task_start(void)
     /* The log ring (increment 4) will live in PSRAM; say how much there is
        before anything else claims it, so the buffer can be sized from a
        measured number rather than the datasheet's 2 MB. */
-    if (esp_psram_is_initialized()) {
+    size_t psram_size;
+    if (psram_ready(&psram_size)) {
         ESP_LOGI(TAG, "PSRAM %u KB, %u KB free",
-                 (unsigned)(esp_psram_get_size() / 1024),
+                 (unsigned)(psram_size / 1024),
                  (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
     } else {
         ESP_LOGW(TAG, "no PSRAM: the flight log will have no buffer");
@@ -505,9 +537,10 @@ static int do_ctl_cmd(int argc, char **argv)
     printf("last window: %s\n", line);
     printf("stages: read_sensors peeks the sensor stream (interim); estimate, control, mixer, "
            "saturate, pwm_out empty; log feeds 'capture'\n");
-    if (esp_psram_is_initialized()) {
+    size_t psram_size;
+    if (psram_ready(&psram_size)) {
         printf("PSRAM %u KB, %u KB free (largest block %u KB)\n",
-               (unsigned)(esp_psram_get_size() / 1024),
+               (unsigned)(psram_size / 1024),
                (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024),
                (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) / 1024));
     } else {

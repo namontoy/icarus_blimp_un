@@ -390,7 +390,7 @@ of the command.
 
 ```
 ctl                 core, priority, period, the last one-second timing window, PSRAM
-ctl --stats off     silence the once-a-second timing line (--stats on restores it)
+ctl --stats on      print that timing line once a second until reset (--stats off stops it)
 ```
 
 `ctl_task.c` is the fixed-rate control task: one task on core 1, priority 20,
@@ -399,8 +399,10 @@ the pipeline read sensors, estimate, control, mixer, saturate, PWM, log, with
 the typed records of `ctl_types.h`. **In the current increment the middle
 stages are empty:** the read stage peeks the sensor stream's latest sample
 (the stream still owns the chips), the log stage feeds `capture` below, and
-the task measures its own period and execution time and prints them once a
-second (`ctl: 50 ticks   period 20.00/20.00/20.00 ms ...`). Nothing drives the
+the task measures its own period and execution time in one-second windows
+(`ctl: 50 ticks   period 20.00/20.00/20.00 ms ...`). The line is off at boot,
+because once a second it buries the console; `ctl --stats on` turns it on, or
+`CONFIG_CTL_STATS_AT_BOOT` (menuconfig, "Control task") from boot. Nothing drives the
 bus or the motors through it yet. The plan, the design decisions and the
 bench checks per increment are in `docs/control-loop-plan.md`.
 
@@ -680,7 +682,7 @@ i2c_tools/
 ├── esp-idf-monitor.cfg       makes Ctrl+X the exit key of idf.py monitor
 ├── CMakeLists.txt            project file (MINIMAL_BUILD)
 ├── partitions_example.csv    nvs, phy_init, 2 MB factory app, FAT storage
-├── sdkconfig.defaults        common defaults (custom partitions, 2 MB flash, timer ISR dispatch; the tick stays 100 Hz)
+├── sdkconfig.defaults        common defaults (custom partitions, 2 MB flash; timer ISR dispatch stays off, see its comment)
 ├── sdkconfig.defaults.esp32s3  S3-Zero: 4 MB, USB Serial/JTAG console, LED 21, I2C 4/5, quad PSRAM
 ├── components/
 │   └── vl53l1x_uld/          ST VL53L1X ULD 3.5.5 + port onto the shared bus

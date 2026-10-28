@@ -81,6 +81,7 @@ python tools/sim_sweep.py                     # lap times across seeds 0-4, both
 .venv/bin/python sim/run_course.py ...        # the same on Linux
 scripts\idf.bat i2c_tools build               # S3-Zero firmware on Windows; Linux: see CLAUDE.md
 tools\idf_build.bat                           # espfly shell build; handles the ESP-IDF PATH traps
+python tools/wifi_soak.py <label> --connection ICARUS-xxxxxx   # Linux: S3 link soak, counts drops
 ```
 
 - Run anything under `sim/` with the `.venv` interpreter; the `tools/` scripts pick it up

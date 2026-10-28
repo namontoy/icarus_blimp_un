@@ -6,7 +6,8 @@
 repo): prompt 1, the loop, and prompt 2, what to take from esp-drone. What they bind this work
 to is restated here: the increments and their bench checks (sections 4 and 6), the `core/` and
 `sdkconfig` rules, and the reuse rules in `docs/reuse_log.md`.
-**Status:** plan, with increment 1 built and not yet run on hardware. Each increment stops
+**Status:** plan, with increment 1 and the capture built and bench-checked on hardware
+(2026-10-27, section 6). Each increment stops
 for a bench check; the checks are in section 6. "Measured" and "reasoned" are kept apart.
 **Revisions, 2026-10-27, after review:** D1 keeps the 100 Hz tick; D3 the sensor commands
 never stop the loop; D5 the stop latches in every mode and the GUI arms (option A); D7 the
@@ -95,13 +96,16 @@ between tasks only by copy under a mutex or through a one-deep queue.
 
 Each decision names its reason. The alternatives were weighed, not skipped.
 
-**D1. Clock: a periodic `esp_timer` dispatched from the timer interrupt notifies the task;
-the FreeRTOS tick stays at its 100 Hz default.** The esp_timer is the period source because
-its resolution does not depend on the tick, and dispatched from the interrupt
-(`CONFIG_ESP_TIMER_SUPPORTS_ISR_DISPATCH_METHOD=y`) it does not queue behind the esp_timer
-task, which Wi-Fi (priority 23 on core 0) can hold off for milliseconds. The ESP-FLY shell
-used task dispatch; this is the same pattern with less jitter, and the callback is one
-`vTaskNotifyGiveFromISR()`. A 1 kHz tick was proposed for everything that still calls
+**D1. Clock: a periodic `esp_timer` notifies the task; the FreeRTOS tick stays at its 100 Hz
+default.** The esp_timer is the period source because its resolution does not depend on the
+tick. It runs with task dispatch, as the ESP-FLY shell did, and the callback is one
+`xTaskNotifyGive()`. ISR dispatch (`CONFIG_ESP_TIMER_SUPPORTS_ISR_DISPATCH_METHOD=y`) was the
+first choice, so that a tick would not queue behind the esp_timer task, which Wi-Fi (priority
+23 on core 0) can hold off. It was reverted on 2026-10-28: on ESP-IDF v5.5.5 it stalls Wi-Fi's
+own timers and the access point drops its station every ~14 s (section 6, "Wi-Fi drops with
+ISR dispatch"). The code still takes ISR dispatch if the option is on, for an ESP-IDF that
+carries the fix.
+A 1 kHz tick was proposed for everything that still calls
 `vTaskDelay()` (the attach sequences, the ULD's `WaitMs`, the barometer's conversion waits,
 the console commands all round up to whole ticks) and declined on 2026-10-27: the loop does
 not depend on the tick, those waits sit outside it or leave it in increment 2, and every
@@ -246,7 +250,7 @@ fresh when the frame sequence number moved.
 
 1. **Skeleton** (built 2026-10-27): `ctl_types.h` (every struct, checked against `core/`),
    `ctl_task.c` (timer, task on core 1, timing statistics, empty stages, the statistics
-   printer, the `ctl` command), `sdkconfig.defaults` (ISR dispatch; the tick stays at 100 Hz),
+   printer, the `ctl` command), `sdkconfig.defaults` (ISR dispatch at first, task dispatch since 2026-10-28; the tick stays at 100 Hz),
    `sdkconfig.defaults.esp32s3` (quad PSRAM). Nothing touches the bus or the motors. esp-drone
    cloned read-only and `docs/reuse_log.md` started.
 2. **Sensors in the loop**: the schedule above, DLPF, barometer in normal mode, ToF polled,
@@ -293,10 +297,11 @@ assumption each pattern carried.
 Props off for every step. USB console open in a second window.
 
 **Increment 1.** Flash. The boot log shows the control task starting on core 1 and the PSRAM
-size and free figure. Once per second a `ctl:` line prints the period (min/max/mean), the
-execution time and the counters; the period should read 20.00 ms with min and max within
-0.1 ms of it, zero missed ticks, zero overruns. `ctl` prints the same on demand; `ctl --stats
-off` silences the line. Then the regression: `sensors`, `imu -n 3`, `motor -m FL -t 0.15`
+size and free figure. `ctl --stats on` prints a `ctl:` line once per second with the period
+(min/max/mean), the execution time and the counters (off at boot since 2026-10-27, because it
+buried the console; `CONFIG_CTL_STATS_AT_BOOT` turns it on from boot); the period should read
+20.00 ms with min and max within 0.1 ms of it, zero missed ticks, zero overruns. `ctl` prints
+the same on demand; `ctl --stats off` silences the line. Then the regression: `sensors`, `imu -n 3`, `motor -m FL -t 0.15`
 and `python software/blimp_link.py status` behave exactly as before, and the `ctl:` line keeps
 reading 20.00 ms while `blimp_link.py status` runs (Wi-Fi traffic on core 0 must not move it).
 Record the free PSRAM with the access point up and a station associated; that number sizes
@@ -310,7 +315,68 @@ summary with 500 records, a step of 20.00 ms with a standard deviation under 0.1
 magnetometer fresh at the stream's 20 Hz, barometer at 4 Hz, ToF at 10 Hz, and an execution
 time of a few hundred microseconds; the Bench page's Download produces the same file and its
 traces show the accelerometer at rest near (0, 0, 1) g. Against `mock_blimp.py` all of this
-passes (2026-10-27); on hardware it has not run.
+passes (2026-10-27).
+
+**Increment 1 and the capture on hardware, 2026-10-27.** S3-Zero flashed from Linux (ESP-IDF
+v5.5.5, `sdkconfig` regenerated from the defaults, so PSRAM and ISR dispatch on). Bus: MPU-6050
+and VL53L1X only; the QMC5883L and the BME280 were disconnected, so `mag` and `baro` probed
+without finding them, as designed. Measured:
+
+- `ctl`: core 1, priority 20, ISR dispatch; period 19.99/20.01/20.00 ms (min/max/mean) in every
+  one-second window read, over more than 1,400 ticks on USB and again at about 41,700 ticks
+  with a laptop associated and the ground station connected over Wi-Fi; 0 overruns, 0 missed,
+  0 timer-silent. Execution 4-58 us, mean 10-20 us, with the middle stages empty.
+- PSRAM 2048 KB, 1594 KB free (largest block 1568 KB) with the 432 kB capture buffer allocated,
+  the same with and without a station associated.
+- `capture --start -t 10` on USB: `DONE 500 of 500`; `capture --head 3` shows IMU counts moving
+  between records and the `fresh` byte changing (0x00, 0x09). At rest the IMU read
+  (-0.00, -0.03, 1.03) g and the ToF about 1559 mm, status valid, 0 errors on both.
+
+Reported by the operator, not measured here: a 60 s capture of every connected sensor ran
+without issues, two motors driven from the ground station's GUI over Wi-Fi turned as
+commanded, and `motor -m FL -t 0.15` from the USB console worked. Not checked as written: the
+`ctl` line during a `blimp_link.py status` run specifically (the laptop had left the access
+point); the 41,700-tick reading above, taken with the ground station streaming, is the closer
+evidence that Wi-Fi traffic on core 0 does not move the period.
+
+The `ctl:` line printing every second from boot made the USB console hard to use during
+these checks, so it is now off at boot (`CONFIG_CTL_STATS_AT_BOOT`, default n).
+
+**Wi-Fi drops with ISR dispatch, 2026-10-28** (full report: `docs/wifi-drop-report.md`). With this firmware the access point dropped the
+laptop over and over: about every 14 s the laptop logged `CTRL-EVENT-BEACON-LOSS` and left
+(reason 4), rejoined, got DHCP, and lost the beacons again; the commit before the control task
+(6e1add4) held for more than 5 min with two motors running from the ground station. Bisected
+with a soak harness (the laptop joins with `nmcli`, sends link heartbeats and counts the
+seconds without telemetry; a QCA6174 laptop, AP on channel 1). Measured, 300 s per variant
+unless noted:
+
+| Build | Beacon losses | Seconds without telemetry |
+|---|---|---|
+| this firmware, PSRAM off, ISR dispatch | 21 | 91 |
+| the same without the control task | 0 | 0 |
+| the same with the task, timer on task dispatch | 0 | 0 |
+| PSRAM on, task dispatch, 600 s | 0 | 0 |
+| the committed defaults after the fix (PSRAM on, task dispatch), 600 s | 0 | 0 |
+
+So neither PSRAM nor the task's work is the cause; the ISR-dispatched timer is. It matches
+esp-idf issue [#18808](https://github.com/espressif/esp-idf/issues/18808) (an ESP32-S3 on
+v5.5.3/v5.5.4): when an ISR-dispatch alarm fires close to a task-dispatch one, esp_timer
+clears the wrong cached alarm and stops waking its task, so task-dispatched timers stall until
+something re-arms them. Wi-Fi's own timers are task-dispatched; that they are what lost the
+beacons is reasoned, not traced. Fixed on master by
+[958dc8a](https://github.com/espressif/esp-idf/commit/958dc8afcf4a5e345bad601265c2a04eb3bf5b1a),
+not in v5.5.6 or v6.0.x as of 2026-10-28. `sdkconfig.defaults` now leaves the option off (D1).
+Also ruled out on the way: the laptop's power save and PMF, a 20 MHz AP channel (HT20 did not
+help and was reverted), silent reboots (none in any soak). The callback also called
+`portYIELD_FROM_ISR()`, which esp_timer's docs forbid for ISR-dispatched callbacks; it now
+calls `esp_timer_isr_dispatch_need_yield()` on that path, though here the woken task is on the
+other core and the call was a no-op.
+
+The period with task dispatch, measured after the 600 s soak with the laptop associated:
+`ctl` 19.98/20.02/20.00 ms (min/max/mean), 0 overruns, 0 missed; a 60 s capture started and
+downloaded over the air gave 3000 records, step 19.70/20.00/20.30 ms with a standard deviation
+of 0.016 ms and 0 gaps, execution 4-40 us. The jitter that ISR dispatch was meant to remove is
+under 0.3 ms either side, negligible against a 20 ms period.
 
 **Increment 2.** `ctl` shows every sensor attached and fresh; `sensors` matches `imu -n 3`,
 and neither interrupts the stream; the ground station panels fill (PyQt6 installed per its

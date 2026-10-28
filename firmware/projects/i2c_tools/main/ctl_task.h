@@ -57,7 +57,8 @@ esp_err_t ctl_task_start(void);
 /** The last completed one-second window plus the cumulative counters. */
 void ctl_get_stats(ctl_stats_t *out);
 
-/** Print the statistics line once a second on the USB console (default on). */
+/** Print the statistics line once a second on the USB console (off at boot unless
+    CONFIG_CTL_STATS_AT_BOOT). */
 void ctl_set_stats_print(bool on);
 
 /** Register the 'ctl' command with the console. */

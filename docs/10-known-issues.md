@@ -13,6 +13,14 @@ task, which will call `blimp_step()`, is the next step (`docs/control-loop-plan.
 "unmeasured vehicle" caveat still holds: one motor was thrust-tested at 14.7-16.8 gf on a lab
 supply, and `core/src/params.c` still carries the 35 gf placeholder.
 
+**2026-10-28, Wi-Fi drops fixed.** With the control task's first build the S3's access point
+dropped the laptop every ~14 s. The cause was the task's esp_timer running with ISR dispatch,
+which on ESP-IDF v5.5.x can stall every task-dispatched timer, Wi-Fi's included (esp-idf issue
+#18808, fixed on master only). The timer is task-dispatched now; keep
+`CONFIG_ESP_TIMER_SUPPORTS_ISR_DISPATCH_METHOD` off until a release carries the fix. Report,
+bisect and follow-ups: `docs/wifi-drop-report.md`; rerun `tools/wifi_soak.py` after any change
+that can touch the radio.
+
 Status at the current code (closed-loop rows: `run_course.py --max-time 220`, seed 0,
 camera 58 x 45 degrees):
 
