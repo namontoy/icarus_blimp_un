@@ -15,3 +15,15 @@ CONFIG_EXAMPLE_BLINK_PERIOD=3000
 # I2C pins for the GY-88 (SDA=4, SCL=5)
 CONFIG_EXAMPLE_I2C_MASTER_SDA=4
 CONFIG_EXAMPLE_I2C_MASTER_SCL=5
+
+# 2 MB quad PSRAM in the ESP32-S3FH4R2 package. The flight log ring buffer
+# lives there (main/ctl_task.c, increment 4), allocated once with
+# heap_caps_malloc(MALLOC_CAP_SPIRAM). CAPS_ALLOC keeps plain malloc in
+# internal RAM, so nothing else moves out there by surprise; IGNORE_NOTFOUND
+# lets a module without PSRAM boot with the log disabled instead of halting.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_QUAD=y
+CONFIG_SPIRAM_TYPE_AUTO=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_CAPS_ALLOC=y
+CONFIG_SPIRAM_IGNORE_NOTFOUND=y

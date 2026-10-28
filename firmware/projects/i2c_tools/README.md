@@ -386,6 +386,47 @@ deleted. The stream re-attaches, reconfiguring from scratch, when the command
 returns. On the ground station that shows as a "paused" notice for the length
 of the command.
 
+### `ctl`: the control loop
+
+```
+ctl                 core, priority, period, the last one-second timing window, PSRAM
+ctl --stats off     silence the once-a-second timing line (--stats on restores it)
+```
+
+`ctl_task.c` is the fixed-rate control task: one task on core 1, priority 20,
+woken every 20 ms by an `esp_timer` dispatched from the timer interrupt, running
+the pipeline read sensors, estimate, control, mixer, saturate, PWM, log, with
+the typed records of `ctl_types.h`. **In the current increment the middle
+stages are empty:** the read stage peeks the sensor stream's latest sample
+(the stream still owns the chips), the log stage feeds `capture` below, and
+the task measures its own period and execution time and prints them once a
+second (`ctl: 50 ticks   period 20.00/20.00/20.00 ms ...`). Nothing drives the
+bus or the motors through it yet. The plan, the design decisions and the
+bench checks per increment are in `docs/control-loop-plan.md`.
+
+### `capture`: a minute of the loop's records
+
+```
+capture                 state, record count, buffer, the scales the counts need
+capture --start [-t 60] start a new capture of this many seconds (the last one is discarded)
+capture --stop          end it now; the records stay
+capture --clear         discard the records
+capture --head 5        print the first records, raw, as a sanity check
+```
+
+`capture.c` stores one 72-byte `log_record_t` per 20 ms tick of the control
+task in a buffer allocated at boot in PSRAM (`CAPTURE_MAX_SECONDS`, 120 s,
+432 kB; a 10 s buffer in internal RAM when PSRAM is missing): the IMU and
+magnetometer counts, the barometer's compensated pressure, temperature and
+humidity, the range, which sensors were fresh that tick, the motor readback,
+the loop's execution time. A capture is linear: it fills for the length asked
+and then holds its records until the next start. **Fetch it over the air**,
+never over USB (opening the port resets the chip and the buffer with it):
+`python software/blimp_link.py capture download` saves
+`captures/capture-<date>.bin` and prints a summary; `software/blimp_log.py`
+decodes the file to units or a CSV; the ground station's Bench page does the
+same with traces. The packets are `LOG_CMD`, `LOG_INFO` and `LOG_CHUNK` (§7).
+
 ### `exit` / `quit`: how to leave
 
 These don't close anything. They print how to leave. The console runs on the
@@ -464,6 +505,9 @@ A packet with the wrong size, magic, version or CRC is counted and dropped.
 | MOTOR_STOP | `0x03` | 16 B | host → blimp | Coast, or brake if the brake byte is 1 |
 | TELEMETRY | `0x81` | 52 B | blimp → host | Clock, the four motor commands the driver holds, failsafe state, link state, station count, packet counters, free heap |
 | SENSORS | `0x82` | 76 B | blimp → host | Clock, accelerometer and gyroscope (g, °/s), IMU temperature, magnetometer (gauss) and heading, pressure, barometer temperature, altitude relative to the first reading, ToF range (mm) and status, and a `valid` bitmask (IMU 1, MAG 2, BARO 4, TOF 8) |
+| LOG_CMD | `0x04` | 20 B | host → blimp | The capture: info, start (with a length in seconds), stop, clear, or get (a first record index and up to 8 chunks) |
+| LOG_INFO | `0x83` | 64 B | blimp → host | The capture's state, result of the command, record count and capacity, period, the IMU ranges, the magnetometer's LSB/gauss, the chip ids, the firmware version |
+| LOG_CHUNK | `0x84` | 1172 B | blimp → host | 16 records of 72 bytes with their first index and the capture id; the reply to get, sent back to back |
 
 - **`MOTOR_SET` is a standing command only while the host keeps repeating it.**
   `net_link.c` has its own timeout (500 ms, reset by any valid packet). When it
@@ -499,6 +543,7 @@ python software/blimp_link.py console               # interactive console over U
 python software/blimp_link.py console "tof -n 5"    # one command
 python software/blimp_link.py motor 0.2 0 0 0 --seconds 2   # FL RL FR RR
 python software/blimp_link.py stop [--brake]
+python software/blimp_link.py capture start -t 60    # then: capture download [--csv out.csv]
 ```
 
 `motor` limits commands to ±0.3 unless you pass `--limit`. To try all of this
@@ -559,6 +604,7 @@ default there or put it in `sdkconfig.defaults*`.
 | | `NET_LINK_TELEMETRY_HZ` | 20 |
 | Sensor stream | `SENSOR_STREAM_AT_BOOT` | y (otherwise `sensors --on`) |
 | | `SENSOR_STREAM_HZ` | 20 |
+| Capture | `CAPTURE_MAX_SECONDS` | 120 (432 kB of PSRAM, allocated at boot) |
 
 ## 10. C API for other modules
 
@@ -573,7 +619,8 @@ without parsing console output.
 | `cmd_mag.h` | `mag_attach`, `mag_read`, `mag_info`, `mag_detach` |
 | `cmd_baro.h` | `baro_attach`, `baro_read`, `baro_info`, `baro_detach`; `baro_read_temperature_c` (for speed-of-sound compensation; compiled, but its only caller `cmd_ping.c` is parked) |
 | `cmd_tof.h` | `tof_attach`, `tof_read`, `tof_info`, `tof_detach`, `tof_budget_valid`, `tof_status_text` |
-| `sensor_stream.h` | `sensor_stream_start`, `sensor_stream_pause`, `sensor_stream_resume`, `sensor_stream_latest` |
+| `sensor_stream.h` | `sensor_stream_start`, `sensor_stream_pause`, `sensor_stream_resume`, `sensor_stream_latest`, `sensor_stream_latest_raw` (the same sample as the pipeline's `sensors_raw_t`, for the control task), `sensor_stream_scales` |
+| `capture.h` | `capture_init`, `capture_start`, `capture_stop`, `capture_clear`, `capture_push` (the control task, every tick), `capture_info`, `capture_read` |
 | `net_wifi.h` | `net_wifi_init`, `net_wifi_start`, `net_wifi_stop`, `net_wifi_is_up`, `net_wifi_station_count`, `net_wifi_ssid`, `net_wifi_ip_str` |
 | `net_link.h`, `net_console.h` | Start functions and link status |
 | `components/vl53l1x_uld` | ST's ULD API, plus `vl53l1x_port_attach(bus, addr)` / `vl53l1x_port_detach` to bind it to the shared bus |
@@ -633,8 +680,8 @@ i2c_tools/
 ├── esp-idf-monitor.cfg       makes Ctrl+X the exit key of idf.py monitor
 ├── CMakeLists.txt            project file (MINIMAL_BUILD)
 ├── partitions_example.csv    nvs, phy_init, 2 MB factory app, FAT storage
-├── sdkconfig.defaults        common defaults (custom partitions, 2 MB flash)
-├── sdkconfig.defaults.esp32s3  S3-Zero: 4 MB, USB Serial/JTAG console, LED 21, I2C 4/5
+├── sdkconfig.defaults        common defaults (custom partitions, 2 MB flash, timer ISR dispatch; the tick stays 100 Hz)
+├── sdkconfig.defaults.esp32s3  S3-Zero: 4 MB, USB Serial/JTAG console, LED 21, I2C 4/5, quad PSRAM
 ├── components/
 │   └── vl53l1x_uld/          ST VL53L1X ULD 3.5.5 + port onto the shared bus
 └── main/
@@ -647,6 +694,9 @@ i2c_tools/
     ├── cmd_baro.c/.h             BMP180, BMP280 or BME280 driver, auto-detected, + `baro`
     ├── cmd_tof.c/.h              VL53L1X driver + `tof`
     ├── sensor_stream.c/.h        samples every sensor for the SENSORS packet + `sensors`
+    ├── ctl_task.c/.h             fixed-rate control task (core 1, 20 ms), timing statistics + `ctl`
+    ├── ctl_types.h               the pipeline's records: sensors_raw_t ... log_record_t
+    ├── capture.c/.h              the loop's records kept in PSRAM + `capture`; read out by the link
     ├── cmd_motor.c/.h            DRV8833 ×2, failsafe
     ├── cmd_ping.c/.h             PING))) ultrasonic, PARKED (not in SRCS)
     ├── led_blink.c/.h            WS2812 hue sweep

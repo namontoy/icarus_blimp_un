@@ -35,6 +35,15 @@
  * producing for STALE_MS, is released and retried the same way. A sensor's
  * valid bit in the packet is set only while its last good reading is
  * younger than STALE_MS, so an absent sensor is never plotted as zero.
+ *
+ * Two readers. The link takes the SENSORS payload (sensor_stream_latest);
+ * the control task's read stage takes the same sample as the pipeline's raw
+ * record (sensor_stream_latest_raw): the counts behind the floats, with the
+ * time each source last produced a reading, so the task can tell a new
+ * sample from a repeated one. Both copies are published together, under the
+ * same spinlock, at the end of every cycle. This is the interim arrangement
+ * until increment 2 of docs/control-loop-plan.md moves the drivers into the
+ * control task and retires this file.
  */
 #include <inttypes.h>
 #include <math.h>
@@ -95,8 +104,11 @@ static struct {
     SemaphoreHandle_t lease;
     TaskHandle_t      task;
     volatile bool     enabled;
-    portMUX_TYPE      mux;          /* guards latest and seq                 */
+    portMUX_TYPE      mux;          /* guards latest, raw_latest, scales and seq */
     link_sensors_t    latest;       /* payload only: header and CRC are zero */
+    sensors_raw_t     raw;          /* the working copy, under the lease     */
+    sensors_raw_t     raw_latest;   /* published with latest                 */
+    sensor_scales_t   scales;
     uint32_t          seq;
     uint32_t          cycles;
     int64_t           next_baro_us;
@@ -138,6 +150,10 @@ static esp_err_t open_imu(void)
         imu_ranges(s.imu, &accel_g, &gyro_dps);
         snprintf(s_ch[CH_IMU].desc, sizeof(s_ch[CH_IMU].desc),
                  "MPU-6050 @ 0x%02x   +/-%d g, +/-%d dps", imu_addr(s.imu), accel_g, gyro_dps);
+        portENTER_CRITICAL(&s.mux);
+        s.scales.imu_accel_g  = accel_g;
+        s.scales.imu_gyro_dps = gyro_dps;
+        portEXIT_CRITICAL(&s.mux);
     }
     return err;
 }
@@ -157,6 +173,10 @@ static esp_err_t open_mag(void)
         snprintf(s_ch[CH_MAG].desc, sizeof(s_ch[CH_MAG].desc),
                  "%s @ 0x%02x   +/-%.1f G, %.0f LSB/G", i.name, i.addr, i.range_gauss,
                  i.lsb_per_gauss);
+        portENTER_CRITICAL(&s.mux);
+        s.scales.mag_lsb_per_gauss = i.lsb_per_gauss;
+        s.scales.mag_chip          = 1 + (int)i.chip;
+        portEXIT_CRITICAL(&s.mux);
     }
     return err;
 }
@@ -173,6 +193,9 @@ static esp_err_t open_baro(void)
     if (err == ESP_OK) {
         baro_info_t i;
         baro_info(s.baro, &i);
+        portENTER_CRITICAL(&s.mux);
+        s.scales.baro_chip = 1 + (int)i.chip;
+        portEXIT_CRITICAL(&s.mux);
         if (i.chip == BARO_CHIP_BMP180) {
             snprintf(s_ch[CH_BARO].desc, sizeof(s_ch[CH_BARO].desc),
                      "%s @ 0x%02x   oversampling %d, %d ms", i.name, i.addr, i.oss, i.conv_ms);
@@ -315,8 +338,10 @@ static void publish(int64_t now)
         p.tof_status = s.tof_r.status;
     }
 
+    s.raw.t_us = (uint32_t)now;
     portENTER_CRITICAL(&s.mux);
-    s.latest = p;
+    s.latest     = p;
+    s.raw_latest = s.raw;
     s.seq++;
     portEXIT_CRITICAL(&s.mux);
 }
@@ -333,6 +358,10 @@ static void cycle(int64_t now)
         esp_err_t err = imu_read(s.imu, &r);
         if (err == ESP_OK) {
             s.imu_r = r;
+            memcpy(s.raw.acc, r.raw_acc, sizeof(s.raw.acc));
+            memcpy(s.raw.gyro, r.raw_gyro, sizeof(s.raw.gyro));
+            s.raw.imu_temp = r.raw_temp;
+            s.raw.imu_t_us = (uint32_t)now;
         }
         note(c, err, now);
     }
@@ -351,6 +380,8 @@ static void cycle(int64_t now)
         } else {
             if (err == ESP_OK) {
                 s.mag_r = r;
+                memcpy(s.raw.mag, r.raw, sizeof(s.raw.mag));
+                s.raw.mag_t_us = (uint32_t)now;
             }
             note(c, err, now);
         }
@@ -367,6 +398,9 @@ static void cycle(int64_t now)
                carries the status and the page decides what to show. */
             if (err == ESP_OK) {
                 s.tof_r = r;
+                s.raw.tof_mm     = r.distance_mm;
+                s.raw.tof_status = r.status;
+                s.raw.tof_t_us   = (uint32_t)now;
             }
             note(c, err, now);
         }
@@ -383,6 +417,11 @@ static void cycle(int64_t now)
                 s.alt0_m   = r.altitude_m;
                 s.alt0_set = true;
             }
+            /* Fixed point for the record: 0.1 Pa, 0.01 C, 0.01 %RH. */
+            s.raw.baro_p_dpa  = (int32_t)lroundf(r.pressure_pa * 10.0f);
+            s.raw.baro_t_cc   = (int32_t)lroundf(r.temp_c * 100.0f);
+            s.raw.baro_h_cpct = r.has_humidity ? (uint16_t)lroundf(r.humidity_pct * 100.0f) : 0;
+            s.raw.baro_t_us   = (uint32_t)now;
         }
         note(c, err, now);
     }
@@ -476,6 +515,22 @@ bool sensor_stream_latest(link_sensors_t *out, uint32_t *seq)
     *seq = s.seq;
     portEXIT_CRITICAL(&s.mux);
     return *seq != 0;
+}
+
+bool sensor_stream_latest_raw(sensors_raw_t *out)
+{
+    portENTER_CRITICAL(&s.mux);
+    *out = s.raw_latest;
+    const uint32_t seq = s.seq;
+    portEXIT_CRITICAL(&s.mux);
+    return seq != 0;
+}
+
+void sensor_stream_scales(sensor_scales_t *out)
+{
+    portENTER_CRITICAL(&s.mux);
+    *out = s.scales;
+    portEXIT_CRITICAL(&s.mux);
 }
 
 /* --------------------------------------------------------------- console */

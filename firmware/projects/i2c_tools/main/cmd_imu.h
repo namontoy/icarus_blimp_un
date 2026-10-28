@@ -13,6 +13,7 @@
  */
 #pragma once
 
+#include <stdint.h>
 #include "esp_err.h"
 
 #ifdef __cplusplus
@@ -28,6 +29,9 @@ typedef struct {
     float ax_g, ay_g, az_g;         /* accelerometer, body axes               */
     float gx_dps, gy_dps, gz_dps;   /* gyroscope                              */
     float temp_c;                   /* die temperature, datasheet conversion  */
+    int16_t raw_acc[3];             /* the counts the floats came from, x y z: */
+    int16_t raw_gyro[3];            /* what the flight log stores, scaled by   */
+    int16_t raw_temp;               /* the ranges imu_ranges() reports         */
 } imu_reading_t;
 
 /**

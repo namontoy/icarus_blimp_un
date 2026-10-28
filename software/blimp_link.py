@@ -13,6 +13,8 @@ the firmware's "Wireless link" menuconfig settings). The blimp is 192.168.4.1.
     python software/blimp_link.py console "motor --status"     # one command
     python software/blimp_link.py motor 0.2 0 0 0 --seconds 2  # FL RL FR RR, signed, -1..1
     python software/blimp_link.py stop
+    python software/blimp_link.py capture start -t 60          # record the loop's records on the blimp
+    python software/blimp_link.py capture download             # fetch them: captures/capture-<date>.bin
 
 REMOVE THE PROPELLERS before any motor command. A MOTOR_SET is a standing
 command only while it keeps arriving: 'motor' repeats it at --rate Hz, and the
@@ -21,6 +23,8 @@ after the last packet, or CONFIG_MOTOR_FAILSAFE_MS (1 s) after the last motor
 command, whichever comes first. Ctrl+C sends a stop.
 """
 import argparse
+import os
+import queue
 import socket
 import struct
 import sys
@@ -37,8 +41,11 @@ VERSION = 1                     # LINK_PROTO_VERSION
 PKT_HEARTBEAT = 0x01
 PKT_MOTOR_SET = 0x02
 PKT_MOTOR_STOP = 0x03
+PKT_LOG_CMD = 0x04
 PKT_TELEMETRY = 0x81
 PKT_SENSORS = 0x82
+PKT_LOG_INFO = 0x83
+PKT_LOG_CHUNK = 0x84
 
 MOTOR_ORDER = ('FL', 'RL', 'FR', 'RR')      # motor_id_t order, as on the wire
 FAILSAFE = {0: 'off', 1: 'idle', 2: 'armed', 3: 'TRIPPED'}
@@ -54,12 +61,30 @@ _TELEMETRY = struct.Struct('<I4f4B3IHH')    # t_us, cmd[4], failsafe, alive, lin
 _SENSORS = struct.Struct('<I3f3ff3fffffHBB')    # t_us, acc[3] g, gyro[3] dps, imu temp,
                                                 # mag[3] gauss, heading deg, pressure Pa,
                                                 # baro temp, baro alt m, tof mm, tof status, valid
+# The capture (capture.c on the blimp): LOG_CMD out, LOG_INFO or LOG_CHUNKs back.
+LOG_CMD_INFO, LOG_CMD_START, LOG_CMD_STOP, LOG_CMD_CLEAR, LOG_CMD_GET = 0, 1, 2, 3, 4
+LOG_STATE = {0: 'idle', 1: 'running', 2: 'done'}
+LOG_RESULT = {0: 'ok', 1: 'the blimp has no capture buffer (no PSRAM?)', 2: 'a capture is already running',
+              3: 'nothing stored at that index', 4: 'the blimp rejected the command'}
+LOG_RECORD_BYTES = 72               # LINK_LOG_RECORD_BYTES: one log_record_t (ctl_types.h)
+LOG_CHUNK_RECORDS = 16
+LOG_GET_MAX_CHUNKS = 8
+_LOG_CMD = struct.Struct('<BBHI')                   # cmd, count (chunks), seconds, first (record)
+_LOG_INFO = struct.Struct('<BBBBHHIIIIHHfBBH16s')   # LOG_INFO_FIELDS below; blimp_log.py keeps this
+                                                    # payload as the header of a capture file
+_LOG_CHUNK_HEAD = struct.Struct('<HBBI')            # capture_id, count, reserved, first; then 16 records
+LOG_INFO_FIELDS = ('state', 'result', 'record_size', 'format', 'capture_id', 'period_us', 'count', 'capacity',
+                   'wanted', 't_start_us', 'imu_accel_g', 'imu_gyro_dps', 'mag_lsb_per_gauss', 'mag_chip',
+                   'baro_chip', 'max_seconds', 'fw')
 # The same sizes are _Static_assert'ed in link_protocol.h.
 assert _HDR.size + _CRC.size == 12
 assert _HDR.size + _MOTOR_SET.size + _CRC.size == 28
 assert _HDR.size + _MOTOR_STOP.size + _CRC.size == 16
 assert _HDR.size + _TELEMETRY.size + _CRC.size == 52
 assert _HDR.size + _SENSORS.size + _CRC.size == 76
+assert _HDR.size + _LOG_CMD.size + _CRC.size == 20
+assert _HDR.size + _LOG_INFO.size + _CRC.size == 64
+assert _HDR.size + _LOG_CHUNK_HEAD.size + LOG_CHUNK_RECORDS * LOG_RECORD_BYTES + _CRC.size == 1172
 
 
 # ----------------------------------------------------------------- codec
@@ -129,6 +154,30 @@ def format_telemetry(t):
         t['free_heap'] // 1024))
 
 
+def decode_log_info(body):
+    d = dict(zip(LOG_INFO_FIELDS, _LOG_INFO.unpack(body)))
+    d['fw'] = d['fw'].split(b'\0', 1)[0].decode('ascii', 'replace')
+    d['state_name'] = LOG_STATE.get(d['state'], str(d['state']))
+    d['result_name'] = LOG_RESULT.get(d['result'], str(d['result']))
+    d['raw'] = bytes(body)          # kept as the header of the capture file (blimp_log.py)
+    return d
+
+
+def format_log_info(i):
+    hz = 1e6 / i['period_us'] if i['period_us'] else 0.0
+    if i['state'] == 0:
+        s = 'capture: idle, nothing stored'
+    else:
+        s = 'capture %d %s: %d of %d records (%.1f of %.0f s)' % (
+            i['capture_id'], i['state_name'].upper(), i['count'], i['wanted'],
+            i['count'] / hz if hz else 0, i['wanted'] / hz if hz else 0)
+    s += '   buffer %d s   %d B records at %.0f Hz   fw %s' % (i['max_seconds'], i['record_size'], hz,
+                                                             i['fw'] or '?')
+    if i['result']:
+        s += '   [%s]' % i['result_name']
+    return s
+
+
 # ------------------------------------------------------------ packet link
 
 class BlimpLink:
@@ -147,6 +196,8 @@ class BlimpLink:
         self.lock = threading.Lock()
         self.telemetry = None
         self.sensors = None             # latest decoded SENSORS packet, if the firmware sends them
+        self.log_info = None            # latest decoded LOG_INFO
+        self.log_q = queue.Queue()      # ('info', dict) and ('chunk', dict), for CaptureClient
         self.on_packet = None           # optional callback(kind, dict) from the receive thread
         self.last_rx = 0.0
         self.rx_count = 0
@@ -195,6 +246,9 @@ class BlimpLink:
     def stop_motors(self, brake=False):
         self.send(PKT_MOTOR_STOP, _MOTOR_STOP.pack(1 if brake else 0))
 
+    def send_log_cmd(self, cmd, count=0, seconds=0, first=0):
+        self.send(PKT_LOG_CMD, _LOG_CMD.pack(cmd, count, seconds, first))
+
     def _hb_loop(self):
         while not self._stop.is_set():
             try:
@@ -206,7 +260,7 @@ class BlimpLink:
     def _rx_loop(self):
         while not self._stop.is_set():
             try:
-                data, _ = self.sock.recvfrom(256)
+                data, _ = self.sock.recvfrom(2048)      # a LOG_CHUNK is 1172 bytes
             except socket.timeout:
                 continue
             except ConnectionResetError:
@@ -233,6 +287,132 @@ class BlimpLink:
                 self.sensors_count += 1
                 if self.on_packet:
                     self.on_packet('sensors', self.sensors)
+            elif ptype == PKT_LOG_INFO and len(body) == _LOG_INFO.size:
+                self.log_info = decode_log_info(body)
+                self.last_rx = time.monotonic()
+                self.log_q.put(('info', self.log_info))
+            elif ptype == PKT_LOG_CHUNK and len(body) == _LOG_CHUNK_HEAD.size + LOG_CHUNK_RECORDS * LOG_RECORD_BYTES:
+                cid, count, _, first = _LOG_CHUNK_HEAD.unpack_from(body)
+                self.last_rx = time.monotonic()
+                head = _LOG_CHUNK_HEAD.size
+                self.log_q.put(('chunk', {'capture_id': cid, 'first': first, 'count': count,
+                                          'data': body[head:head + count * LOG_RECORD_BYTES]}))
+
+
+# ---------------------------------------------------------------- capture
+
+class CaptureError(RuntimeError):
+    pass
+
+
+class CaptureClient:
+    """The capture over a BlimpLink: a command gets one LOG_INFO back; the
+    download asks for windows of chunks and asks again for the ones that did
+    not arrive, until it holds every record the LOG_INFO counted.
+
+    Records below the count never change on the blimp while the capture id
+    holds, so a running capture can be read too; a chunk or an INFO with
+    another id means the capture was restarted, and the download stops.
+    """
+
+    def __init__(self, link):
+        self.link = link
+
+    def _drain(self):
+        while True:
+            try:
+                self.link.log_q.get_nowait()
+            except queue.Empty:
+                return
+
+    def _wait(self, kind, timeout):
+        deadline = time.monotonic() + timeout
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return None
+            try:
+                k, d = self.link.log_q.get(timeout=left)
+            except queue.Empty:
+                return None
+            if k == kind:
+                return d
+
+    def command(self, cmd, seconds=0, timeout=1.0, retries=3):
+        for _ in range(retries):
+            self._drain()
+            self.link.send_log_cmd(cmd, seconds=seconds)
+            info = self._wait('info', timeout)
+            if info is not None:
+                return info
+        raise TimeoutError('no LOG_INFO from the blimp: no link, or a firmware without the capture')
+
+    def info(self):
+        return self.command(LOG_CMD_INFO)
+
+    def start(self, seconds=0):
+        info = self.command(LOG_CMD_START, seconds=seconds)
+        if info['result'] != 0:
+            raise CaptureError(info['result_name'])
+        return info
+
+    def stop(self):
+        return self.command(LOG_CMD_STOP)
+
+    def clear(self):
+        return self.command(LOG_CMD_CLEAR)
+
+    def download(self, progress=None, window=LOG_GET_MAX_CHUNKS, timeout=0.6, stalls=10):
+        """(info, records) of what the blimp holds now. progress(have, total)
+        is called after every window of chunks."""
+        info = self.info()
+        if info['result'] == 1:
+            raise CaptureError(info['result_name'])
+        count, cid = info['count'], info['capture_id']
+        if count == 0:
+            return info, b''
+        total = (count + LOG_CHUNK_RECORDS - 1) // LOG_CHUNK_RECORDS
+        have = {}
+        missing = list(range(total))
+        quiet = 0
+        while missing:
+            run = [missing[0]]
+            for k in missing[1:]:
+                if len(run) >= window or k != run[-1] + 1:
+                    break
+                run.append(k)
+            self._drain()
+            self.link.send_log_cmd(LOG_CMD_GET, count=len(run), first=run[0] * LOG_CHUNK_RECORDS)
+            got = 0
+            deadline = time.monotonic() + timeout
+            while got < len(run):
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    break
+                try:
+                    kind, d = self.link.log_q.get(timeout=left)
+                except queue.Empty:
+                    break
+                if kind == 'chunk':
+                    if d['capture_id'] != cid:
+                        raise CaptureError('the capture on the blimp was restarted during the download')
+                    k = d['first'] // LOG_CHUNK_RECORDS
+                    if k not in have and d['first'] % LOG_CHUNK_RECORDS == 0:
+                        have[k] = d['data']
+                        got += 1
+                elif kind == 'info' and d['result'] == 3:
+                    if d['capture_id'] != cid or d['count'] < count:
+                        raise CaptureError('the capture on the blimp changed during the download')
+            missing = [k for k in missing if k not in have]
+            quiet = quiet + 1 if got == 0 else 0
+            if quiet > stalls:
+                raise TimeoutError('download stalled at %d of %d chunks' % (len(have), total))
+            if progress:
+                progress(len(have), total)
+        data = b''.join(have[k] for k in range(total))
+        if len(data) < count * LOG_RECORD_BYTES:
+            raise CaptureError('short download: %d of %d records' % (len(data) // LOG_RECORD_BYTES, count))
+        return info, data[:count * LOG_RECORD_BYTES]
 
 
 # ---------------------------------------------------------------- console
@@ -385,6 +565,54 @@ def cmd_stop(args):
         link.close()
 
 
+def capture_path(stem='capture', folder='captures'):
+    """captures/<stem>-<date>.bin, the folder created on demand (gitignored)."""
+    os.makedirs(folder, exist_ok=True)
+    return os.path.join(folder, '%s-%s.bin' % (stem, time.strftime('%Y%m%d-%H%M%S')))
+
+
+def cmd_capture(args):
+    link = _need_link(args)
+    cap = CaptureClient(link)
+    try:
+        if args.action == 'status':
+            print(format_log_info(cap.info()))
+        elif args.action == 'start':
+            print(format_log_info(cap.start(args.seconds)))
+        elif args.action == 'stop':
+            print(format_log_info(cap.stop()))
+        elif args.action == 'clear':
+            print(format_log_info(cap.clear()))
+        elif args.action == 'download':
+            import blimp_log
+            info = cap.info()
+            if info['state'] == 1 and not args.now:
+                while info['state'] == 1:
+                    hz = 1e6 / info['period_us']
+                    print('\rrecording: %.1f of %.0f s' % (info['count'] / hz, info['wanted'] / hz), end='',
+                          flush=True)
+                    time.sleep(0.5)
+                    info = cap.info()
+                print()
+            info, data = cap.download(progress=lambda k, n: print('\r%d / %d chunks' % (k, n), end='',
+                                                                   flush=True))
+            print()
+            if not data:
+                print('nothing stored on the blimp')
+                return
+            path = args.out or capture_path()
+            blimp_log.write_file(path, info['raw'], data)
+            h, records = blimp_log.decode(info['raw'], data)
+            print('%d records (%d bytes) saved to %s' % (len(records), len(data), path))
+            print(blimp_log.format_summary(blimp_log.summary(h, records)))
+            if args.csv:
+                print('%d rows written to %s' % (blimp_log.write_csv(args.csv, h, records), args.csv))
+    except (TimeoutError, CaptureError) as e:
+        sys.exit(str(e))
+    finally:
+        link.close()
+
+
 def cmd_console(args):
     con = BlimpConsole(args.host, args.console_port)
     try:
@@ -436,6 +664,42 @@ def cmd_selftest(args):
     assert not s2['imu_valid'] and s2['tof_valid']
     format_sensors(s)
 
+    lc = pack(PKT_LOG_CMD, 9, _LOG_CMD.pack(LOG_CMD_GET, 8, 0, 160))
+    assert len(lc) == 20 and _LOG_CMD.unpack(unpack(lc)[2]) == (LOG_CMD_GET, 8, 0, 160)
+    li = pack(PKT_LOG_INFO, 10, _LOG_INFO.pack(2, 0, 72, 1, 7, 20000, 3000, 6000, 3000, 123456, 2, 250, 12000.0,
+                                               2, 3, 120, b'v1.2-3-gabc'))
+    assert len(li) == 64
+    i = decode_log_info(unpack(li)[2])
+    assert i['state_name'] == 'done' and i['count'] == 3000 and i['fw'] == 'v1.2-3-gabc' and i['baro_chip'] == 3
+    assert len(i['raw']) == _LOG_INFO.size
+    format_log_info(i)
+    ch = pack(PKT_LOG_CHUNK, 11, _LOG_CHUNK_HEAD.pack(7, 16, 0, 160) + bytes(range(72)) * 16)
+    assert len(ch) == 1172
+    cid, cnt, _, first = _LOG_CHUNK_HEAD.unpack_from(unpack(ch)[2])
+    assert (cid, cnt, first) == (7, 16, 160)
+    try:
+        import blimp_log
+    except ImportError:
+        blimp_log = None
+    if blimp_log is not None:
+        assert blimp_log.HEADER.size == _LOG_INFO.size and blimp_log.RECORD_BYTES == LOG_RECORD_BYTES
+        r = {'t_us': 123456, 'acc': (1, -2, 16384), 'gyro': (-131, 0, 5), 'mag': (100, -200, 300),
+             'baro_p_dpa': 750123, 'baro_t_cc': -1234, 'baro_h_cpct': 4567, 'tof_mm': 1520, 'tof_status': 0,
+             'fresh': 0x0F, 'mode': 0, 'fs_flags': 0x40,
+             'cam': [{'seq': 1, 'detected': 1, 'cx': 80, 'cy': 60, 'area': 300},
+                     {'seq': 0, 'detected': 0, 'cx': 0, 'cy': 0, 'area': 0}],
+             'setpoint': (0, 0, 0, 0), 'throttle': (3277, 0, -3277, 0), 'bat_mv': 3950, 'exec_us': 412}
+        blob = blimp_log.encode_record(r)
+        assert len(blob) == 72 and blimp_log.decode_record(blob) == r
+        h, recs = blimp_log.decode(i['raw'], blob * 3)
+        rows = blimp_log.to_units(h, recs)
+        assert abs(rows[0]['acc_z_g'] - 1.0) < 1e-6 and abs(rows[0]['gyro_x_dps'] + 1.0) < 1e-3
+        assert abs(rows[0]['pressure_pa'] - 75012.3) < 1e-6 and abs(rows[0]['baro_temp_c'] + 12.34) < 1e-9
+        assert abs(rows[0]['throttle_FL'] - 0.1) < 1e-3 and rows[0]['humidity_pct'] == 45.67
+        summ = blimp_log.summary(h, recs)
+        assert summ['records'] == 3 and summ['overruns'] == 3 and 'overrun' in summ['flags_seen']
+        blimp_log.format_summary(summ)
+
     for bad, why in ((ms[:-1], 'truncated'),
                      (ms[:10] + bytes([ms[10] ^ 0x01]) + ms[11:], 'bit flip'),
                      (bytes([0, 0]) + ms[2:], 'magic'),
@@ -484,6 +748,15 @@ def main(argv=None):
     st = sub.add_parser('stop', help='coast (or --brake) all four motors')
     st.add_argument('--brake', action='store_true')
     st.set_defaults(fn=cmd_stop)
+
+    cp = sub.add_parser('capture', help="record the control loop's records on the blimp and fetch them")
+    cp.add_argument('action', choices=('status', 'start', 'stop', 'clear', 'download'))
+    cp.add_argument('-t', '--seconds', type=int, default=60, help='start: length in s (default %(default)s)')
+    cp.add_argument('-o', '--out', help='download: the .bin to write (default captures/capture-<date>.bin)')
+    cp.add_argument('--csv', help='download: also write every record, in units, to this CSV')
+    cp.add_argument('--now', action='store_true', help='download: take what is there without waiting for '
+                                                       'a running capture to end')
+    cp.set_defaults(fn=cmd_capture)
 
     args = p.parse_args(argv)
     args.fn(args)

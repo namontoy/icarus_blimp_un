@@ -353,6 +353,9 @@ esp_err_t mag_read(mag_dev_t *d, int timeout_ms, mag_reading_t *r)
         lsb_per_gauss = QMC5883L_LSB_PER_GAUSS;
     }
 
+    r->raw[0] = mx;
+    r->raw[1] = my;
+    r->raw[2] = mz;
     r->mx_gauss = mx / lsb_per_gauss;
     r->my_gauss = my / lsb_per_gauss;
     r->mz_gauss = mz / lsb_per_gauss;

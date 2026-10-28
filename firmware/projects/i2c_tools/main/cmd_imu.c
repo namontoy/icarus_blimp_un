@@ -194,6 +194,9 @@ esp_err_t imu_read(imu_dev_t *d, imu_reading_t *r)
     r->gy_dps = gy / gyro_lsb_per_dps[d->fs_sel];
     r->gz_dps = gz / gyro_lsb_per_dps[d->fs_sel];
     r->temp_c = t / 340.0f + 36.53f;   // datasheet conversion
+    r->raw_acc[0] = ax;  r->raw_acc[1] = ay;  r->raw_acc[2] = az;
+    r->raw_gyro[0] = gx; r->raw_gyro[1] = gy; r->raw_gyro[2] = gz;
+    r->raw_temp = t;
     return ESP_OK;
 }
 

@@ -1,7 +1,9 @@
 # Ground station
 
-One window for the blimp: motors, sensors, the camera and the console, in a single PyQt6
-process that talks to the S3 firmware over its Wi-Fi access point and to nothing else. The
+One window for the blimp in a single PyQt6 process: a Flight page (motors, sensors, the
+camera), a Bench page (captures of the control loop's records, with their traces; `bench.py`,
+2026-10-27) and the console under both. It talks to the S3 firmware over its Wi-Fi access
+point and to nothing else. The
 cameras are wired to the S3, which will relay what they extract (detections, optical flow);
 the link has no packet for that yet, so the camera panel runs on demo data only. Design: `docs/ground-station-native-plan.md`; signals and the safety chain:
 `docs/ground-station-plan.md`.
@@ -117,6 +119,15 @@ address toward the blimp, so a network joined by hand shows as joined too.
   packet for them. The picture view with Grab frame, Live and Rotate 180° (display only) is
   kept for the occasional calibration frame the S3 may relay later (`docs/inter-board-link-plan.md`);
   outside the demo the two buttons are disabled.
+- **Bench** (the second tab under the header): the blimp's capture. Set a length and press
+  *Start*; the blimp records one 72-byte record per 20 ms of its control loop into PSRAM (IMU,
+  magnetometer and barometer, the range, the motor readback, the loop's execution time, which
+  sensors were fresh). *Download* fetches it over the link in chunks (the ones that are lost
+  are asked for again), saves `captures/capture-<date>.bin` with a `.json` beside it (the
+  header, your notes, the summary figures) and shows the traces: pick a group and a time
+  window, hover for the values at a sample; *Export CSV…* writes every record in units.
+  `python software/blimp_log.py <file>` reads the same files. In `--demo` the mock records
+  its toy airframe, so the page can be tried without a blimp.
 - **Console** and **Events** share the dock under the three panels, as two tabs. Drag the
   handle on the dock's top edge to set its height (double-click resets it), and the ▾ button
   collapses it to the tab bar. Height, tab and collapsed state are remembered between runs.
@@ -134,7 +145,8 @@ address toward the blimp, so a network joined by hand shows as joined too.
 | `app.py` | `main()`, the options, the header, the window: panels, dock splitter, keys, settings |
 | `station.py` | the back end in the GUI process: bridges, camera, Wi-Fi and console as Qt signals |
 | `panels.py` | the Motors, Camera and Sensors panels and the Console/Events dock |
-| `widgets.py` | the painted pieces: top view, compass, ToF gauge, plots, camera view, pills, STOP |
+| `bench.py` | the Bench page: the capture panel and the trace viewer |
+| `widgets.py` | the painted pieces: top view, compass, ToF gauge, plots (the sparklines and the capture's trace plot), camera view, pills, STOP |
 | `theme.py` | the palette's tokens, fonts and the Qt style sheet; new UI keeps to these |
 | `fonts/` | Titillium Web and IBM Plex Mono with their OFL licences |
 | `blimp_bridge.py` | `blimp_link.BlimpLink` and `BlimpConsole` with the setpoint deadman; `DemoBlimp` runs `mock_blimp.py` in-process |

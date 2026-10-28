@@ -15,3 +15,9 @@ CONFIG_FREERTOS_USE_TRACE_FACILITY=y
 CONFIG_FREERTOS_USE_STATS_FORMATTING_FUNCTIONS=y
 
 CONFIG_ESPTOOLPY_FLASHSIZE_2MB=y
+
+# Control loop (main/ctl_task.c). The 20 ms period comes from an esp_timer
+# dispatched from the timer interrupt, so it neither depends on the FreeRTOS
+# tick (left at its 100 Hz default: decision D1 in docs/control-loop-plan.md)
+# nor queues behind the esp_timer task that Wi-Fi can hold off.
+CONFIG_ESP_TIMER_SUPPORTS_ISR_DISPATCH_METHOD=y

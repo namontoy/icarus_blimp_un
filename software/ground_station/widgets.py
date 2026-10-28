@@ -6,6 +6,7 @@ viewBox and are scaled into the widget, so the numbers below can be checked
 against the old web/index.html in git history. Colours and fonts come from
 theme.py and nothing else.
 """
+import bisect
 import math
 import time
 
@@ -767,6 +768,155 @@ class Sparkline(QWidget):
             p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
             p.setPen(QPen(C(T.MUTED), 1))
             p.drawLine(QPointF(x, pt), QPointF(x, h - pb))
+
+
+class TracePlot(QWidget):
+    """A downloaded capture's traces (the Bench page): any number of series
+    against time in seconds over a [t0, t1] window, auto-ranged, with a
+    legend, and on hover a crosshair at the nearest sample with every series'
+    value in a tool tip. A few thousand points per series paint fast enough
+    as one path each."""
+    PAD = (56, 12, 10, 18)      # left, right, top, bottom
+
+    def __init__(self):
+        super().__init__()
+        self.t, self.series, self.unit, self.digits = [], [], '', 2
+        self.win = None
+        self.hover_x = None
+        self.setMouseTracking(True)
+        self.setMinimumHeight(160)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._f = T.font(10, mono=True)
+        self._fl = T.font(11)
+
+    def set_data(self, t, series, unit='', digits=2):
+        """series: [(name, values, colour), ...], each aligned with t."""
+        self.t, self.series, self.unit, self.digits = list(t), list(series), unit, digits
+        self.update()
+
+    def set_window(self, t0, t1):
+        self.win = None if t0 is None else (t0, t1)
+        self.update()
+
+    def _span(self):
+        if self.win:
+            return self.win
+        if not self.t:
+            return 0.0, 1.0
+        return self.t[0], (self.t[-1] if self.t[-1] > self.t[0] else self.t[0] + 1.0)
+
+    def _visible(self):
+        a, b = self._span()
+        i0, i1 = bisect.bisect_left(self.t, a), bisect.bisect_right(self.t, b)
+        return max(0, i0 - 1), min(len(self.t), i1 + 1)
+
+    def _range(self, i0, i1):
+        lo, hi = math.inf, -math.inf
+        for _, vals, _ in self.series:
+            for v in vals[i0:i1]:
+                if isnum(v):
+                    lo, hi = min(lo, v), max(hi, v)
+        if not lo < hi:
+            lo, hi = (lo - 1.0, hi + 1.0) if isnum(lo) and lo == hi else (-1.0, 1.0)
+        pad = (hi - lo) * 0.1
+        return lo - pad, hi + pad
+
+    def mouseMoveEvent(self, e):
+        self.hover_x = e.position().x()
+        self.update()
+
+    def leaveEvent(self, e):
+        self.hover_x = None
+        QToolTip.hideText()
+        self.update()
+
+    def _nearest(self):
+        if self.hover_x is None or not self.t:
+            return None
+        pl, pr = self.PAD[0], self.PAD[1]
+        a, b = self._span()
+        tt = a + clamp((self.hover_x - pl) / max(1, self.width() - pl - pr), 0, 1) * (b - a)
+        k = min(bisect.bisect_left(self.t, tt), len(self.t) - 1)
+        if k > 0 and abs(self.t[k - 1] - tt) < abs(self.t[k] - tt):
+            k -= 1
+        return k
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        p.fillRect(QRect(0, 0, w, h), C(T.BG))
+        p.setPen(QPen(C(T.BORDER), 1))
+        p.drawRect(QRectF(0.5, 0.5, w - 1, h - 1))
+        pl, pr, pt, pb = self.PAD
+        a, b = self._span()
+        i0, i1 = self._visible()
+        lo, hi = self._range(i0, i1)
+        X = lambda tt: pl + (tt - a) / (b - a) * (w - pl - pr)
+        Y = lambda v: pt + (1 - (v - lo) / (hi - lo)) * (h - pt - pb)
+        p.setFont(self._f)
+        fm = QFontMetrics(self._f)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        for k in range(5):
+            v = lo + (hi - lo) * k / 4
+            y = Y(v)
+            p.setPen(QPen(C(T.GRID), 1))
+            p.drawLine(QPointF(pl, y), QPointF(w - pr, y))
+            p.setPen(C(T.FAINT))
+            s = '%.*f' % (self.digits, v)
+            p.drawText(QPointF(pl - 4 - fm.horizontalAdvance(s), y + 3), s)
+        if lo < 0 < hi:
+            p.setPen(QPen(C(T.BORDER), 1))
+            p.drawLine(QPointF(pl, Y(0)), QPointF(w - pr, Y(0)))
+        for k in range(5):
+            tt = a + (b - a) * k / 4
+            x = X(tt)
+            p.setPen(QPen(C(T.GRID), 1))
+            p.drawLine(QPointF(x, pt), QPointF(x, h - pb))
+            p.setPen(C(T.FAINT))
+            s = '%.1f s' % tt
+            sw = fm.horizontalAdvance(s)
+            p.drawText(QPointF(clamp(x - sw / 2, pl, w - pr - sw), h - 4), s)
+        p.setPen(C(T.MUTED))
+        p.drawText(QPointF(pl + 4, pt + 9), self.unit)
+        p.setFont(self._fl)
+        fl = QFontMetrics(self._fl)
+        x = w - pr - 4
+        for name, _, col in reversed(self.series):
+            x -= fl.horizontalAdvance(name)
+            p.setPen(C(T.MUTED))
+            p.drawText(QPointF(x, pt + 10), name)
+            x -= 17
+            p.fillRect(QRectF(x, pt + 5, 14, 3), C(col))
+            x -= 10
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setClipRect(QRectF(pl, pt, w - pl - pr, h - pt - pb))
+        for name, vals, col in self.series:
+            path, started = QPainterPath(), False
+            for k in range(i0, i1):
+                v = vals[k]
+                if not isnum(v):
+                    started = False
+                    continue
+                pt_ = QPointF(X(self.t[k]), Y(v))
+                if started:
+                    path.lineTo(pt_)
+                else:
+                    path.moveTo(pt_)
+                    started = True
+            p.setPen(QPen(C(col), 1.5, cap=Qt.PenCapStyle.RoundCap, join=Qt.PenJoinStyle.RoundJoin))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawPath(path)
+        k = self._nearest()
+        if k is not None and i0 <= k < i1:
+            x = round(X(self.t[k])) + 0.5
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+            p.setPen(QPen(C(T.MUTED), 1))
+            p.drawLine(QPointF(x, pt), QPointF(x, h - pb))
+            tip = '%.3f s' % self.t[k] + ''.join(
+                '   %s %s' % (name, ('%.*f' % (self.digits, vals[k])) if isnum(vals[k]) else '—')
+                for name, vals, _ in self.series) + ' ' + self.unit
+            QToolTip.showText(self.mapToGlobal(QPoint(int(self.hover_x) + 14, pt + 20)), tip, self)
 
 
 class FovPlot(QWidget):

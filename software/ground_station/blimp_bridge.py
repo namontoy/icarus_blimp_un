@@ -1,7 +1,8 @@
 """The ground station's side of the blimp link: packets in, setpoints out, with the deadman.
 
 Wraps blimp_link.BlimpLink (UDP packets: heartbeat out, telemetry and sensors
-in) and blimp_link.BlimpConsole. The one piece of logic that matters for safety
+in), blimp_link.BlimpConsole and blimp_link.CaptureClient (the capture, for
+the Bench page). The one piece of logic that matters for safety
 lives here: the GUI's motor setpoint is repeated to the blimp at STREAM_HZ
 only while the GUI keeps refreshing it. A window that froze, a GUI that
 closed or a laptop that died all stop the stream within DEADMAN_S, and the
@@ -27,6 +28,7 @@ class BlimpBridge:
         self._extra_packet = on_packet
         self.link = bl.BlimpLink(host, port)
         self.link.on_packet = self._packet
+        self.capture = bl.CaptureClient(self.link)     # used from the station's capture thread only
         self.console = bl.BlimpConsole(host, console_port)
         self._console_lock = threading.Lock()   # one command at a time on the wire
         self._lock = threading.Lock()

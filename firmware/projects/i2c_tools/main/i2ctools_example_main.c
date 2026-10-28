@@ -25,6 +25,8 @@
 #include "net_link.h"
 #include "net_console.h"
 #include "sensor_stream.h"
+#include "ctl_task.h"
+#include "capture.h"
 
 static const char *TAG = "i2c-tools";
 
@@ -153,6 +155,8 @@ void app_main(void)
     register_wifi();
     register_link();
     register_sensors();
+    register_ctl();
+    register_capture();
     register_exit();
 
     /*
@@ -190,6 +194,29 @@ void app_main(void)
         ESP_LOGE(TAG, "sensor stream unavailable - console sensor commands only");
     }
 
+    /*
+     * The capture buffer (capture.c) is allocated before the control task
+     * exists, so the task's log stage finds it or finds nothing, never a
+     * buffer that appears mid-run. Not fatal: 'capture' then says why.
+     */
+    if (capture_init() != ESP_OK) {
+        ESP_LOGE(TAG, "capture buffer unavailable - the loop runs, nothing is recorded");
+    }
+
+    /*
+     * The fixed-rate control task (ctl_task.c) runs on core 1 from here on.
+     * In this increment its stages are empty but for two: the read stage
+     * peeks the sensor stream's latest sample (the stream still owns the
+     * chips) and the log stage feeds the capture. It neither drives the bus
+     * nor the motors; it measures its own period and execution time, which
+     * is what the bench has to confirm before the sensors move into it
+     * (docs/control-loop-plan.md). Not fatal: the console and the link are
+     * how a failure here would be diagnosed.
+     */
+    if (ctl_task_start() != ESP_OK) {
+        ESP_LOGE(TAG, "control task unavailable");
+    }
+
     /* Status LED runs in its own task, so the REPL below stays responsive. */
     led_blink_start();
 
@@ -210,7 +237,9 @@ void app_main(void)
     printf(" | 12. Try 'wifi' and 'link' for the Wi-Fi ground link        |\n");
     printf(" |     (software/blimp_link.py runs all of this over the air) |\n");
     printf(" | 13. Try 'sensors' for the stream the ground station plots  |\n");
-    printf(" | 14. Type 'exit' or 'quit' to see how to leave the monitor  |\n");
+    printf(" | 14. Try 'ctl' for the control loop and its timing          |\n");
+    printf(" | 15. Try 'capture' to record a minute of the loop's records |\n");
+    printf(" | 16. Type 'exit' or 'quit' to see how to leave the monitor  |\n");
     printf(" |                                                            |\n");
     printf(" ==============================================================\n\n");
 

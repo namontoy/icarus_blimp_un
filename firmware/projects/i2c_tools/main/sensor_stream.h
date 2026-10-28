@@ -8,6 +8,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "esp_err.h"
+#include "ctl_types.h"
 #include "link_protocol.h"
 
 #ifdef __cplusplus
@@ -42,6 +43,31 @@ void sensor_stream_resume(void);
  * @return false until the first sample exists.
  */
 bool sensor_stream_latest(link_sensors_t *out, uint32_t *seq);
+
+/**
+ * The newest sample as the control pipeline's raw record: counts for the
+ * IMU and the magnetometer, compensated fixed-point integers for the
+ * barometer, millimetres and status for the ToF, each with the time its
+ * source last produced a reading. The control task's read stage peeks this
+ * every tick until increment 2 moves the drivers into the task itself
+ * (docs/control-loop-plan.md). Only the four sensor blocks and t_us are
+ * filled; the fresh flags are the reader's to derive from the timestamps.
+ *
+ * @return false until the first sample exists.
+ */
+bool sensor_stream_latest_raw(sensors_raw_t *out);
+
+/* What the counts mean: recorded when each chip attaches, kept after it is
+   released (the counts already taken were taken at these settings). */
+typedef struct {
+    int   imu_accel_g;          /* full scale, g; 0 until the IMU attached     */
+    int   imu_gyro_dps;         /* full scale, deg/s                           */
+    float mag_lsb_per_gauss;    /* 0 until the magnetometer attached           */
+    int   mag_chip;             /* 0 none, else 1 + mag_chip_t                 */
+    int   baro_chip;            /* 0 none, else 1 + baro_chip_t                */
+} sensor_scales_t;
+
+void sensor_stream_scales(sensor_scales_t *out);
 
 /** Register the 'sensors' command with the console. */
 void register_sensors(void);

@@ -8,7 +8,7 @@ repo, merged into icarus_blimp_un on that date. The firmware they describe (`dro
 the ESP-FLY board) now lives in `firmware/projects/espfly/` as the previous board's shell. The live
 firmware is `firmware/projects/i2c_tools/` on the ESP32-S3-Zero (two DRV8833, reversible motors,
 stand-alone MPU-6050 / QMC5883L / BME280 / VL53L1X breakouts, ESP32-CAM); its fixed-rate control
-task, which will call `blimp_step()`, is the next step (`docs/prompts/`). `core/`, `sim/` and
+task, which will call `blimp_step()`, is the next step (`docs/control-loop-plan.md`). `core/`, `sim/` and
 `tools/verify.py` are unchanged by the merge and still verified on Windows only. Section 2's
 "unmeasured vehicle" caveat still holds: one motor was thrust-tested at 14.7-16.8 gf on a lab
 supply, and `core/src/params.c` still carries the 35 gf placeholder.

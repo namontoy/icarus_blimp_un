@@ -64,3 +64,6 @@ Thumbs.db
 desktop.ini
 .DS_Store
 *.swp
+
+# Captures fetched from the blimp (blimp_link.py capture, the Bench page)
+captures/

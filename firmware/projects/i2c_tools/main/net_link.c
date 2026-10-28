@@ -27,10 +27,17 @@
  *
  * Telemetry keeps flowing for a while after the host goes quiet, so a host
  * that paused still sees that the motors coasted and the link went stale.
+ *
+ * The capture (capture.c) is driven from here too: LOG_CMD starts, stops,
+ * clears or queries it, and GET reads it out in chunks of 16 records. The
+ * chunks are built in a static buffer, because 1.2 kB would be a third of
+ * this task's stack, and sent back to back from this task: a burst of eight
+ * holds telemetry up by a few milliseconds, which the host asked for.
  */
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
+#include "esp_app_desc.h"
 #include "esp_console.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -40,7 +47,9 @@
 #include "lwip/inet.h"
 #include "lwip/sockets.h"
 #include "sdkconfig.h"
+#include "capture.h"
 #include "cmd_motor.h"
+#include "ctl_task.h"
 #include "link_protocol.h"
 #include "net_link.h"
 #include "net_wifi.h"
@@ -72,6 +81,9 @@ static struct {
     uint32_t           sensors_seq;   /* the stream's sample last sent       */
     volatile uint32_t  tx_sensors;
 } s;
+
+/* The one LOG_CHUNK under construction; the link task alone touches it. */
+static link_log_chunk_t s_chunk;
 
 /* --------------------------------------------------------------- receive */
 
@@ -125,6 +137,112 @@ static void handle_motor_stop(const link_motor_stop_t *p)
     s.link_motors = false;
 }
 
+/* ------------------------------------------------------------- capture */
+
+static void send_to(const void *pkt, size_t len, const struct sockaddr_in *to)
+{
+    int sent = sendto(s.sock, pkt, len, 0, (const struct sockaddr *)to, sizeof(*to));
+    if (sent == (int)len) {
+        s.tx++;
+    }
+}
+
+static void send_log_info(uint8_t result, const struct sockaddr_in *to)
+{
+    capture_info_t ci;
+    capture_info(&ci);
+
+    link_log_info_t p;
+    memset(&p, 0, sizeof(p));
+    p.h.magic   = LINK_PROTO_MAGIC;
+    p.h.version = LINK_PROTO_VERSION;
+    p.h.type    = LINK_PKT_LOG_INFO;
+    p.h.seq     = s.tx_seq++;
+    p.state       = ci.have_buffer ? ci.state : LINK_LOG_IDLE;
+    p.result      = (!ci.have_buffer && result == LINK_LOG_OK) ? LINK_LOG_ERR_NO_BUFFER : result;
+    p.record_size = LINK_LOG_RECORD_BYTES;
+    p.format      = LINK_LOG_FORMAT;
+    p.capture_id  = ci.capture_id;
+    p.period_us   = (uint16_t)CTL_PERIOD_US;
+    p.count       = ci.count;
+    p.capacity    = ci.capacity;
+    p.wanted      = ci.wanted;
+    p.t_start_us  = ci.t_start_us;
+    p.imu_accel_g       = ci.imu_accel_g;
+    p.imu_gyro_dps      = ci.imu_gyro_dps;
+    p.mag_lsb_per_gauss = ci.mag_lsb_per_gauss;
+    p.mag_chip          = ci.mag_chip;
+    p.baro_chip         = ci.baro_chip;
+    p.max_seconds       = (uint16_t)(ci.capacity / (1000000u / CTL_PERIOD_US));
+    strncpy(p.fw, esp_app_get_description()->version, sizeof(p.fw) - 1);
+    p.crc32 = link_crc32(&p, sizeof(p));
+    send_to(&p, sizeof(p), to);
+}
+
+static void handle_log_cmd(const link_log_cmd_t *p, const struct sockaddr_in *from)
+{
+    switch (p->cmd) {
+    case LINK_LOG_CMD_INFO:
+        send_log_info(LINK_LOG_OK, from);
+        return;
+    case LINK_LOG_CMD_START: {
+        esp_err_t err = capture_start(p->seconds);
+        send_log_info(err == ESP_OK ? LINK_LOG_OK :
+                      err == ESP_ERR_INVALID_STATE ? LINK_LOG_ERR_BUSY : LINK_LOG_ERR_NO_BUFFER, from);
+        return;
+    }
+    case LINK_LOG_CMD_STOP:
+        capture_stop();
+        send_log_info(LINK_LOG_OK, from);
+        return;
+    case LINK_LOG_CMD_CLEAR:
+        capture_clear();
+        send_log_info(LINK_LOG_OK, from);
+        return;
+    case LINK_LOG_CMD_GET: {
+        unsigned chunks = p->count ? p->count : 1;
+        if (chunks > LINK_LOG_GET_MAX_CHUNKS) {
+            chunks = LINK_LOG_GET_MAX_CHUNKS;
+        }
+        for (unsigned k = 0; k < chunks; k++) {
+            const uint32_t first = p->first + k * LINK_LOG_CHUNK_RECORDS;
+            uint16_t id = 0;
+            const uint32_t n = capture_read(first, LINK_LOG_CHUNK_RECORDS,
+                                            (log_record_t *)s_chunk.data, &id);
+            if (n == 0) {
+                /* Past the end, or the capture changed while we read: the
+                   INFO tells the host which, by count and capture_id. */
+                send_log_info(LINK_LOG_ERR_RANGE, from);
+                return;
+            }
+            memset(&s_chunk.h, 0, sizeof(s_chunk.h));
+            s_chunk.h.magic   = LINK_PROTO_MAGIC;
+            s_chunk.h.version = LINK_PROTO_VERSION;
+            s_chunk.h.type    = LINK_PKT_LOG_CHUNK;
+            s_chunk.h.seq     = s.tx_seq++;
+            s_chunk.capture_id = id;
+            s_chunk.count      = (uint8_t)n;
+            s_chunk._reserved  = 0;
+            s_chunk.first      = first;
+            if (n < LINK_LOG_CHUNK_RECORDS) {
+                memset(s_chunk.data + n * LINK_LOG_RECORD_BYTES, 0,
+                       (LINK_LOG_CHUNK_RECORDS - n) * LINK_LOG_RECORD_BYTES);
+            }
+            s_chunk.crc32 = 0;
+            s_chunk.crc32 = link_crc32(&s_chunk, sizeof(s_chunk));
+            send_to(&s_chunk, sizeof(s_chunk), from);
+            if (n < LINK_LOG_CHUNK_RECORDS) {
+                return;                 /* the end of what is stored */
+            }
+        }
+        return;
+    }
+    default:
+        send_log_info(LINK_LOG_ERR_CMD, from);
+        return;
+    }
+}
+
 static void handle_datagram(uint8_t *buf, int n, const struct sockaddr_in *from, int64_t now)
 {
     if (n < (int)sizeof(link_header_t)) {
@@ -163,6 +281,16 @@ static void handle_datagram(uint8_t *buf, int n, const struct sockaddr_in *from,
         link_motor_stop_t p;
         memcpy(&p, buf, sizeof(p));
         handle_motor_stop(&p);
+        break;
+    }
+    case LINK_PKT_LOG_CMD: {
+        if (!packet_ok(buf, n, sizeof(link_log_cmd_t))) {
+            s.rx_bad++;
+            return;
+        }
+        link_log_cmd_t p;
+        memcpy(&p, buf, sizeof(p));
+        handle_log_cmd(&p, from);
         break;
     }
     default:

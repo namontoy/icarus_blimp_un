@@ -100,10 +100,20 @@ u32 crc32   over the whole struct with this field zeroed; zlib/PNG CRC-32
 | `0x03 MOTOR_STOP` | host → blimp | `u8 brake` | 16 B |
 | `0x81 TELEMETRY` | blimp → host | `u32 t_us`, `f32 motor_cmd[4]`, `u8 failsafe`, `u8 link_alive`, `u8 link_motors`, `u8 stations`, `u32 rx_ok`, `u32 rx_bad`, `u32 free_heap`, `u16 link_age_ms` | 52 B |
 | `0x82 SENSORS` | blimp → host | `u32 t_us`, `f32 acc[3]` g, `f32 gyro[3]` dps, `f32 imu_temp_c`, `f32 mag[3]` gauss, `f32 heading_deg`, `f32 pressure_pa`, `f32 baro_temp_c`, `f32 baro_alt_m` (relative to the first reading), `u16 tof_mm`, `u8 tof_status`, `u8 valid` (IMU 1, MAG 2, BARO 4, TOF 8) | 76 B |
+| `0x04 LOG_CMD` | host → blimp | `u8 cmd` (0 info, 1 start, 2 stop, 3 clear, 4 get), `u8 count` (get: chunks, up to 8), `u16 seconds` (start), `u32 first` (get: record index) | 20 B |
+| `0x83 LOG_INFO` | blimp → host | `u8 state` (0 idle, 1 running, 2 done), `u8 result` (0 ok, 1 no buffer, 2 busy, 3 range, 4 bad command), `u8 record_size` (72), `u8 format` (1), `u16 capture_id`, `u16 period_us`, `u32 count`, `u32 capacity`, `u32 wanted`, `u32 t_start_us`, `u16 imu_accel_g`, `u16 imu_gyro_dps`, `f32 mag_lsb_per_gauss`, `u8 mag_chip`, `u8 baro_chip`, `u16 max_seconds`, `char fw[16]` | 64 B |
+| `0x84 LOG_CHUNK` | blimp → host | `u16 capture_id`, `u8 count` (records present), `u8 reserved`, `u32 first`, `u8 data[16 × 72]` (one `log_record_t` of `ctl_types.h` each, zero past `count`) | 1172 B |
 
 Anything with the wrong size for its type, another magic or version, or a bad CRC is counted in
 `rx_bad` and ignored. There are no acknowledgements: the telemetry's `motor_cmd` readback is
 the acknowledgement of a `MOTOR_SET`, the same idea esp-drone used with its parameter echo.
+
+The three `LOG_*` types (2026-10-27) carry the capture: the control loop's records, kept in
+PSRAM on the blimp (`capture.c`, `docs/control-loop-plan.md` D7 and D8). `LOG_CMD` info, start,
+stop and clear are each answered by one `LOG_INFO`; `get` by up to eight `LOG_CHUNK`s back to
+back, or a `LOG_INFO` with result 3 at the end of the data. The host asks again for chunks that
+did not arrive. `LOG_CHUNK` is the one packet larger than `LINK_MAX_PACKET_BYTES`; it only ever
+travels blimp to host, so the firmware's receive buffer is unchanged.
 
 The blimp replies to whoever sent the last valid packet of any type, so the first heartbeat
 starts the telemetry and a reconnect is just sending again. Telemetry continues for ten
@@ -156,6 +166,9 @@ python software/blimp_link.py console                      # interactive console
 python software/blimp_link.py console "motor --status"     # one command
 python software/blimp_link.py motor 0.2 0 0 0 --seconds 2  # FL RL FR RR, props off
 python software/blimp_link.py stop [--brake]
+python software/blimp_link.py capture start -t 60               # record the loop's records on the blimp
+python software/blimp_link.py capture download [--csv out.csv]  # fetch them: captures/capture-<date>.bin
+python software/blimp_log.py captures/capture-<date>.bin        # summary, --csv, --head
 ```
 
 Python 3.8+ standard library, no conda environment needed. Join the blimp's SSID from the OS
@@ -218,6 +231,7 @@ Props off. USB console open in a second window so the logs are visible.
 | No brownout of the sensor rail with the radio on | ❓ **never tested**; item 8 above |
 | Image fits its partition | ✅ measured 2026-10-21: 929 KB (`-Og` debug build) in the factory partition, which `partitions_example.csv` grows from 1 MB (11 % free) to 2 MB (56 % free); the FAT `storage` partition moves up and reformats once |
 | 2.4 GHz behaviour at the venue | ❓ unknown; channel is a Kconfig setting for that reason |
+| Capture packets (`LOG_CMD`, `LOG_INFO`, `LOG_CHUNK`) and the chunked download with re-request | ✅ against `mock_blimp.py` 2026-10-27 (`blimp_link.py capture`, `blimp_log.py`, the Bench page offscreen); ❓ on hardware, where PSRAM is also unproven |
 
 Built since the first cut: the sensor stream (`sensor_stream.c` sampling through the
 attach/read/detach drivers lifted out of `cmd_imu.c`, `cmd_mag.c`, `cmd_baro.c` and `cmd_tof.c`,

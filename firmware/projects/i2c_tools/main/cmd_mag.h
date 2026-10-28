@@ -10,6 +10,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 #include "esp_err.h"
 
 #ifdef __cplusplus
@@ -33,6 +34,10 @@ typedef struct {
     bool  overflow;                       /* field beyond the range: the
                                              numbers are clipped, not
                                              measurements                   */
+    int16_t raw[3];                       /* the counts, x y z (the HMC5883L's
+                                             X-Z-Y register order already
+                                             undone); gauss = raw divided by
+                                             mag_info_t.lsb_per_gauss       */
 } mag_reading_t;
 
 typedef struct {

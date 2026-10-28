@@ -230,3 +230,23 @@ menu "Sensor stream (the packet the ground station plots)"
             means fresher samples, not more packets.
 
 endmenu
+
+menu "Capture (the control loop's records, kept in PSRAM)"
+
+    # capture.c stores one 72-byte log record per 20 ms tick of the control
+    # task, for a bench session, and the link reads them back afterwards
+    # ('capture' on the console, blimp_link.py capture, the ground station's
+    # Bench page).
+
+    config CAPTURE_MAX_SECONDS
+        int "Longest capture in seconds"
+        range 1 600
+        default 120
+        help
+            The buffer is allocated once at boot for this many seconds of
+            records: 3.6 kB per second (72 bytes at 50 Hz), so 120 s is
+            432 kB of the 2 MB PSRAM. A capture asks for its own length at
+            start, up to this. Without PSRAM the firmware falls back to a
+            10 s buffer in internal RAM and says so in the boot log.
+
+endmenu

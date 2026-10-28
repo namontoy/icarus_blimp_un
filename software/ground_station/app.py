@@ -1,4 +1,4 @@
-"""The ground station's window: header, three panels, the dock, and main().
+"""The ground station's window: header, the Flight and Bench pages, the dock, and main().
 
     python -m software.ground_station --demo                  # no hardware
     python -m software.ground_station                         # the blimp at 192.168.4.1
@@ -19,16 +19,17 @@ import sys
 import time
 
 from PyQt6 import sip
-from PyQt6.QtCore import QEvent, QObject, QRect, QSettings, Qt, QTimer
+from PyQt6.QtCore import QEvent, QObject, QRect, QSettings, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QPainter
 from PyQt6.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QLineEdit, QMainWindow, QSizePolicy,
-                             QVBoxLayout, QWidget)
+                             QStackedWidget, QVBoxLayout, QWidget)
 
 from . import theme as T
+from .bench import BenchPage
 from .panels import CameraPanel, Dock, MotorsPanel, SensorsPanel, button, load_dock, save_dock
 from .station import Station
-from .widgets import (C, DockSplitter, ElidedLabel, FullScreenButton, Pill, StopButton, Wordmark, clamp, hbox,
-                      hline_polygon, label, set_color)
+from .widgets import (C, DockSplitter, DockTab, ElidedLabel, FullScreenButton, Pill, StopButton, Wordmark, clamp,
+                      hbox, hline_polygon, label, set_color)
 
 TEL_STALE_S = 1.5
 FRAME_MS = 33               # plots, staleness and camera ageing, about 30 Hz
@@ -157,6 +158,36 @@ class Header(QWidget):
             self.pills['cam'].set('warn', 'DOWN')
 
 
+class PageBar(QWidget):
+    """Flight | Bench under the header: the live view, or the bench page of
+    captures and checks (bench.py). The header and the dock serve both, so
+    STOP and the console are always at hand."""
+    changed = pyqtSignal(str)
+    NOTES = {'flight': 'motors, camera and sensors, live',
+             'bench': 'captures, calibration and checks of the blimp on the bench'}
+
+    def __init__(self):
+        super().__init__()
+        self.tabs = {'flight': DockTab('Flight'), 'bench': DockTab('Bench')}
+        for name, t in self.tabs.items():
+            t.clicked.connect(lambda _=False, name=name: self.changed.emit(name))
+        self.note = label('', 12, color=T.FAINT)
+        self.note.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.note.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        lay = hbox(self.tabs['flight'], 2, self.tabs['bench'], 12, self.note, spacing=0, margins=(0, 4, 0, 0))
+        lay.setStretchFactor(self.note, 1)
+        self.setLayout(lay)
+
+    def set(self, name):
+        for n, t in self.tabs.items():
+            t.setChecked(n == name)
+        self.note.setText(self.NOTES[name])
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.fillRect(QRect(0, self.height() - 1, self.width(), 1), C(T.BORDER))
+
+
 class MainWindow(QMainWindow):
     def __init__(self, station, settings):
         super().__init__()
@@ -178,9 +209,15 @@ class MainWindow(QMainWindow):
         grid.setLayout(hbox(self.motors, self.camera, self.sensors, spacing=12, margins=(0, 12, 0, 0)))
         grid.layout().setStretchFactor(self.camera, 1)
         grid.setMinimumHeight(200)
+        self.bench = BenchPage(station)
+        self.pages = QStackedWidget()
+        self.pages.addWidget(grid)
+        self.pages.addWidget(self.bench)
+        self.pagebar = PageBar()
+        self.pagebar.changed.connect(self.show_page)
         self.dock = Dock(station)
         self.split = DockSplitter()
-        self.split.addWidget(grid)
+        self.split.addWidget(self.pages)
         self.split.addWidget(self.dock)
         self.split.setStretchFactor(0, 1)
         self.split.setStretchFactor(1, 0)
@@ -197,6 +234,7 @@ class MainWindow(QMainWindow):
         rl.setContentsMargins(16, 0, 16, 10)
         rl.setSpacing(0)
         rl.addWidget(self.header)
+        rl.addWidget(self.pagebar)
         rl.addWidget(self.split, 1)
         self.setCentralWidget(root)
 
@@ -216,6 +254,8 @@ class MainWindow(QMainWindow):
         station.con_end.connect(self.dock.con_end)
         station.ev.connect(self.dock.add_event)
         station.wifi.connect(self.on_wifi)
+        station.cap.connect(self.bench.capture.on_cap)
+        station.cap_data.connect(self.bench.on_data)
 
         self._frame = QTimer(self)
         self._frame.timeout.connect(self.frame)
@@ -226,6 +266,7 @@ class MainWindow(QMainWindow):
             scr = QApplication.primaryScreen().availableGeometry()
             self.resize(min(1680, scr.width()), min(1000, scr.height()))
         load_dock(settings, self.dock)
+        self.show_page('bench' if settings.value('window/page') == 'bench' else 'flight')
         # value(..., type=int) turns a missing key into 0, not None, and 0
         # would pin the dock at its minimum on a first run.
         h = settings.value('dock/h')
@@ -242,6 +283,11 @@ class MainWindow(QMainWindow):
     def on_wifi(self, w):
         self.wifi = w
         self.header.on_wifi(w)
+
+    def show_page(self, name):
+        self.pages.setCurrentIndex(1 if name == 'bench' else 0)
+        self.pagebar.set(name)
+        self.settings.setValue('window/page', name)
 
     def frame(self):
         self.sensors.frame()

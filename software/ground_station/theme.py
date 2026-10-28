@@ -37,6 +37,10 @@ S_X = '#789E24'
 S_Y = '#2E9ED0'
 S_Z = '#D96D00'
 SERIES = (S_X, S_Y, S_Z)
+S_W = '#B48EE0'             # a fourth series, for the fourth motor on the bench page; not run through
+SERIES4 = (S_X, S_Y, S_Z, S_W)  # the palette checker the three above were
+S_W = '#B48EE0'             # a fourth series, for the fourth motor on the bench page; not run through
+SERIES4 = (S_X, S_Y, S_Z, S_W)  # the palette checker the three above were
 GRID = '#1E2622'
 # One-off tints the page wrote inline
 CRIT_BG = '#2A1416'         # a crit pill
@@ -184,6 +188,12 @@ QScrollBar::handle { background: %(RAISED_2)s; min-height: 24px; min-width: 24px
 QScrollBar::handle:hover { background: %(FAINT)s; }
 QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
 QScrollBar::add-page, QScrollBar::sub-page { background: none; }
+
+QProgressBar { background: %(BG)s; border: 1px solid %(BORDER)s; }
+QProgressBar::chunk { background: %(GREEN)s; }
+
+QProgressBar { background: %(BG)s; border: 1px solid %(BORDER)s; }
+QProgressBar::chunk { background: %(GREEN)s; }
 
 QLabel[role="notice"] { background: %(RAISED)s; border-left: 3px solid #F2C14E; padding: 8px 10px;
                         color: %(MUTED)s; }

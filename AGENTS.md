@@ -40,18 +40,24 @@ CLAUDE.md, and others). Keep it tool-neutral; tool-specific notes belong in that
 - `core/`: portable C11 flight controller. `blimp_step()` in `core/include/blimp/blimp.h` is the
   entire controller; tests are `core/tests/test_<module>.c`.
 - `firmware/projects/i2c_tools/`: the live ESP-IDF project for the ESP32-S3-Zero: sensor and motor
-  drivers, Wi-Fi/UDP link, console. Its fixed-rate control task is the next step
-  (`docs/prompts/prompt-1-control-loop.md`); once its stages are filled, it calls `blimp_step()`.
+  drivers, Wi-Fi/UDP link, console, and since 2026-10-27 the skeleton of the fixed-rate control
+  task (`main/ctl_task.c`, middle stages empty) with the capture of its records
+  (`main/capture.c`, in PSRAM, fetched over the link); plan and increments in
+  `docs/control-loop-plan.md`, esp-drone reuse in `docs/reuse_log.md`. Once its stages are
+  filled, it calls `blimp_step()`.
 - `firmware/projects/espfly/`: the previous board's shell. `main/main.c` is only an RTOS shell
   around `blimp_step()` (the esp_timer loop pattern); not part of day-to-day builds.
 - `firmware/projects/optflow_cam/`: ESP32-CAM optical-flow experiment. `blink/`: toolchain test.
 - `sim/`: MuJoCo closed loop that runs the same core, built as `build/libblimp.dll`, through
   ctypes (`sim/blimp_ffi.py`). `sim/scene/build_scene.py` generates the course from the rulebook.
-- `software/`: ground tools: `blimp_link.py`, `mock_blimp.py`, `ground_station/`.
+- `software/`: ground tools: `blimp_link.py`, `mock_blimp.py`, `blimp_log.py` (decodes captures),
+  `ground_station/` (Flight and Bench pages).
 - `tools/`: build, verify, sweep and environment scripts, plus `lens_test/`. `scripts/idf.bat`: the
   ESP-IDF v5.5.5 wrapper for the S3-Zero projects on Windows.
 - `docs/`: design and status (numbered files from DroneUN, dated reports from the bench);
-  `docs/prompts/`: the agreed task prompts. `research/`: sources. `reference/`: download links
+  `docs/prompts/` is a local, gitignored folder of task prompts (not part of the repo; the plans
+  they led to are `docs/control-loop-plan.md` and `docs/reuse_log.md`). `research/`: sources.
+  `reference/`: download links
   (the rulebook PDF is not committed). `external/`: read-only third-party clones, gitignored.
 
 ## Commands

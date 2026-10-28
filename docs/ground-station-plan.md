@@ -138,10 +138,14 @@ the GUI thread onto it, so every slot runs on the GUI thread. Station to window:
 | `con_text(str)` / `con_end()` | console output chunks and the end of a reply | as it arrives |
 | `ev(dict)` | `{ts, level, text}` for the event log (named `ev` because `event` would shadow `QObject.event`) | as they happen |
 | `wifi(dict)` | this computer's Wi-Fi toward the blimp: `backend`, `joined`, `ip`, `ssid`, `busy`, `phase`, `error`, `candidates` | at start, on change (checked every 2 s), after a join or leave |
+| `cap(dict)` | the capture on the blimp (Bench page, 2026-10-27): `phase` (status, download, saved, error), the last `LOG_INFO` decoded as `info`, `progress`, `file`, `error` | after every command, and every 0.5 s while one records |
+| `cap_data(dict)` | a capture downloaded and decoded: `header`, `records`, `rows` (units), `summary`, `file` | per download |
 
 Window to station, as plain method calls: `set_motors([fl, rl, fr, rr])`, `stop(brake)`,
 `console(line)`, `camera_command(action, **kw)` with `action` grab or live (the demo camera
-only, for now), `wifi_action('connect' | 'disconnect')`, and `close()`. The demo flag and the blimp
+only, for now), `wifi_action('connect' | 'disconnect')`, `capture(action, seconds, notes)` with
+`action` start, stop, clear, status or download (run on the station's capture thread), and
+`close()`. The demo flag and the blimp
 address that the old `hello` message carried are attributes of the station (`demo`,
 `blimp_host`), and so are the deadman and stream rate (`deadman_s`, `stream_hz`).
 
@@ -207,7 +211,7 @@ serial port with the target_cam viewer's parser (`--cam PORT`, pyserial). That w
 | 4 | Camera data through the S3: a link packet for the forward camera's detections (and the downward camera's flow), then a station source for it; calibration frame grabs after that | after the camera-to-S3 link (`docs/inter-board-link-plan.md`); the serial-port version was dropped 2026-10-27 |
 | 5 | Firmware: sensor task and `LINK_PKT_SENSORS` | done 2026-10-24 (`sensor_stream.c`), not yet run on hardware |
 | 6 | Bench: run against the real blimp with the stream, record what the page gets wrong | next |
-| 7 | Logging to CSV, parameter tuning from the window, Spanish labels if wanted | later |
+| 7 | Logging to CSV, parameter tuning from the window, Spanish labels if wanted | the capture and its traces on the Bench page done 2026-10-27 (`bench.py`; in demo and against `mock_blimp.py`, not yet against the blimp); parameters and labels later |
 | 8 | Native PyQt6 window in place of the Tornado server and the page (`docs/ground-station-native-plan.md`) | done 2026-10-27 in demo and against `mock_blimp.py`; not yet run against the blimp |
 
 ## 9. Running it
