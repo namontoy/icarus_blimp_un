@@ -108,9 +108,17 @@ class CapturePanel(Panel):
         self.lay.addWidget(self.bar)
         self.lay.addSpacing(8)
         self.ro = {'records': Readout('Records'), 'length': Readout('Length', 's'), 'buffer': Readout('Buffer', 's'),
-                   'scales': Readout('Scales'), 'fw': Readout('Firmware')}
-        for k in ('records', 'length', 'buffer', 'scales', 'fw'):
+                   'fw': Readout('Firmware')}
+        for k in ('records', 'length', 'buffer', 'fw'):
             self.lay.addWidget(self.ro[k])
+        # The scales line (ranges and both chips) is too long for a readout's
+        # value column at 18 px, so it gets a row of its own in console size
+        # that wraps instead of widening the panel (2026-10-28).
+        self.lay.addSpacing(6)
+        self.lay.addWidget(label('Scales', 11, color=T.FAINT, spacing=0.08, caps=True))
+        self.lay.addSpacing(2)
+        self.scales_l = label('—', 12, 500, mono=True, wrap=True)
+        self.lay.addWidget(self.scales_l)
         self.lay.addSpacing(12)
         self.lay.addWidget(h3('Notes'))
         self.lay.addSpacing(4)
@@ -197,7 +205,7 @@ class CapturePanel(Panel):
         self.ro['records'].set(str(i['count']) if i else '—')
         self.ro['length'].set('%.1f' % (i['count'] / hz) if i else '—')
         self.ro['buffer'].set(str(i['max_seconds']) if i else '—')
-        self.ro['scales'].set('±%d g · ±%d °/s · %s · %s' % (i['imu_accel_g'], i['imu_gyro_dps'],
+        self.scales_l.setText('±%d g · ±%d °/s · %s · %s' % (i['imu_accel_g'], i['imu_gyro_dps'],
                                                             MAG_CHIP.get(i['mag_chip'], '?'),
                                                             BARO_CHIP.get(i['baro_chip'], '?')) if i else '—')
         self.ro['fw'].set((i['fw'] or '?') if i else '—')

@@ -144,8 +144,10 @@ the GUI thread onto it, so every slot runs on the GUI thread. Station to window:
 Window to station, as plain method calls: `set_motors([fl, rl, fr, rr])`, `stop(brake)`,
 `console(line)`, `camera_command(action, **kw)` with `action` grab or live (the demo camera
 only, for now), `wifi_action('connect' | 'disconnect')`, `capture(action, seconds, notes)` with
-`action` start, stop, clear, status or download (run on the station's capture thread), and
-`close()`. The demo flag and the blimp
+`action` start, stop, clear, status or download (run on the station's capture thread),
+`pad_state()` (the gamepad's latest snapshot from `gamepad.py`'s reader thread, polled by the
+Control page at its own 20 Hz tick rather than signalled, since a stick is a continuous input;
+2026-10-28), and `close()`. The demo flag and the blimp
 address that the old `hello` message carried are attributes of the station (`demo`,
 `blimp_host`), and so are the deadman and stream rate (`deadman_s`, `stream_hz`).
 
@@ -213,6 +215,7 @@ serial port with the target_cam viewer's parser (`--cam PORT`, pyserial). That w
 | 6 | Bench: run against the real blimp with the stream, record what the page gets wrong | next |
 | 7 | Logging to CSV, parameter tuning from the window, Spanish labels if wanted | the capture and its traces on the Bench page done 2026-10-27 (`bench.py`; in demo and against `mock_blimp.py`, not yet against the blimp); parameters and labels later |
 | 8 | Native PyQt6 window in place of the Tornado server and the page (`docs/ground-station-native-plan.md`) | done 2026-10-27 in demo and against `mock_blimp.py`; not yet run against the blimp |
+| 9 | Control page: flying by hand (surge, yaw and heave from the keyboard or a gamepad, mixed on the ground into the four duties, as the firmware's MANUAL mode expects, D5 of the control-loop plan), PC and Steam Deck input modes, the autonomous hand-off button | done 2026-10-28 in demo (`control.py`, `gamepad.py`); the hand-off waits for `MODE_SET` (control-loop plan increment 3); not yet run on a Steam Deck or against the blimp |
 
 ## 9. Running it
 

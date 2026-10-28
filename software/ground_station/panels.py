@@ -15,9 +15,9 @@ from PyQt6.QtWidgets import (QFrame, QGridLayout, QLabel, QLineEdit, QPlainTextE
                              QScrollArea, QSizePolicy, QSpinBox, QStackedWidget, QVBoxLayout, QWidget)
 
 from . import theme as T
-from .widgets import (HISTORY_S, HOVER_BAND_M, ChamferFrame, CameraView, Compass, DockTab, EventRow, FlowBox,
-                      FovPlot, Legend, Readout, SegBar, Sparkline, Switch, ThrustSlider, TofGauge, TopView, clamp,
-                      fmt, hbox, isnum, label, set_color, sfmt)
+from .widgets import (HISTORY_S, HOVER_BAND_M, ChamferFrame, CameraView, Compass, DockTab, ElidedValue, EventRow,
+                      FlowBox, FovPlot, Legend, Readout, SegBar, Sparkline, Switch, ThrustSlider, TofGauge, TopView,
+                      clamp, fmt, hbox, isnum, label, set_color, sfmt)
 
 MOTORS = ('FL', 'RL', 'FR', 'RR')           # wire order (motor_id_t)
 PAIR = {'FL': 'FR', 'FR': 'FL', 'RL': 'RR', 'RR': 'RL'}
@@ -142,8 +142,15 @@ class MotorsPanel(Panel):
         # slider is touched.
         self.pairs = Switch('Move pairs together')
         self.pairs.setToolTip('On: FL moves FR and RL moves RR, and the other way round')
-        self.lay.addLayout(hbox(self.pairs, label('FL + FR · RL + RR', 11, color=T.FAINT, mono=True), None,
-                                spacing=12))
+        # The note takes what the switch leaves and elides, so this row never
+        # asks for more than the panel's 340 px (it asked for 342 and the body
+        # was clipped by two pixels, 2026-10-28).
+        pairs_note = ElidedValue('FL+FR · RL+RR')
+        pairs_note.setFont(T.font(11, mono=True))
+        set_color(pairs_note, T.FAINT)
+        pairs_row = hbox(self.pairs, pairs_note, spacing=12)
+        pairs_row.setStretchFactor(pairs_note, 1)
+        self.lay.addLayout(pairs_row)
         self.lay.addSpacing(10)
         self.sliders, self.vals, self.bars, self.steps = {}, {}, {}, {}
         tower = QGridLayout()

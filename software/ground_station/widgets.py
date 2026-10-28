@@ -263,6 +263,27 @@ class ElidedLabel(QLabel):
         super().setText(fm.elidedText(self._full, Qt.TextElideMode.ElideRight, max(0, self.width())))
 
 
+class ElidedValue(ElidedLabel):
+    """An ElidedLabel that still asks for its text when there is room: the
+    preferred width is the whole text, the minimum a few characters. A row
+    of values then sizes itself to them (the camera side's two readout
+    columns), while one long value elides instead of pushing a panel body
+    past its panel, as a plain QLabel's minimum width (its text) did."""
+    MIN_CHARS = 5
+
+    def __init__(self, text=''):
+        super().__init__(text)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+
+    def sizeHint(self):
+        fm = QFontMetrics(self.font())
+        return QSize(fm.horizontalAdvance(self._full) + 2, fm.height())
+
+    def minimumSizeHint(self):
+        fm = QFontMetrics(self.font())
+        return QSize(fm.horizontalAdvance('0') * self.MIN_CHARS, fm.height())
+
+
 class FullScreenButton(QPushButton):
     """The header's full-screen toggle. The page used ⛶, which neither bundled
     font has, so the four corner brackets are drawn over the sheet's button."""
@@ -700,15 +721,26 @@ class Legend(QWidget):
 
 
 class Readout(QWidget):
-    """label · value · unit over a hairline, as the page's .readout grid."""
+    """label · value · unit over a hairline, as the page's .readout grid.
+
+    The value takes whatever width the name and the unit leave and elides
+    (the full text in its tool tip) rather than asking for more: a QLabel's
+    minimum width is its text, so one long value made a whole panel body
+    wider than its panel, the scroll area clipped the right side, and a
+    progress bar in the same body ran past the edge and looked as if it
+    never filled properly (the capture panel's scales line, 2026-10-28)."""
 
     def __init__(self, name, unit=''):
         super().__init__()
-        self.value = label('—', 18, 600, mono=True)
+        self.value = ElidedValue('—')
+        self.value.setFont(T.font(18, 600, mono=True))
+        set_color(self.value, T.FG)
+        self.value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.unit = label(unit, 11, color=T.FAINT)
         self.unit.setMinimumWidth(18)
-        lay = hbox(label(name, 11, color=T.FAINT, spacing=0.08, caps=True), None, self.value, self.unit,
+        lay = hbox(label(name, 11, color=T.FAINT, spacing=0.08, caps=True), self.value, self.unit,
                    spacing=6, margins=(0, 3, 0, 3))
+        lay.setStretchFactor(self.value, 1)
         lay.setAlignment(Qt.AlignmentFlag.AlignBaseline)
         self.setLayout(lay)
 
@@ -1284,3 +1316,108 @@ class DockSplitter(QSplitter):
 
     def createHandle(self):
         return _DockHandle(self.orientation(), self)
+
+# ------------------------------------------------------------ control page
+
+class StickPad(QWidget):
+    """A thumbstick seen from above, for the Control page: the dead band as
+    a ring, the raw stick as a faint dot, the command the page derived from
+    it (shaped, plus the keyboard) as the papaya dot on a line from the
+    centre. The axis names sit on the edges, so the pad itself says what it
+    drives under the chosen stick layout."""
+
+    def __init__(self, title, size=190):
+        super().__init__()
+        self.title = title
+        self.xn, self.yn = '', ''
+        self.x = self.y = 0.0
+        self.raw = None
+        self.dead = 0.0
+        self.live = False
+        self.set_size(size)
+
+    def set_size(self, px):
+        self.setFixedSize(px, px)
+        self.update()
+
+    def set_axes(self, x_name, y_name):
+        self.xn, self.yn = x_name, y_name
+        self.update()
+
+    def set(self, x, y, raw=None, dead=0.0, live=False):
+        self.x, self.y, self.raw, self.dead, self.live = x, y, raw, dead, live
+        self.update()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w = self.width()
+        p.setPen(QPen(C(T.BORDER), 1))
+        p.setBrush(C(T.RAISED))
+        p.drawRect(QRectF(0.5, 0.5, w - 1, w - 1))
+        cx = cy = w / 2
+        r = w / 2 - 22                      # unit circle: full stick
+        p.setPen(QPen(C(T.GRID), 1))
+        p.drawLine(QPointF(cx, 14), QPointF(cx, w - 14))
+        p.drawLine(QPointF(14, cy), QPointF(w - 14, cy))
+        p.setPen(QPen(C(T.BORDER), 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawEllipse(QPointF(cx, cy), r, r)
+        if self.dead > 0:
+            p.setPen(QPen(C(T.FAINT), 1, Qt.PenStyle.DashLine))
+            p.drawEllipse(QPointF(cx, cy), r * self.dead, r * self.dead)
+        f = T.font(10, 600, spacing=0.1, caps=True)
+        p.setFont(f)
+        fm = QFontMetrics(f)
+        p.setPen(C(T.MUTED))
+        p.drawText(QPointF(8, 6 + fm.ascent()), self.title)
+        p.setPen(C(T.FAINT))
+        if self.yn:                       # the names along the bottom edge, clear of the title
+            p.drawText(QPointF(8, w - 8), self.yn + ' \u2195')
+        if self.xn:
+            s = self.xn + ' \u2194'
+            p.drawText(QPointF(w - 8 - fm.horizontalAdvance(s.upper()), w - 8), s)
+        if self.raw is not None:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(C(T.FAINT))
+            p.drawEllipse(QPointF(cx + clamp(self.raw[0], -1, 1) * r, cy - clamp(self.raw[1], -1, 1) * r), 4, 4)
+        px, py = cx + clamp(self.x, -1, 1) * r, cy - clamp(self.y, -1, 1) * r
+        col = C(T.PAPAYA if self.live else T.MUTED)
+        p.setPen(QPen(col, 2))
+        p.drawLine(QPointF(cx, cy), QPointF(px, py))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(col)
+        p.drawEllipse(QPointF(px, py), 6, 6)
+
+
+class CentreBar(QWidget):
+    """A signed value as a bar from the centre: green to the right for
+    positive, blue to the left for negative, the readback bars' colours, so
+    a command and its readback read the same way on the Control page."""
+
+    def __init__(self):
+        super().__init__()
+        self.v = 0.0
+        self.live = False
+        self.setFixedHeight(8)
+        self.setMinimumWidth(60)
+
+    def set(self, v, live=False):
+        if v != self.v or live != self.live:
+            self.v, self.live = v, live
+            self.update()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        w, h = self.width(), self.height()
+        p.fillRect(QRectF(0, 0, w, h), C(T.RAISED_2))
+        half = w / 2
+        p.fillRect(QRectF(half - 0.5, -1, 1, h + 2), C(T.FAINT))
+        v = clamp(self.v if isnum(self.v) else 0.0, -1, 1)
+        col = C(T.S_Y if v < 0 else T.UN_GREEN)
+        if not self.live:
+            col.setAlphaF(0.55)
+        if v >= 0:
+            p.fillRect(QRectF(half, 0, v * half, h), col)
+        else:
+            p.fillRect(QRectF(half + v * half, 0, -v * half, h), col)

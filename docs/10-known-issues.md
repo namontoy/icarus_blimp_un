@@ -20,6 +20,36 @@ capture buffer is 400 s with longer requests refused instead of silently shorten
 every element's configuration and rate: `docs/sensor-configuration-report.md`. None of it has
 run on hardware yet.
 
+**2026-10-28, a Control page in the ground station.** The window's third page flies the blimp by
+hand: surge, yaw and heave from the keyboard or a gamepad, mixed on the ground into the four
+duties the link already carries (the firmware's MANUAL mode of the control-loop plan takes
+exactly that), with a PC and a Steam Deck input mode (`software/ground_station/control.py`,
+`gamepad.py`; `README.md` there). Checked offscreen against the mock blimp and with a fake pad;
+not yet run against the blimp, and the Steam Deck itself has not been tried: its controls should
+appear as an event device of the kernel's `hid-steam` driver in Desktop mode, which is what the
+reader looks for. The "Go autonomous" button is on the page and disabled until the firmware has
+`MODE_SET` (control-loop plan increment 3).
+
+**2026-10-28, the motors cut when the window is busy.** With a duty held from the Flight page,
+moving the mouse over a long capture's traces on the Bench page cut and restarted the motors.
+Cause: the setpoint is refreshed from the GUI thread every 100 ms and the bridge coasts the
+motors 0.5 s after the last refresh; one repaint of a 400 s capture takes about 230 ms
+(measured), and a hand on the plot queues them. Analysis, the proposal (the bridge thread
+owns the standing command now; the blimp holds it with increment 3) and the bench tests for
+this and the two other candidate causes (link congestion during a download, the shared 5 V
+rail): `docs/motor-setpoint-ownership.md`. Not changed yet.
+
+**2026-10-28, PID tuning plan and its instruments (branch `pid-tuning`).**
+`docs/pid-tuning-plan.md`: what the three loops' gains depend on (two plant numbers, a bandwidth
+choice, and the thrust map in series with all of them), the methods taken (model-based placement
+from measured m_eff and I_z, SIMC from step tests as the cross-check, relay autotune as an
+option), and the tests. The instruments are written and checked against `mock_blimp.py`:
+`software/thrust_map.py` runs the thrust stand and fits F(u) (P0), `software/step_test.py`
+streams the yaw and heave step schedules with the capture and the fits (Y1, Y2, H1, H2), and
+`software/step_response.py` fits every step of a capture and prints m_eff or I_z, the drag, and
+the gains in `core/`'s units three ways. The open-loop tests run on today's firmware; the
+closed-loop ones wait for increment 3. Nothing measured yet.
+
 **2026-10-28, Wi-Fi drops fixed.** With the control task's first build the S3's access point
 dropped the laptop every ~14 s. The cause was the task's esp_timer running with ISR dispatch,
 which on ESP-IDF v5.5.x can stall every task-dispatched timer, Wi-Fi's included (esp-idf issue

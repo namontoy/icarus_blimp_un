@@ -1,4 +1,4 @@
-"""The ground station's window: header, the Flight and Bench pages, the dock, and main().
+"""The ground station's window: header, the Flight, Control and Bench pages, the dock, and main().
 
     python -m software.ground_station --demo                  # no hardware
     python -m software.ground_station                         # the blimp at 192.168.4.1
@@ -26,6 +26,7 @@ from PyQt6.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QLineEdi
 
 from . import theme as T
 from .bench import BenchPage
+from .control import MODES, ControlPage
 from .panels import CameraPanel, Dock, MotorsPanel, SensorsPanel, button, load_dock, save_dock
 from .station import Station
 from .widgets import (C, DockSplitter, DockTab, ElidedLabel, FullScreenButton, Pill, StopButton, Wordmark, clamp,
@@ -159,22 +160,25 @@ class Header(QWidget):
 
 
 class PageBar(QWidget):
-    """Flight | Bench under the header: the live view, or the bench page of
-    captures and checks (bench.py). The header and the dock serve both, so
-    STOP and the console are always at hand."""
+    """Flight | Control | Bench under the header: the live view, flying by
+    hand (control.py), or the bench page of captures and checks (bench.py).
+    The header and the dock serve all three, so STOP and the console are
+    always at hand."""
     changed = pyqtSignal(str)
     NOTES = {'flight': 'motors, camera and sensors, live',
+             'control': 'fly by hand from the keyboard or a gamepad, then hand off',
              'bench': 'captures, calibration and checks of the blimp on the bench'}
 
     def __init__(self):
         super().__init__()
-        self.tabs = {'flight': DockTab('Flight'), 'bench': DockTab('Bench')}
+        self.tabs = {'flight': DockTab('Flight'), 'control': DockTab('Control'), 'bench': DockTab('Bench')}
         for name, t in self.tabs.items():
             t.clicked.connect(lambda _=False, name=name: self.changed.emit(name))
         self.note = label('', 12, color=T.FAINT)
         self.note.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.note.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        lay = hbox(self.tabs['flight'], 2, self.tabs['bench'], 12, self.note, spacing=0, margins=(0, 4, 0, 0))
+        lay = hbox(self.tabs['flight'], 2, self.tabs['control'], 2, self.tabs['bench'], 12, self.note, spacing=0,
+                   margins=(0, 4, 0, 0))
         lay.setStretchFactor(self.note, 1)
         self.setLayout(lay)
 
@@ -209,10 +213,12 @@ class MainWindow(QMainWindow):
         grid.setLayout(hbox(self.motors, self.camera, self.sensors, spacing=12, margins=(0, 12, 0, 0)))
         grid.layout().setStretchFactor(self.camera, 1)
         grid.setMinimumHeight(200)
+        self.control = ControlPage(station, settings)
         self.bench = BenchPage(station)
         self.pages = QStackedWidget()
-        self.pages.addWidget(grid)
-        self.pages.addWidget(self.bench)
+        self.page_index = {}
+        for name, page in (('flight', grid), ('control', self.control), ('bench', self.bench)):
+            self.page_index[name] = self.pages.addWidget(page)
         self.pagebar = PageBar()
         self.pagebar.changed.connect(self.show_page)
         self.dock = Dock(station)
@@ -256,6 +262,12 @@ class MainWindow(QMainWindow):
         station.wifi.connect(self.on_wifi)
         station.cap.connect(self.bench.capture.on_cap)
         station.cap_data.connect(self.bench.on_data)
+        # One source drives the motors at a time: arming the Control page
+        # switches the Flight page's stream off and the other way round, else
+        # two 10 Hz setpoints would alternate on the wire.
+        self.control.armed_changed.connect(lambda on: on and self.motors.enabled and self.motors.set_enabled(False))
+        self.motors.enable.toggled.connect(lambda on: on and self.control.disarm(send_stop=False))
+        self.control.stop_requested.connect(self.stop)
 
         self._frame = QTimer(self)
         self._frame.timeout.connect(self.frame)
@@ -266,7 +278,8 @@ class MainWindow(QMainWindow):
             scr = QApplication.primaryScreen().availableGeometry()
             self.resize(min(1680, scr.width()), min(1000, scr.height()))
         load_dock(settings, self.dock)
-        self.show_page('bench' if settings.value('window/page') == 'bench' else 'flight')
+        page = settings.value('window/page')
+        self.show_page(page if page in self.page_index else 'flight')
         # value(..., type=int) turns a missing key into 0, not None, and 0
         # would pin the dock at its minimum on a first run.
         h = settings.value('dock/h')
@@ -279,6 +292,7 @@ class MainWindow(QMainWindow):
         self.tel_at, self.alive = time.monotonic(), bool(m.get('alive'))
         self.header.on_tel(m)
         self.motors.on_tel(m)
+        self.control.on_tel(m)
         self.sensors.on_tel_alive(self.alive)
         if self.alive and not was_alive:
             self._ask_capture()
@@ -288,7 +302,9 @@ class MainWindow(QMainWindow):
         self.header.on_wifi(w)
 
     def show_page(self, name):
-        self.pages.setCurrentIndex(1 if name == 'bench' else 0)
+        if self.pages.currentWidget() is self.control and name != 'control':
+            self.control.release_keys()
+        self.pages.setCurrentIndex(self.page_index[name])
         self.pagebar.set(name)
         self.settings.setValue('window/page', name)
         if name == 'bench':
@@ -298,7 +314,7 @@ class MainWindow(QMainWindow):
         """The Bench page's length box is bounded by the blimp's buffer, which
         only a LOG_INFO reveals: ask once, when the page is in view and the
         link is up, so the limit is known before the first Start."""
-        if self.alive and self.pages.currentIndex() == 1 and self.bench.capture.info is None:
+        if self.alive and self.pages.currentWidget() is self.bench and self.bench.capture.info is None:
             self.station.capture('status')
 
     def frame(self):
@@ -307,12 +323,14 @@ class MainWindow(QMainWindow):
         if self.alive and self.tel_at and time.monotonic() - self.tel_at > TEL_STALE_S:
             self.alive = False
             self.motors.set_stale()
+            self.control.set_stale()
             self.sensors.on_tel_alive(False)
             self.header.pills['link'].set('crit', 'STALE')
 
     # ---------------------------------------------------------------- safety
 
     def stop(self):
+        self.control.disarm(send_stop=False)      # the Flight page's stop_all sends it
         self.motors.stop_all(False)
         self.header.stop_b.flash()
 
@@ -374,11 +392,13 @@ class MainWindow(QMainWindow):
             self._compact = compact
             self.motors.compact(compact)
             self.sensors.compact(compact)
+            self.control.compact(compact)
         if self.isVisible():
             self._apply_dock_h()
 
     def closeEvent(self, e):
-        if self.motors.enabled:
+        if self.motors.enabled or self.control.armed:
+            self.control.disarm(send_stop=False)
             self.motors.stop_all(False)
         self.settings.setValue('window/geometry', self.saveGeometry())
         save_dock(self.settings, self.dock)
@@ -390,7 +410,10 @@ class MainWindow(QMainWindow):
 
 class Keys(QObject):
     """Esc always stops; Space stops unless a text field has focus; F11 toggles
-    full screen. On the application, so they work whatever has focus."""
+    full screen. On the application, so they work whatever has focus. While
+    the Control page is shown, its flying keys (control.KEYS, Shift) go to it
+    on press and release, unless a text field has focus; losing the window's
+    activation releases them all, since the release would never arrive."""
     TYPING = (QLineEdit, QAbstractSpinBox, QComboBox)
 
     def __init__(self, win):
@@ -398,9 +421,21 @@ class Keys(QObject):
         self.win = win
 
     def eventFilter(self, obj, e):
-        if e.type() != QEvent.Type.KeyPress or not isinstance(obj, QWidget) or obj.window() is not self.win:
+        if e.type() == QEvent.Type.WindowDeactivate and obj is self.win:
+            self.win.control.release_keys()
+            return False
+        if e.type() not in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease) or not isinstance(obj, QWidget) \
+                or obj.window() is not self.win:
             return False
         k = e.key()
+        flying = (self.win.pages.currentWidget() is self.win.control
+                  and not isinstance(QApplication.focusWidget(), self.TYPING))
+        if e.type() == QEvent.Type.KeyRelease:
+            return flying and not e.isAutoRepeat() and self.win.control.key(k, False)
+        if flying and not e.isAutoRepeat() and self.win.control.key(k, True):
+            return True
+        if flying and e.isAutoRepeat() and self.win.control.key(k, True):
+            return True                 # a held key repeats; it is already held
         if k == Qt.Key.Key_Escape or (k == Qt.Key.Key_Space and
                                       not isinstance(QApplication.focusWidget(), self.TYPING)):
             self.win.stop()
@@ -420,6 +455,14 @@ def parse_args(argv=None):
                     help="the blimp's network, ICARUS-XXXXXX; otherwise a stored profile or a scan decides")
     ap.add_argument('--wifi-password', default='icarusblimp', help='its WPA2 key (default %(default)s)')
     ap.add_argument('--wifi-prefix', default='ICARUS', help='SSID prefix to look for (default %(default)s)')
+    ap.add_argument('--mode', choices=MODES, default=None,
+                    help="the Control page's input: pc (keyboard, plus a gamepad if present) or deck (the "
+                         "Steam Deck's controls); remembered, so it is needed once")
+    ap.add_argument('--geometry', metavar='WxH', default=None,
+                    help='open at this size instead of the remembered one, e.g. 1280x800 to see the window as '
+                         'the Steam Deck shows it')
+    ap.add_argument('--page', choices=('flight', 'control', 'bench'), default=None,
+                    help='open on this page instead of the remembered one')
     return ap.parse_args(argv)
 
 
@@ -428,11 +471,24 @@ def wifi_opts(args):
             'blimp_ip': args.blimp}
 
 
-def build(args, app):
-    """The station and its window, not yet started: main() and the tests share this."""
+def build(args, app, settings=None):
+    """The station and its window, not yet started: main(), screens.py and the
+    tests share this. settings: a QSettings to use instead of the real one, so
+    a script's run leaves the operator's window as it was."""
     T.apply(app)
     station = Station(args.demo, args.blimp, wifi_opts(args))
-    win = MainWindow(station, QSettings('Icarus', 'GroundStation'))
+    win = MainWindow(station, settings if settings is not None else QSettings('Icarus', 'GroundStation'))
+    if args.mode:
+        win.control.set_mode(args.mode, save=True)
+    if args.page:
+        win.show_page(args.page)
+    if args.geometry:
+        try:
+            w, h = (int(v) for v in args.geometry.lower().split('x'))
+        except ValueError:
+            sys.exit('--geometry wants WIDTHxHEIGHT, e.g. 1280x800')
+        win.setWindowState(Qt.WindowState.WindowNoState)
+        win.resize(w, h)
     app.installEventFilter(Keys(win))
     return station, win
 

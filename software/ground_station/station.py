@@ -24,6 +24,7 @@ import blimp_log
 
 from .blimp_bridge import DEADMAN_S, STREAM_HZ, BlimpBridge, DemoBlimp
 from .camera import make_camera
+from .gamepad import Gamepad, empty_state
 from .wifi import Wifi, WifiError
 
 TICK_MS = 100           # telemetry/sensor refresh of the window
@@ -73,6 +74,7 @@ class Station(QObject):
         self.radio = None
         self.blimp = None
         self.camera = None
+        self.pad = None                     # the gamepad reader (gamepad.py), for the Control page
         self.alive = False                  # telemetry within the last second, as of the last tick
         self._ticks = 0
         self._wifi_last = None
@@ -95,6 +97,7 @@ class Station(QObject):
         self.blimp.start()
         self.camera = make_camera(self.demo, self._cam_frame, self._cam_row, self.cam_status.emit, self.log)
         self.camera.start()
+        self.pad = Gamepad().start()
         threading.Thread(target=self._console_loop, daemon=True, name='console').start()
         threading.Thread(target=self._cap_loop, daemon=True, name='capture').start()
         self.log('info', 'ground station up: %s' % ('demo blimp and demo camera' if self.demo else
@@ -138,6 +141,15 @@ class Station(QObject):
             self.sen.emit(dict(d))
 
     # --------------------------------------------------------------- motors
+
+    def pad_state(self):
+        """The gamepad's latest snapshot (gamepad.empty_state() before start()
+        or on a platform without a backend). Polled by the Control page at its
+        own tick rather than signalled: a stick is a continuous input, and the
+        page wants the value at the moment it mixes, not a queue of them."""
+        if self.pad is None:
+            return empty_state()
+        return self.pad.state()
 
     def set_motors(self, cmd):
         self.blimp.set_motors(cmd)
@@ -303,5 +315,7 @@ class Station(QObject):
         self._cap_ev.set()
         if self.camera is not None:
             self.camera.stop()
+        if self.pad is not None:
+            self.pad.stop()
         if self.blimp is not None:
             self.blimp.close()

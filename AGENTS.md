@@ -51,7 +51,8 @@ CLAUDE.md, and others). Keep it tool-neutral; tool-specific notes belong in that
 - `sim/`: MuJoCo closed loop that runs the same core, built as `build/libblimp.dll`, through
   ctypes (`sim/blimp_ffi.py`). `sim/scene/build_scene.py` generates the course from the rulebook.
 - `software/`: ground tools: `blimp_link.py`, `mock_blimp.py`, `blimp_log.py` (decodes captures),
-  `ground_station/` (Flight and Bench pages).
+  the PID tuning plan's instruments `thrust_map.py` (the thrust stand), `step_test.py` (the step
+  tests) and `step_response.py` (the fits), `ground_station/` (Flight, Control and Bench pages).
 - `tools/`: build, verify, sweep and environment scripts, plus `lens_test/`. `scripts/idf.bat`: the
   ESP-IDF v5.5.5 wrapper for the S3-Zero projects on Windows.
 - `docs/`: design and status (numbered files from DroneUN, dated reports from the bench);

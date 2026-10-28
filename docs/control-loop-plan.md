@@ -270,8 +270,11 @@ fresh when the frame sequence number moved.
    `saturate()` with the Rule 13 cap, `pwm_out()`, link and battery latches, kill, the
    `MODE_SET` packet and the mode and latch fields of `CONTROL`, `blimp_link.py arm`/`mode`
    and the changed `motor`/`stop`, the `motor` console command routed through the loop, and
-   the ground-station side of D5 (arm on enable, mode and latch pills, the "sensor stream
-   paused" notice reworded for D3, `mock_blimp.py` modelling the latch).
+   the ground-station side of D5 (arm on enable and on the Control page's "Manual control"
+   switch, both sending `MODE_SET` MANUAL; that page's "Go autonomous" button sending the
+   autonomous mode, disabled until then (the page exists since 2026-10-28, `control.py`); mode
+   and latch pills; the "sensor stream paused" notice reworded for D3; `mock_blimp.py` modelling
+   the latch).
 4. **Logging** (built 2026-10-27, ahead of 2 and 3): `capture.c` (the buffer in PSRAM, the
    `capture` command), `LOG_CMD`/`LOG_INFO`/`LOG_CHUNK` in `net_link.c`, the chunked download
    with re-request in `blimp_link.py capture`, `software/blimp_log.py` (decode, summary, CSV),

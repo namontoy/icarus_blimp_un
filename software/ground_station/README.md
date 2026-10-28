@@ -1,8 +1,9 @@
 # Ground station
 
 One window for the blimp in a single PyQt6 process: a Flight page (motors, sensors, the
-camera), a Bench page (captures of the control loop's records, with their traces; `bench.py`,
-2026-10-27) and the console under both. It talks to the S3 firmware over its Wi-Fi access
+camera), a Control page (flying by hand from the keyboard or a gamepad, with a PC and a Steam
+Deck input mode; `control.py`, 2026-10-28), a Bench page (captures of the control loop's
+records, with their traces; `bench.py`, 2026-10-27) and the console under all three. It talks to the S3 firmware over its Wi-Fi access
 point and to nothing else. The
 cameras are wired to the S3, which will relay what they extract (detections, optical flow);
 the link has no packet for that yet, so the camera panel runs on demo data only. Design: `docs/ground-station-native-plan.md`; signals and the safety chain:
@@ -65,6 +66,22 @@ python3 -m software.ground_station
 `pip install -r` works the same way, but the Wi-Fi button is disabled: join `ICARUS-…` from
 the menu bar. Not tried.
 
+### Steam Deck (SteamOS)
+
+The Deck is a Linux computer with a gamepad built in, so the Linux lines above apply: in
+Desktop mode, from a terminal, install into a virtual environment (SteamOS's root filesystem is
+read-only) and run `python3 -m software.ground_station --mode deck`. The Wi-Fi button goes
+through NetworkManager, which SteamOS runs. The Deck's controls reach the window through
+`gamepad.py`, which reads the kernel's event devices and takes the first one that has a
+gamepad's buttons; the `hid-steam` driver presents them that way and stops their keyboard-and-
+mouse emulation while the device is held open. None of this has run on a Deck yet
+(2026-10-28): the event parsing is checked with synthetic events, the Windows side with XInput.
+`python software/ground_station/gamepad.py` prints what the reader sees and is the first thing
+to run there; permission denied on `/dev/input` means the user needs the `input` group or a
+udev rule. Launching the station from Gaming mode as a non-Steam game is another matter: Steam
+Input would then present a virtual Xbox pad, which the same reader takes, but the window has
+not been tried under gamescope.
+
 ### Windows and Linux side by side
 
 | | Windows | Linux |
@@ -96,6 +113,23 @@ address toward the blimp, so a network joined by hand shows as joined too.
 - Leaving the blimp's network means leaving the internet with it, on a laptop with one
   radio; the station does not reconnect the previous network.
 
+## Looking at it without hardware
+
+`--demo` runs the mock blimp and the demo camera in-process, so every page carries live-looking
+data on any computer. `--geometry WxH` opens the window at a size instead of the remembered
+one, and `--page` on a page, so the Steam Deck's view can be checked on a laptop:
+
+```
+python -m software.ground_station --demo                                          # as on a laptop
+python -m software.ground_station --demo --mode deck --geometry 1280x800 --page control
+python -m software.ground_station.screens                                         # PNGs of every page, both sets
+```
+
+`screens.py` renders the window offscreen (no display needed) at 1680 × 1000 with PC input and
+at 1280 × 800 with Steam Deck input, three pages each, into `build/screens/`; the pixels are
+what Qt draws with the bundled fonts, so they are honest pictures for a report. It uses a
+throwaway settings file, so it never changes the remembered window.
+
 ## Using it
 
 - **STOP**: the orange button, Space or Esc. Coasts all four motors and switches the motor
@@ -121,7 +155,24 @@ address toward the blimp, so a network joined by hand shows as joined too.
   packet for them. The picture view with Grab frame, Live and Rotate 180° (display only) is
   kept for the occasional calibration frame the S3 may relay later (`docs/inter-board-link-plan.md`);
   outside the demo the two buttons are disabled.
-- **Bench** (the second tab under the header): the blimp's capture. Set a length (the box is
+- **Control** (the second tab under the header): fly by hand. Pick the input, *PC* (the
+  keyboard, plus a gamepad if one is plugged in) or *Steam Deck* (the Deck's own controls; the
+  hints leave the screen to fit 1280 × 800), and the stick layout (mode 2: left stick heave and
+  yaw, right stick surge; mode 1 swaps surge and heave). Switch *Manual control* on, or press A
+  on the pad: arming needs telemetry and the sticks at rest, and it switches the Flight page's
+  *Motors enabled* off (one source drives at a time). Then W/S is surge, A/D or ←/→ yaw, ↑/↓
+  heave (half a stick; hold Shift for the whole), or the sticks. The page mixes surge, yaw and
+  heave into the four motors the way `core/`'s mixer is laid out (front pair sum and
+  difference, rear pair heave; open loop, per motor, which is what the firmware's MANUAL mode
+  takes) and sends them 20 times a second while armed, ramped over 0.4 s so nothing jumps; the
+  limit (30 % by default; D-pad ↑/↓ on the pad) scales everything. Let go and the command ramps
+  to zero. STOP (button, Space, Esc, B on the pad) disarms and coasts; so does a gamepad that
+  disappears while driving, and the Motors panel's deadman chain runs underneath. *Go
+  autonomous* is the hand-off to `blimp_step()` on the blimp; it stays disabled until the
+  firmware has its mode switch (`MODE_SET`, `docs/control-loop-plan.md` increment 3). `--mode
+  pc|deck` sets the input from the command line; the input, the layout and the limit are
+  remembered.
+- **Bench** (the third tab under the header): the blimp's capture. Set a length (the box is
   bounded by the blimp's own buffer, 400 s by default, once the page has asked it) and press
   *Start*; the blimp records one 72-byte record per 20 ms of its control loop into PSRAM (IMU,
   magnetometer and barometer, the range, the motor readback, the loop's execution time, which
@@ -148,8 +199,11 @@ address toward the blimp, so a network joined by hand shows as joined too.
 | `app.py` | `main()`, the options, the header, the window: panels, dock splitter, keys, settings |
 | `station.py` | the back end in the GUI process: bridges, camera, Wi-Fi and console as Qt signals |
 | `panels.py` | the Motors, Camera and Sensors panels and the Console/Events dock |
+| `control.py` | the Control page: input modes, arming, the stick-to-motor mix, the keys, the pad's buttons |
+| `gamepad.py` | the gamepad reader: XInput on Windows, the kernel's event devices on Linux and the Steam Deck; `python gamepad.py` prints what it sees |
 | `bench.py` | the Bench page: the capture panel and the trace viewer |
-| `widgets.py` | the painted pieces: top view, compass, ToF gauge, plots (the sparklines and the capture's trace plot), camera view, pills, STOP |
+| `screens.py` | renders every page to PNG offscreen, PC and Steam Deck sets, for a look without hardware |
+| `widgets.py` | the painted pieces: top view, compass, ToF gauge, plots (the sparklines and the capture's trace plot), camera view, pills, STOP, the stick pads |
 | `theme.py` | the palette's tokens, fonts and the Qt style sheet; new UI keeps to these |
 | `fonts/` | Titillium Web and IBM Plex Mono with their OFL licences |
 | `blimp_bridge.py` | `blimp_link.BlimpLink` and `BlimpConsole` with the setpoint deadman; `DemoBlimp` runs `mock_blimp.py` in-process |

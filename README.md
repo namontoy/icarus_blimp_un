@@ -24,7 +24,7 @@ race courses, and the analysis behind the design.
 | **Simulation** · `sim/` | ✅ Completes both courses: every loop with a downward range sensor, about two in three without one |
 | **Bench firmware** · `firmware/projects/i2c_tools/` | 🟡 Runs on the ESP32-S3-Zero: every sensor and the four reversible motors from a console, Wi-Fi link proven on hardware; no control loop yet |
 | **Flight shell, previous board** · `firmware/projects/espfly/` | 🟡 Builds and links for the ESP-FLY board; never flashed; kept as the reference for the S3-Zero control task |
-| **Ground station** · `software/ground_station/` | 🟡 Shows telemetry and sensors over Wi-Fi; perception, search hint and altitude fix not started |
+| **Ground station** · `software/ground_station/` | 🟡 Shows telemetry and sensors over Wi-Fi; flies the blimp by hand from the keyboard or a gamepad (Control page, PC and Steam Deck input modes, 2026-10-28; not yet tried on a Deck); perception, search hint and altitude fix not started |
 | **Hardware** | 🟡 ESP32-S3-Zero, two DRV8833, MPU-6050, QMC5883L, BME280, VL53L1X, ESP32-CAM; one motor thrust-tested (14.7–16.8 gf); the controller still assumes 35 gf |
 
 ### Simulated lap times
