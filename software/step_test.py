@@ -3,14 +3,23 @@ schedule streamed from this computer, the capture on the blimp, every step
 fitted, all of it saved beside the capture.
 
     python software/step_test.py yaw                                     # dry run: prints the schedule
-    python software/step_test.py yaw --steps 0.15 0.25 0.30 --mirror --go
-    python software/step_test.py heave --steps 0.15 0.25 0.30 --hold 3 --gap 8 --go
+    python software/step_test.py yaw --steps 0.25 0.40 0.55 --mirror --go
+    python software/step_test.py heave --steps 0.40 0.55 0.70 --hold 3 --gap 8 --go
+    python software/step_test.py heave --steps -0.40 -0.55 -0.70 --go    # if the negative command is what pushes up
     python software/step_test.py yaw --go --thrust-map captures/thrust-map.json --half-span 0.10
     python software/step_test.py --host 127.0.0.1 yaw --go               # against mock_blimp.py
 
   yaw     the front differential: FL at the amplitude with FR at 0, and with
           --mirror the same on FR afterwards (the symmetry check of Y1)
   heave   the rear pair: RL = RR = amplitude
+
+An amplitude is signed: a negative one drives the same motors the other
+way, for a vehicle whose propellers push up on a negative command (the
+scale said so for the rear pair on 2026-10-28, docs/history/pid-bench-
+2026-10-28). The fit does not care about the sign; core/'s frame does, and
+the fit says when they disagree. |amplitude| is capped by --limit, 0.75 by
+default: the measured thrust is small (a few gf at 0.3 duty), so the
+amplitudes are larger than blimp_link.py's 0.3 and still under the cap.
 
 The schedule is --lead seconds of zeros for the baseline, then for every
 amplitude a step held --hold seconds and --gap seconds of zeros for the
@@ -117,9 +126,9 @@ def stream(link, segs, rate, log):
 def run(args):
     if args.axis == 'heave' and args.mirror:
         sys.exit('--mirror is for yaw (FL then FR); heave drives both rear motors')
-    bad = [a for a in args.steps if a <= 0 or a > args.limit]
+    bad = [a for a in args.steps if a == 0 or abs(a) > args.limit]
     if bad:
-        sys.exit('amplitudes must be in (0, %.2f]: %s; raise --limit deliberately' % (args.limit, bad))
+        sys.exit('|amplitude| must be in (0, %.2f]: %s; raise --limit deliberately' % (args.limit, bad))
     segs = schedule(args.axis, args.steps, args.lead, args.hold, args.gap, args.mirror)
     total = segs[-1][1]
     cap_s = int(math.ceil(total)) + 2
@@ -217,12 +226,13 @@ def main(argv=None):
     ap.add_argument('--host', default=bl.BLIMP_IP)
     ap.add_argument('--port', type=int, default=bl.LINK_PORT)
     ap.add_argument('axis', choices=sorted(sr.AXES))
-    ap.add_argument('--steps', type=float, nargs='+', default=[0.15, 0.25, 0.30], help='amplitudes, per unit duty')
+    ap.add_argument('--steps', type=float, nargs='+', default=[0.25, 0.40, 0.55],
+                    help='amplitudes, per unit duty, signed (default %(default)s)')
     ap.add_argument('--hold', type=float, default=4.0, help='s each step is held (default %(default)s)')
     ap.add_argument('--gap', type=float, default=6.0, help='s of zeros after each step (default %(default)s)')
     ap.add_argument('--lead', type=float, default=2.0, help='s of zeros before the first step')
     ap.add_argument('--mirror', action='store_true', help='yaw: repeat the steps on FR after FL')
-    ap.add_argument('--limit', type=float, default=0.3, help='largest amplitude allowed (default %(default)s)')
+    ap.add_argument('--limit', type=float, default=0.75, help='largest |amplitude| allowed (default %(default)s)')
     ap.add_argument('--rate', type=float, default=20.0, help='MOTOR_SET per second')
     ap.add_argument('--folder', default='captures')
     ap.add_argument('--out', help='the .bin (default <folder>/step-<axis>-<date>.bin)')
