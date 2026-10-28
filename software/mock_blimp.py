@@ -58,8 +58,11 @@ class MockBlimp:
         # A toy airframe for the sensor packet: heading turns with the front
         # pair's difference, height rises with the rear pair, and the IMU sees
         # gravity plus motor vibration. Enough for a GUI to show motion; not a
-        # model of the blimp.
+        # model of the blimp. The yaw rate and the climb rate lag their commands
+        # (an inertia over a drag), so the step tests of software/step_test.py
+        # have a time constant to fit against the mock.
         self.heading = 42.0
+        self.yaw_rate = 0.0
         self.height_m = 1.50
         self.vz = 0.0
         self.last_step = time.monotonic()
@@ -157,8 +160,9 @@ class MockBlimp:
         dt = min(0.2, now - self.last_step)
         self.last_step = now
         fl, rl, fr, rr = self.motor
-        yaw_rate = 25.0 * (fl - fr)                              # deg/s per unit of asymmetry
-        self.heading = (self.heading + yaw_rate * dt) % 360.0
+        # 25 deg/s per unit of asymmetry at steady state, reached with a 0.3 s lag
+        self.yaw_rate += (25.0 * (fl - fr) - self.yaw_rate) * (1.0 - math.exp(-dt / 0.3))
+        self.heading = (self.heading + self.yaw_rate * dt) % 360.0
         lift = 0.8 * (rl + rr) - 0.05                            # m/s^2, slightly heavy at rest
         self.vz += lift * dt
         self.vz *= 0.96                                          # drag
@@ -167,7 +171,7 @@ class MockBlimp:
     def model(self, now):
         """What the sensors see, in units."""
         fl, rl, fr, rr = self.motor
-        yaw_rate = 25.0 * (fl - fr)
+        yaw_rate = self.yaw_rate
         vib = 0.02 * sum(abs(c) for c in self.motor)
         rnd = lambda s: (hash((int(now * 1000), s)) % 1000 / 500.0 - 1.0)   # cheap noise in -1..1
         tilt = 0.03 * (fl + fr)                                  # the front pair pitches the nose

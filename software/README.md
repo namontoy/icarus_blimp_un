@@ -18,6 +18,23 @@ python software/blimp_link.py stop
 (`--host 127.0.0.1` on the commands above). Protocol, safety timers and the bring-up
 checklist: `docs/wireless-link.md`.
 
+## The PID tuning plan's instruments
+
+Three standard-library tools for `docs/pid-tuning-plan.md`; each has a `--selftest` or a dry run,
+and all of them work against `mock_blimp.py` (`--host 127.0.0.1`):
+
+```
+python software/thrust_map.py run --motor FL --reverse --go       # P0: the thrust stand, one motor, PROPS ON
+python software/thrust_map.py fit captures/thrust-*.csv           # F(u) per motor, Rule 13 sum, thrust-map.json
+python software/step_test.py yaw --mirror                         # Y1/Y2: prints the schedule; --go runs it
+python software/step_test.py heave --hold 3 --gap 8 --go          # H1/H2
+python software/step_response.py captures/step-yaw-<date>.bin --axis yaw --all \
+    --thrust-map captures/thrust-map.json --half-span 0.10        # the fits again, in core/ units
+```
+
+`step_test.py` refuses to start while another source (the ground station) holds the motors and
+stops them on Ctrl-C and on any error; the captures and their `.json` notes go under `captures/`.
+
 ## The ground station: `ground_station/`
 
 The GUI for the bench and the arena: motors, sensors, the camera and the console in one
