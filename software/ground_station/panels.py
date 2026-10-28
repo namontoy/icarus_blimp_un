@@ -32,6 +32,22 @@ CON_TIMEOUT_MS = 320000     # the Send button comes back even if a reply never e
 EVENTS_MAX = 200
 
 
+def step_button(text, tip):
+    """A square −/+ button beside a slider. Held down, it repeats."""
+    b = QPushButton(text)
+    b.setFont(T.font(15, 600, mono=True))
+    b.setStyleSheet('padding: 0;')
+    b.setFixedSize(26, 24)
+    b.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+    b.setCursor(Qt.CursorShape.PointingHandCursor)
+    b.setAutoRepeat(True)
+    b.setAutoRepeatDelay(400)
+    b.setAutoRepeatInterval(80)
+    b.setToolTip(tip)
+    b.setEnabled(False)
+    return b
+
+
 def button(text, kind=None, tip=''):
     """A .btn: upper case and slightly spaced, which the sheet cannot do."""
     b = QPushButton(text)
@@ -117,28 +133,46 @@ class MotorsPanel(Panel):
         self.top = TopView()
         self.lay.addWidget(self.top)
         self.lay.addSpacing(8)
-        self.sliders, self.vals, self.bars = {}, {}, {}
+        # Off by default: each slider drives its own motor. On, a slider also
+        # sets the other motor of its pair (FL with FR, RL with RR). It sits
+        # in its own row above the sliders so its state is seen before a
+        # slider is touched.
+        self.pairs = Switch('Move pairs together')
+        self.pairs.setToolTip('On: FL moves FR and RL moves RR, and the other way round')
+        self.lay.addLayout(hbox(self.pairs, label('FL + FR · RL + RR', 11, color=T.FAINT, mono=True), None,
+                                spacing=12))
+        self.lay.addSpacing(10)
+        self.sliders, self.vals, self.bars, self.steps = {}, {}, {}, {}
         tower = QGridLayout()
         tower.setHorizontalSpacing(8)
         tower.setVerticalSpacing(4)
         tower.setColumnMinimumWidth(0, 30)
-        tower.setColumnMinimumWidth(2, 56)
-        tower.setColumnStretch(1, 1)
+        tower.setColumnMinimumWidth(4, 56)
+        tower.setColumnStretch(2, 1)
         for i, m in enumerate(MOTORS):
             sl = ThrustSlider()
             sl.setEnabled(False)
             sl.setToolTip('%s thrust, percent of the limit · double-click for zero' % m)
             sl.valueChanged.connect(lambda v, m=m: self._slid(m, v))
+            # Steps of 1 on the slider's −100…100 scale, i.e. 1 % of the limit.
+            # setValue() goes through valueChanged, so a step follows the pair
+            # switch and is sent like a drag.
+            minus = step_button('−', '%s: one step down (1 %% of the limit) · hold to repeat' % m)
+            plus = step_button('+', '%s: one step up (1 %% of the limit) · hold to repeat' % m)
+            minus.clicked.connect(lambda _c, sl=sl: sl.setValue(sl.value() - 1))
+            plus.clicked.connect(lambda _c, sl=sl: sl.setValue(sl.value() + 1))
             val = label('+0.000', 13, mono=True)
             val.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             bar = SegBar()
             tower.addWidget(label(m, 14, 900, T.MUTED, spacing=0.08), 2 * i, 0)
-            tower.addWidget(sl, 2 * i, 1)
-            tower.addWidget(val, 2 * i, 2)
-            tower.addWidget(bar, 2 * i + 1, 0, 1, 3)
+            tower.addWidget(minus, 2 * i, 1)
+            tower.addWidget(sl, 2 * i, 2)
+            tower.addWidget(plus, 2 * i, 3)
+            tower.addWidget(val, 2 * i, 4)
+            tower.addWidget(bar, 2 * i + 1, 0, 1, 5)
             if i < 3:
                 tower.setRowMinimumHeight(2 * i + 1, 6)
-            self.sliders[m], self.vals[m], self.bars[m] = sl, val, bar
+            self.sliders[m], self.vals[m], self.bars[m], self.steps[m] = sl, val, bar, (minus, plus)
         self.lay.addLayout(tower)
         self.lay.addSpacing(12)
 
@@ -153,11 +187,10 @@ class MotorsPanel(Panel):
         self.limit_in.valueChanged.connect(self._limit_changed)
         lim = QWidget()
         lim.setLayout(hbox(label('Limit', color=T.MUTED), self.limit_in, label('%', color=T.MUTED), spacing=6))
-        self.pairs = Switch('Move pairs together', small=True, checked=True)
         zero = button('Zero all')
         zero.clicked.connect(self.zero)
         controls = FlowBox(hgap=16, vgap=10)
-        for w in (self.enable, lim, self.pairs, zero):
+        for w in (self.enable, lim, zero):
             controls.add(w)
         self.lay.addWidget(controls)
         self.hint = label(self.HINT, 12, color=T.FAINT, wrap=True)
@@ -196,8 +229,10 @@ class MotorsPanel(Panel):
         self.enable.blockSignals(True)
         self.enable.setChecked(on)
         self.enable.blockSignals(False)
-        for sl in self.sliders.values():
+        for m, sl in self.sliders.items():
             sl.setEnabled(on)
+            for b in self.steps[m]:
+                b.setEnabled(on)
         if on:
             self.send()
             self._timer.start(MOTOR_SEND_MS)
@@ -247,7 +282,7 @@ class MotorsPanel(Panel):
         self.top.set(values)
 
     def compact(self, on):
-        self.top.set_max_width(200 if on else 260)
+        self.top.set_max_width(260 if on else 340)
         self.hint.setVisible(not on)
 
 
@@ -534,7 +569,11 @@ class SensorsPanel(Panel):
         tl.addWidget(self.tof)
         tl.addWidget(self.tof_status)
         tl.addStretch(1)
-        self.baro = {'p': Readout('Pressure', 'hPa'), 't': Readout('Temperature', '°C'), 'alt': Readout('Altitude', 'm')}
+        # Altitude is the standard-atmosphere figure the 'baro' command prints;
+        # the packet's own baro_alt_m is relative to the first reading since
+        # boot, so it reads about 0 on the bench and gets its own row.
+        self.baro = {'p': Readout('Pressure', 'hPa'), 't': Readout('Temperature', '°C'),
+                     'alt': Readout('Altitude', 'm'), 'rel': Readout('Since boot', 'm')}
         bl = QVBoxLayout()
         bl.setSpacing(4)
         bl.addWidget(h3('Barometer'))
@@ -598,7 +637,8 @@ class SensorsPanel(Panel):
         if s.get('baro_valid'):
             self.baro['p'].set(fmt(s['pressure_pa'] / 100, 1))
             self.baro['t'].set(fmt(s.get('baro_temp_c'), 1))
-            self.baro['alt'].set(sfmt(s.get('baro_alt_m'), 2))
+            self.baro['alt'].set(fmt(s.get('baro_alt_std_m'), 1))
+            self.baro['rel'].set(sfmt(s.get('baro_alt_m'), 2))
         if s.get('tof_valid'):
             m, st = s['tof_mm'] / 1000, s.get('tof_status')
             ok = st == 0

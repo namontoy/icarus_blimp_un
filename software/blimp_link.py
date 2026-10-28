@@ -122,6 +122,18 @@ def decode_telemetry(body):
             'free_heap': f[11], 'link_age_ms': f[12]}
 
 
+SEA_LEVEL_PA = 101325.0                     # cmd_baro.c's SEA_LEVEL_PA
+
+
+def std_altitude_m(pressure_pa):
+    """Standard-atmosphere altitude, the formula cmd_baro.c's altitude_m()
+    uses, so this matches the 'baro' command's alt[m] column. The packet's
+    baro_alt_m is that same altitude minus the first reading since boot."""
+    if not pressure_pa > 0:
+        return float('nan')
+    return 44330.0 * (1.0 - (pressure_pa / SEA_LEVEL_PA) ** (1.0 / 5.255))
+
+
 def decode_sensors(body):
     f = _SENSORS.unpack(body)
     valid = f[17]
@@ -129,7 +141,7 @@ def decode_sensors(body):
             'imu_valid': bool(valid & SENSORS_IMU), 'acc': f[1:4], 'gyro': f[4:7], 'imu_temp_c': f[7],
             'mag_valid': bool(valid & SENSORS_MAG), 'mag': f[8:11], 'heading_deg': f[11],
             'baro_valid': bool(valid & SENSORS_BARO), 'pressure_pa': f[12], 'baro_temp_c': f[13],
-            'baro_alt_m': f[14],
+            'baro_alt_m': f[14], 'baro_alt_std_m': std_altitude_m(f[12]),
             'tof_valid': bool(valid & SENSORS_TOF), 'tof_mm': f[15], 'tof_status': f[16]}
 
 
@@ -140,7 +152,7 @@ def format_sensors(s):
     if s['mag_valid']:
         parts.append('hdg %5.1f' % s['heading_deg'])
     if s['baro_valid']:
-        parts.append('%.0f Pa %.1f C' % (s['pressure_pa'], s['baro_temp_c']))
+        parts.append('%.0f Pa %.1f C %.1f m' % (s['pressure_pa'], s['baro_temp_c'], s['baro_alt_std_m']))
     if s['tof_valid']:
         parts.append('tof %4d mm%s' % (s['tof_mm'], '' if s['tof_status'] == 0 else ' (status %d)' % s['tof_status']))
     return '  '.join(parts)
