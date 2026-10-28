@@ -62,20 +62,35 @@ esp_err_t capture_init(void)
     }
     uint32_t capacity = (uint32_t)CONFIG_CAPTURE_MAX_SECONDS * TICKS_PER_SECOND;
     log_record_t *buf = heap_caps_malloc(capacity * sizeof(log_record_t), MALLOC_CAP_SPIRAM);
-    const bool in_psram = buf != NULL;
+    bool in_psram = buf != NULL;
     if (buf == NULL) {
-        /* No PSRAM, or not enough: keep a short capture possible so the
-           module can still be exercised, and say so. */
+        /* Not that much PSRAM free: take the largest block there is, in
+           whole seconds, rather than give up the PSRAM altogether. */
         const unsigned asked_kb = (unsigned)(capacity * sizeof(log_record_t) / 1024);
-        capacity = FALLBACK_SECONDS * TICKS_PER_SECOND;
-        buf = heap_caps_malloc(capacity * sizeof(log_record_t), MALLOC_CAP_8BIT);
-        if (buf == NULL) {
-            ESP_LOGE(TAG, "no buffer: %u KB of PSRAM not available and no %u KB of internal "
-                     "RAM either", asked_kb, (unsigned)(capacity * sizeof(log_record_t) / 1024));
-            return ESP_ERR_NO_MEM;
+        const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+        const uint32_t fit = (uint32_t)(largest / sizeof(log_record_t)) / TICKS_PER_SECOND *
+                             TICKS_PER_SECOND;
+        if (fit >= TICKS_PER_SECOND) {
+            buf = heap_caps_malloc(fit * sizeof(log_record_t), MALLOC_CAP_SPIRAM);
         }
-        ESP_LOGW(TAG, "PSRAM not available: %u s buffer in internal RAM instead of %d s",
-                 (unsigned)FALLBACK_SECONDS, CONFIG_CAPTURE_MAX_SECONDS);
+        if (buf != NULL) {
+            capacity = fit;
+            in_psram = true;
+            ESP_LOGW(TAG, "PSRAM holds %u s of records, not the %d s asked (%u KB)",
+                     (unsigned)(capacity / TICKS_PER_SECOND), CONFIG_CAPTURE_MAX_SECONDS, asked_kb);
+        } else {
+            /* No PSRAM: keep a short capture possible so the module can
+               still be exercised, and say so. */
+            capacity = FALLBACK_SECONDS * TICKS_PER_SECOND;
+            buf = heap_caps_malloc(capacity * sizeof(log_record_t), MALLOC_CAP_8BIT);
+            if (buf == NULL) {
+                ESP_LOGE(TAG, "no buffer: %u KB of PSRAM not available and no %u KB of internal "
+                         "RAM either", asked_kb, (unsigned)(capacity * sizeof(log_record_t) / 1024));
+                return ESP_ERR_NO_MEM;
+            }
+            ESP_LOGW(TAG, "PSRAM not available: %u s buffer in internal RAM instead of %d s",
+                     (unsigned)FALLBACK_SECONDS, CONFIG_CAPTURE_MAX_SECONDS);
+        }
     }
     s.buf      = buf;
     s.capacity = capacity;
@@ -97,7 +112,9 @@ esp_err_t capture_start(uint32_t seconds)
     }
     uint32_t wanted = seconds * TICKS_PER_SECOND;
     if (wanted > s.capacity) {
-        wanted = s.capacity;
+        /* Refused, not shortened: a capture that ends before the time the
+           operator asked for looks like a progress bug (it did, 2026-10-28). */
+        return ESP_ERR_INVALID_SIZE;
     }
     /* The scales are read before the lock: sensor_stream_scales() takes its
        own spinlock, and the numbers describe the chips, not this capture. */
@@ -313,6 +330,11 @@ static int do_capture_cmd(int argc, char **argv)
         esp_err_t err = capture_start(seconds);
         if (err == ESP_ERR_INVALID_STATE) {
             printf("a capture is running - 'capture --stop' first\n");
+            return 1;
+        }
+        if (err == ESP_ERR_INVALID_SIZE) {
+            printf("%" PRIu32 " s is longer than the buffer: up to %" PRIu32 " s\n", seconds,
+                   s.capacity / TICKS_PER_SECOND);
             return 1;
         }
         if (err != ESP_OK) {

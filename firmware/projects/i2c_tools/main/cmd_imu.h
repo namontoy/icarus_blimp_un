@@ -49,6 +49,9 @@ esp_err_t imu_attach(int addr, int accel_fs, int gyro_fs, imu_dev_t **out);
 /** Ranges the chip reported back after attach, for a printed header. */
 void imu_ranges(const imu_dev_t *d, int *accel_g, int *gyro_dps);
 
+/** Bandwidth of the chip's digital low-pass filter as attached, Hz (21). */
+int imu_dlpf_hz(const imu_dev_t *d);
+
 int imu_addr(const imu_dev_t *d);
 
 /** One coherent sample of accelerometer, temperature and gyroscope. */

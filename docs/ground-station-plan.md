@@ -131,7 +131,7 @@ the GUI thread onto it, so every slot runs on the GUI thread. Station to window:
 | Signal | Content | Rate |
 |---|---|---|
 | `tel(dict)` | link state (`alive`, `age_s`, `rx`, `bad`, `streaming`) and the telemetry packet decoded (`motor`, `failsafe`, `link_alive`, counters) | 10 Hz |
-| `sen(dict)` | the sensors packet decoded (section 5), only when a new one has arrived | up to 10 Hz |
+| `sen(dict)` | the sensors packet decoded (section 5), one signal per packet from the receive callback (until 2026-10-28 the newest at each tick, which dropped half of a 20 Hz stream) | up to 20 Hz |
 | `cam_frame(QImage, dict)` | one frame, decoded on the camera thread, with `{seq, t_ms, w, h, row}` (the CSV row of the same capture) | per frame |
 | `cam_row(dict)` | a CSV row without a frame (flight data) | per row |
 | `cam_status(dict)` | camera source: `source`, `connected`, `live`, frames ok/bad | on every change or command |

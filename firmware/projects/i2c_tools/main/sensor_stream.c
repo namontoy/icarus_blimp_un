@@ -149,7 +149,8 @@ static esp_err_t open_imu(void)
         int accel_g = 0, gyro_dps = 0;
         imu_ranges(s.imu, &accel_g, &gyro_dps);
         snprintf(s_ch[CH_IMU].desc, sizeof(s_ch[CH_IMU].desc),
-                 "MPU-6050 @ 0x%02x   +/-%d g, +/-%d dps", imu_addr(s.imu), accel_g, gyro_dps);
+                 "MPU-6050 @ 0x%02x   +/-%d g, +/-%d dps, DLPF %d Hz", imu_addr(s.imu), accel_g,
+                 gyro_dps, imu_dlpf_hz(s.imu));
         portENTER_CRITICAL(&s.mux);
         s.scales.imu_accel_g  = accel_g;
         s.scales.imu_gyro_dps = gyro_dps;

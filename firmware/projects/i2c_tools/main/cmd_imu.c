@@ -36,6 +36,19 @@ static const char *TAG = "cmd_imu";
 
 #define MPU6050_WHO_AM_I_VALUE  0x68
 
+/*
+ * CONFIG.DLPF_CFG = 4: 21 Hz bandwidth on the accelerometer, 20 Hz on the
+ * gyro, 8.5 ms of group delay, the widest setting under the 25 Hz Nyquist
+ * rate of the 50 Hz control loop. Found unset on 2026-10-28: the power-on
+ * value 0 leaves 260 Hz / 256 Hz, and since the chip keeps its registers
+ * across ESP32 resets, whatever a previous run left. Read at 20-50 Hz, an
+ * unfiltered sample folds the motors' vibration (hundreds of hertz) into
+ * the band where attitude lives. With the filter on the gyro's internal
+ * rate is 1 kHz; SMPLRT_DIV 0 keeps the registers at that rate.
+ */
+#define MPU6050_DLPF_CFG        4
+#define MPU6050_DLPF_HZ         21
+
 /* Datasheet sensitivities, indexed by the FS_SEL / AFS_SEL field. */
 static const float accel_lsb_per_g[4]   = { 16384.0f, 8192.0f, 4096.0f, 2048.0f };
 static const int   accel_range_g[4]     = { 2, 4, 8, 16 };
@@ -112,7 +125,26 @@ static esp_err_t imu_configure(imu_dev_t *d, int want_afs, int want_fs)
         ESP_LOGW(TAG, "range readback mismatch: asked for afs=%d fs=%d, chip reports "
                       "afs=%d fs=%d", want_afs, want_fs, d->afs_sel, d->fs_sel);
     }
+
+    /* The low-pass filter and the sample-rate divider (see MPU6050_DLPF_CFG),
+       written every attach for the same reason as the ranges, and read back. */
+    if (reg_write(d->dev, MPU6050_REG_SMPLRT_DIV, 0x00) != ESP_OK ||
+        reg_write(d->dev, MPU6050_REG_CONFIG, MPU6050_DLPF_CFG) != ESP_OK) {
+        ESP_LOGE(TAG, "failed to set the low-pass filter");
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    uint8_t dlpf = 0xFF;
+    if (reg_read(d->dev, MPU6050_REG_CONFIG, &dlpf, 1) != ESP_OK || (dlpf & 0x07) != MPU6050_DLPF_CFG) {
+        ESP_LOGW(TAG, "DLPF readback: CONFIG reads 0x%02x, asked for DLPF_CFG %d", dlpf,
+                 MPU6050_DLPF_CFG);
+    }
     return ESP_OK;
+}
+
+int imu_dlpf_hz(const imu_dev_t *d)
+{
+    (void)d;
+    return MPU6050_DLPF_HZ;
 }
 
 esp_err_t imu_attach(int addr, int accel_fs, int gyro_fs, imu_dev_t **out)

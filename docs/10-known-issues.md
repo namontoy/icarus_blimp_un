@@ -13,6 +13,13 @@ task, which will call `blimp_step()`, is the next step (`docs/control-loop-plan.
 "unmeasured vehicle" caveat still holds: one motor was thrust-tested at 14.7-16.8 gf on a lab
 supply, and `core/src/params.c` still carries the 35 gf placeholder.
 
+**2026-10-28, sensor configuration reviewed.** The MPU-6050's low-pass filter had never been
+written (260 Hz bandwidth sampled at 20 Hz); it is 21 Hz now. The sensor stream runs at the
+loop's 50 Hz, the window plots every packet instead of sampling the newest at 10 Hz, and the
+capture buffer is 400 s with longer requests refused instead of silently shortened. Report with
+every element's configuration and rate: `docs/sensor-configuration-report.md`. None of it has
+run on hardware yet.
+
 **2026-10-28, Wi-Fi drops fixed.** With the control task's first build the S3's access point
 dropped the laptop every ~14 s. The cause was the task's esp_timer running with ISR dispatch,
 which on ESP-IDF v5.5.x can stall every task-dispatched timer, Wi-Fi's included (esp-idf issue

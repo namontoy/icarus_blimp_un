@@ -65,7 +65,8 @@ _SENSORS = struct.Struct('<I3f3ff3fffffHBB')    # t_us, acc[3] g, gyro[3] dps, i
 LOG_CMD_INFO, LOG_CMD_START, LOG_CMD_STOP, LOG_CMD_CLEAR, LOG_CMD_GET = 0, 1, 2, 3, 4
 LOG_STATE = {0: 'idle', 1: 'running', 2: 'done'}
 LOG_RESULT = {0: 'ok', 1: 'the blimp has no capture buffer (no PSRAM?)', 2: 'a capture is already running',
-              3: 'nothing stored at that index', 4: 'the blimp rejected the command'}
+              3: 'nothing stored at that index', 4: 'the blimp rejected the command',
+              5: "longer than the blimp's buffer (its LOG_INFO says how many seconds fit)"}
 LOG_RECORD_BYTES = 72               # LINK_LOG_RECORD_BYTES: one log_record_t (ctl_types.h)
 LOG_CHUNK_RECORDS = 16
 LOG_GET_MAX_CHUNKS = 8
@@ -364,6 +365,8 @@ class CaptureClient:
 
     def start(self, seconds=0):
         info = self.command(LOG_CMD_START, seconds=seconds)
+        if info['result'] == 5:
+            raise CaptureError('%d s is longer than the blimp\'s buffer: up to %d s' % (seconds, info['max_seconds']))
         if info['result'] != 0:
             raise CaptureError(info['result_name'])
         return info

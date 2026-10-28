@@ -35,7 +35,7 @@ MOTOR_FAILSAFE_S = 1.0      # CONFIG_MOTOR_FAILSAFE_MS
 TELEMETRY_HZ = 20           # CONFIG_NET_LINK_TELEMETRY_HZ
 PEER_HOLD_MULT = 10
 CAP_PERIOD_US = 20000       # CTL_PERIOD_US: one record per control tick
-CAP_MAX_S = 120             # CONFIG_CAPTURE_MAX_SECONDS
+CAP_MAX_S = 400             # CONFIG_CAPTURE_MAX_SECONDS
 # The counts the mock's records carry are the firmware's at its default
 # attach settings: +/-2 g (16384 LSB/g), +/-250 deg/s (131 LSB/(deg/s)), a
 # QMC5883L at 12000 LSB/gauss, a BME280.
@@ -211,7 +211,10 @@ class MockBlimp:
             if c['state'] == 1:
                 self.send_log_info(addr, 2)
                 return
-            c.update(state=1, id=c['id'] + 1, wanted=min(seconds or 60, CAP_MAX_S) * per_s, records=bytearray(),
+            if (seconds or 60) > CAP_MAX_S:
+                self.send_log_info(addr, 5)          # refused, as capture.c does
+                return
+            c.update(state=1, id=c['id'] + 1, wanted=(seconds or 60) * per_s, records=bytearray(),
                      t_start=0, next_us=None)
             self.log('I capture %d: %d s started' % (c['id'], c['wanted'] // per_s))
             self.send_log_info(addr, 0)

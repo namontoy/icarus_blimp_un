@@ -210,6 +210,7 @@ enum {
     LINK_LOG_ERR_BUSY      = 2, /* START while one is running                   */
     LINK_LOG_ERR_RANGE     = 3, /* GET at or past count                         */
     LINK_LOG_ERR_CMD       = 4, /* unknown cmd                                  */
+    LINK_LOG_ERR_LENGTH    = 5, /* START longer than the buffer: max_seconds says how long */
 };
 
 typedef struct __attribute__((packed)) {

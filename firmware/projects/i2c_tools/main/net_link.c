@@ -188,7 +188,8 @@ static void handle_log_cmd(const link_log_cmd_t *p, const struct sockaddr_in *fr
     case LINK_LOG_CMD_START: {
         esp_err_t err = capture_start(p->seconds);
         send_log_info(err == ESP_OK ? LINK_LOG_OK :
-                      err == ESP_ERR_INVALID_STATE ? LINK_LOG_ERR_BUSY : LINK_LOG_ERR_NO_BUFFER, from);
+                      err == ESP_ERR_INVALID_STATE ? LINK_LOG_ERR_BUSY :
+                      err == ESP_ERR_INVALID_SIZE ? LINK_LOG_ERR_LENGTH : LINK_LOG_ERR_NO_BUFFER, from);
         return;
     }
     case LINK_LOG_CMD_STOP:

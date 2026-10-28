@@ -62,9 +62,11 @@ typedef struct {
 esp_err_t capture_init(void);
 
 /**
- * Start a new capture of `seconds` (0: CAPTURE_DEFAULT_SECONDS; longer than
- * the buffer is clamped to it). Discards whatever the buffer held.
- * ESP_ERR_INVALID_STATE while one is running, ESP_ERR_NO_MEM without a buffer.
+ * Start a new capture of `seconds` (0: CAPTURE_DEFAULT_SECONDS). Discards
+ * whatever the buffer held. ESP_ERR_INVALID_STATE while one is running,
+ * ESP_ERR_NO_MEM without a buffer, ESP_ERR_INVALID_SIZE when the length does
+ * not fit the buffer: refused rather than shortened, so a 300 s test asked
+ * of a 120 s buffer fails at the start instead of ending early (2026-10-28).
  */
 esp_err_t capture_start(uint32_t seconds);
 
