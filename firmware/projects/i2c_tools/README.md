@@ -53,7 +53,7 @@ written down, but it has not run on hardware.
 | BMP280 (`baro`) | **Built, not run on hardware** | Same driver as the BME280 minus humidity; no BMP280 has been on the bus |
 | VL53L1X (`tof`) | **Measured** 2026-10-11, at 1.57 m only | 1566 mm, sd 1.5 mm at a 100 ms budget, dark room. Budgets below 100 ms read about 5 % short. **Range at 2 m not measured yet** (§8) |
 | Motors (`motor`) | **Measured** 2026-10-12 | 2 s run at 10 %, then the failsafe coasted it. No spurious errors |
-| Per-motor break-away duty | Not measured | The 12 % default is a guess. Measure it with `--sweep` (§6) |
+| Per-motor break-away duty | Not measured | The default deadband is 0, so a command is its duty (it was an unmeasured 12 % until 2026-10-28). Measure it with `--sweep` (§6) |
 | Wi-Fi AP, UDP link | **Measured** 2026-10-24 | The laptop joined `ICARUS-…` and the ground station page (`software/ground_station/`) received telemetry. The rest of the checklist in `docs/wireless-link.md` §8 (console over UDP, link-loss and failsafe tests, current, range) is still open |
 | Sensor stream (`sensors`, the `SENSORS` packet) | **Built, not run on hardware** | Written 2026-10-24 on the four drivers above. The ground station decodes the same packet from `software/mock_blimp.py` |
 | PING))) ultrasonic | **Parked, not tested** | Not in the build (§8) |
@@ -456,9 +456,12 @@ section.
   usual choice. In *fast* decay the off part coasts.
 - **Deadband.** A small brushed motor doesn't turn below some break-away duty.
   Commands are mapped onto `[deadband, 1.0]`, so a small command gives a small
-  thrust instead of nothing. The default of 12 % is a starting guess. **Measure
-  each motor with `motor --sweep -m FL` (and RL, FR, RR)**, then set the value
-  with `--deadband` at runtime or `CONFIG_MOTOR_DEADBAND_PERMILLE` permanently.
+  thrust instead of nothing. The default is 0: no mapping, a command is its
+  duty, which is what the ground station's sliders show. Until 2026-10-28 it
+  was an unmeasured 12 %, which made the smallest slider step (0.003) drive
+  12.3 % duty. **Measure each motor with `motor --sweep -m FL` (and RL, FR,
+  RR)** before setting one, with `--deadband` at runtime or
+  `CONFIG_MOTOR_DEADBAND_PERMILLE` permanently.
 - **Failsafe** (`CONFIG_MOTOR_FAILSAFE_MS`, default 1000 ms). The PWM peripheral
   holds its last duty forever, so a controller that stops running would leave
   the blimp under thrust. The failsafe is armed only while some motor has a
@@ -595,7 +598,7 @@ default there or put it in `sdkconfig.defaults*`.
 | Motor driver (DRV8833) | `MOTOR_{FL,RL,FR,RR}_IN{1,2}_GPIO` | see the §2 table |
 | | `MOTOR_NSLEEP_GPIO` | −1 (tied high in hardware) |
 | | `MOTOR_PWM_FREQ_HZ` | 20000 |
-| | `MOTOR_DEADBAND_PERMILLE` | 120 (12 %) |
+| | `MOTOR_DEADBAND_PERMILLE` | 0 (a command is its duty) |
 | | `MOTOR_FAILSAFE_MS` | 1000 (0 disables) |
 | Wireless link (Wi-Fi access point + UDP) | `NET_WIFI_AT_BOOT` | y (otherwise use `wifi --start`) |
 | | `NET_WIFI_SSID_PREFIX` | `ICARUS` |
@@ -737,8 +740,6 @@ for different hardware (a CCS811). It is not a test of this firmware.
   is what the stream reads until its next re-attach.
 - **Stale text to correct later:**
   - `cmd_tof.c`'s header comment about the altimeter decision (§8);
-  - the `MOTOR_DEADBAND_PERMILLE` help in `Kconfig.projbuild`, which says
-    `motor -m 1A --sweep`. The current syntax is `motor -m FL --sweep`.
 - A `build/` folder copied from another checkout is tied to its original path,
   and the build fails with "configured for project …". Run `fullclean` (see
   `BUILD_AND_FLASH.md`).

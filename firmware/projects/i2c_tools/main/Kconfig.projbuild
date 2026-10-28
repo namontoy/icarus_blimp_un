@@ -107,15 +107,19 @@ menu "Motor driver (DRV8833)"
     config MOTOR_DEADBAND_PERMILLE
         int "Break-away duty in parts per thousand"
         range 0 900
-        default 120
+        default 0
         help
             Smallest duty that actually starts the prop turning. Thrust
             commands are mapped onto [deadband, 1.0] so that a small command
             produces a small thrust instead of nothing at all.
 
-            120 is only a plausible starting point for a small brushed motor.
-            Measure the real value per motor with 'motor -m 1A --sweep' and
-            set it from what you see.
+            0 means no mapping: a command is its duty, so 0.05 is 5 % duty,
+            which is what the ground station's sliders and the readback
+            assume. The earlier default of 120 was an unmeasured guess that
+            turned the smallest slider step (0.003) into 12.3 % duty, and
+            the motors ran far faster than the slider said (2026-10-28).
+            Measure the real value per motor with 'motor -m FL --sweep'
+            before you set a non-zero one.
 
     config MOTOR_FAILSAFE_MS
         int "Coast all motors after this long with no command; 0 disables"

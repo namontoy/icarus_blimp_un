@@ -314,10 +314,10 @@ class MockBlimp:
                     'wifi [--start] [--stop]\n  Status of the blimp\'s Wi-Fi access point\n\n'
                     'link \n  Status of the UDP command/telemetry link\n')
         if line in ('motor', 'motor --status'):
-            rows = ''.join('%-6s %-12s %-9s %+10.3f %9.1f%%\n' % (n, w, g, c, 0 if c == 0 else 12 + 88 * abs(c))
+            rows = ''.join('%-6s %-12s %-9s %+10.3f %9.1f%%\n' % (n, w, g, c, 100 * abs(c))
                            for n, w, g, c in zip(bl.MOTOR_ORDER, ('#1 IN1/IN2', '#1 IN3/IN4', '#2 IN1/IN2', '#2 IN3/IN4'),
                                                  ('13/12', '11/10', '9/8', '7/14'), self.motor))
-            return ('PWM 19999 Hz, 11 bit (2048 steps), slow decay, deadband 12.0%%\n'
+            return ('PWM 19999 Hz, 11 bit (2048 steps), slow decay, deadband 0.0%%\n'
                     'failsafe 1000 ms, %s\nnSLEEP not on a GPIO - must be strapped high in hardware\n\n'
                     '%-6s %-12s %-9s %10s %10s\n%s' % (fs[self.failsafe_state()], 'motor', 'driver',
                                                        'GPIO', 'command', 'duty', rows))
