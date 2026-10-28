@@ -264,6 +264,94 @@ Open questions the tests answer on the way: whether the ToF reaches 2.25 m under
 the motors' field (docs/07 §8 experiment 5; the heading loop's measurement), and whether reverse
 thrust on the front pair is worth a mixer change (a pure yaw torque without surge).
 
+## 7. Bench runbook: the session's commands, in order (2026-10-28)
+
+Before anything: the branch `pid-tuning` checked out (the tools live only there), the ground
+station **closed** while a tool drives the motors (one client at a time; the tools refuse to
+start while the GUI holds the motors, and the blimp answers whoever sent the last packet), the
+laptop on the blimp's Wi-Fi (`ICARUS-…`, from the system's Wi-Fi menu or the ground station's
+Join button before closing it), every command from the repo root, any Python 3.8+. Props on
+means: the vehicle held or tethered, nothing in a propeller's disc, STOP within reach (Ctrl-C in
+the tool's terminal stops the motors at once).
+
+**0. Link, firmware, tools.**
+
+```
+python software/blimp_link.py status             # telemetry: failsafe idle, link alive; a sensors line under it
+python software/blimp_link.py capture status     # the firmware string (a build at 9d1cdca or later) and the 400 s buffer
+python software/thrust_map.py --selftest
+python software/step_response.py --selftest
+```
+
+If the firmware string is older than `9d1cdca`, the access point drops the laptop every 14 s and
+every test will show restarts that are not the vehicle's: reflash first (`docs/wifi-drop-report.md`).
+
+**1. P0, the thrust stand** (one motor on the stand, props on, the real cell, the other three
+motors untouched).
+
+```
+python software/thrust_map.py run --motor FL --reverse             # prints the 20 points, drives nothing
+python software/thrust_map.py run --motor FL --reverse --go        # about 5 min per motor
+python software/thrust_map.py run --motor RL --reverse --go        # then FR, then RR
+python software/thrust_map.py fit captures/thrust-*.csv            # F(u) per motor, Rule 13, captures/thrust-map.json
+```
+
+The first prompt is the scale reading with the motor off (the tare). Then per point the tool
+settles 1.5 s, records a 3 s capture (the cell voltage, the readback, the vibration) and asks for
+the reading while the motor keeps running: a number sends it, `r` repeats the point, `s` skips
+it, `q` ends the sweep keeping what was read. `--lever` is thrust over reading if the rig is a
+lever; `--duties 0.2 0.4 0.6 0.8 1.0` shortens a sweep; the tare is asked again at the end (the
+drift is written in the CSV). Record from the fit: F(1) per motor and the spread, the reverse
+ratio, the duty at which four motors reach 100 gf, the cell voltage; `MOTOR_MAX_GF` for
+`params.c` is the strongest motor's F(1). A "readback … plan T2" note on a point means the
+motors cut during the capture download: write it down, it is the T2 result.
+
+**2. The rest of P0.** The IMU sign check with the gondola in hand (the ground station's
+Sensors panel, or the sensors line of `blimp_link.py status`): nose up, left side up, nose left
+should each give a positive rate in `core/`'s frame; note the gyro's z sign in particular, it
+decides what the yaw fit's sign means. Measure l_f, the front motors' half span (AGENTS.md puts
+the surge pair at ±20 cm, so `--half-span 0.20`, not `params.c`'s 0.10). Weigh the trim (about
+6 gf heavy). Close the ground station.
+
+**3. Y1 and Y2, yaw** (the inflated, trimmed vehicle on a thread from the top of the envelope,
+free to turn; props on).
+
+```
+python software/step_test.py yaw --mirror                                            # the schedule, 62 s
+python software/step_test.py yaw --mirror --go --thrust-map captures/thrust-map.json --half-span 0.20
+```
+
+Watch the readback follow each step in the printed lines. At the end every step and every
+spin-down is fitted and summarised. Pass: four of six steps fit (90 %, or residual under 1.5× the
+noise), K within 20 % across amplitudes and between FL and FR, τ up and τ down within 20 %, θ
+under 0.1 s. A SIGN line means the gyro's z and the front differential disagree with `core/`'s
+frame: not a failure, a fact for increment 3's frame mapping. If the spread is large, repeat
+with `--steps 0.20 0.25 0.30` (the linear regime) and keep both runs.
+
+**4. H1 and H2, heave** (trimmed and free, a clear floor, the range sensor between 0.4 and 1.8 m,
+a hand above the envelope; props on).
+
+```
+python software/step_test.py heave --hold 3 --gap 8                                  # the schedule, 35 s
+python software/step_test.py heave --hold 3 --gap 8 --go --thrust-map captures/thrust-map.json
+```
+
+Release the vehicle before the first step and let it sink steadily into each step rather than
+holding it. Pass: fit above 90 %, K within 20 % across the three amplitudes; the baseline slope
+the fit reports is H2's sink rate; θ here is the range sensor's, and L1's delay comes from the
+yaw fits.
+
+**5. Keep the data.** `captures/` is gitignored. Copy `thrust-*.csv`, `thrust-map.json` and the
+`step-*.json` notes (the fits are in them; the `.bin` too, a few hundred kB each) into
+`docs/history/pid-bench-<date>/`, and put the numbers in §5's table, docs/07 §1.2 and
+`params.c` with the capture's file name in the commit.
+
+**If a tool refuses.** "the motors are already driven": the ground station or another tool holds
+them, STOP there and close it. "no telemetry": the Wi-Fi. "no LOG_INFO": a firmware without the
+capture. "longer than the blimp's buffer": a schedule over 400 s, shorten `--gap`. A fit that
+says the delay is at the search limit: the response never started, check the readback and the
+motor order.
+
 ## Sources
 
 - Skogestad, *Simple analytic rules for model reduction and PID controller tuning*, J. Process
