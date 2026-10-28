@@ -21,7 +21,6 @@ from .widgets import (HISTORY_S, HOVER_BAND_M, ChamferFrame, CameraView, Compass
 
 MOTORS = ('FL', 'RL', 'FR', 'RR')           # wire order (motor_id_t)
 PAIR = {'FL': 'FR', 'FR': 'FL', 'RL': 'RR', 'RR': 'RL'}
-MOTOR_SEND_MS = 100
 SEN_STALE_S = 1.5
 CAM_ROW_STALE_S = 2.0
 TOF_STATUS = {0: 'valid', 1: 'sigma fail', 2: 'signal fail', 3: 'below min range', 4: 'out of bounds',
@@ -116,12 +115,16 @@ class Panel(ChamferFrame):
 class MotorsPanel(Panel):
     """Four sliders in wire order, readback under each, the top view above.
 
-    Safety on this side: the setpoint goes to the station 10 times a second
-    only while "Motors enabled" is on; the bridge releases the motors if that
-    refresh stops for DEADMAN_S. STOP zeroes the sliders and switches the
-    motors off. The limit clamps every slider."""
-    HINT = ('Enable, then move a slider. The window repeats the setpoint 10 times a second; if it stops, the '
-            'bridge releases the motors within 0.5 s and the blimp coasts on its own timers.')
+    Safety on this side: the setpoint goes to the station when a slider, the
+    limit or the enable switch changes, and the bridge's own thread repeats
+    it to the blimp for as long as "Motors enabled" is on (blimp_bridge.py
+    owns the standing command; its watchdog releases the motors if the
+    window stops responding, and the window then STOPs itself). Until
+    2026-10-28 a 100 ms timer here was the liveness, and a long repaint
+    cut the motors. STOP zeroes the sliders and switches the motors off.
+    The limit clamps every slider."""
+    HINT = ('Enable, then move a slider. The setpoint stands until you change it or STOP; a window that stops '
+            'responding for 3 s releases the motors, and the blimp coasts on its own timers if the link drops.')
 
     def __init__(self, station):
         # The value is the PWM duty as a signed fraction: 0.003 is 0.3 %. That
@@ -208,9 +211,6 @@ class MotorsPanel(Panel):
         self.lay.addWidget(self.hint)
         self.lay.addStretch(1)
 
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self.send)
-
     # setpoints out
 
     def command(self):
@@ -245,10 +245,7 @@ class MotorsPanel(Panel):
                 b.setEnabled(on)
         if on:
             self.send()
-            self._timer.start(MOTOR_SEND_MS)
             self.station.log('info', 'motors enabled, limit %d %%' % round(self.limit * 100))
-        else:
-            self._timer.stop()
 
     def _set_sliders(self, value):
         for sl in self.sliders.values():

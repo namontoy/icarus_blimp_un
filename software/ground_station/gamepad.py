@@ -305,12 +305,17 @@ class Gamepad:
     driver. seq counts snapshots, so a page can tell a frozen reader from a
     still stick."""
 
-    def __init__(self, backend=None):
+    def __init__(self, backend=None, on_press=None):
+        """on_press(button) is called from the reader's thread on every press
+        edge: the station routes B to the bridge's STOP from here, so the
+        stop does not wait for the GUI thread."""
         if backend is None:
             backend, err = make_backend()
         else:
             err = ''
         self.backend = backend
+        self.on_press = on_press
+        self._buttons = {}
         self._state = empty_state(backend.name if backend else 'none', err)
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -350,6 +355,14 @@ class Gamepad:
             s['seq'] = self._seq
             with self._lock:
                 self._state = s
+            if self.on_press is not None:
+                for b, down in s['buttons'].items():
+                    if down and not self._buttons.get(b):
+                        try:
+                            self.on_press(b)
+                        except Exception as e:     # the callback's trouble must not kill the reader
+                            print('gamepad: on_press(%s): %s' % (b, e))
+                self._buttons = dict(s['buttons'])
 
 
 def main():

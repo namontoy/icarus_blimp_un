@@ -138,9 +138,10 @@ throwaway settings file, so it never changes the remembered window.
 - **Motors**: tick *Motors enabled*, then move a slider or step it with its − and + buttons (1 % of
   the limit per click; hold to repeat). Each slider drives its own motor unless *Move pairs
   together* (above the sliders, off at start) is on: then FL moves FR and RL moves RR. The limit (30 % by default) clamps every slider. The segmented bars and the
-  arrows on the top view are the blimp's readback, not the slider. The window repeats the
-  setpoint 10 times a second; the bridge stops repeating it 0.5 s after the window goes quiet,
-  and the firmware coasts on its own timers after that. Closing the window stops the motors. Remove the propellers on the bench.
+  arrows on the top view are the blimp's readback, not the slider. A setpoint stands until you
+  change it or STOP: the bridge's thread repeats it to the blimp; a window that stops responding
+  for 3 s releases the motors, and the firmware coasts on its own timers if the link drops.
+  Closing the window stops the motors. Remove the propellers on the bench.
 - **Sensors**: live numbers, 10 s plots of the accelerometer and gyroscope (hover for values; every
   packet the blimp sends is plotted, up to 20 a second),
   roll and pitch from the accelerometer, the magnetic heading, the range below with the
@@ -164,10 +165,11 @@ throwaway settings file, so it never changes the remembered window.
   heave (half a stick; hold Shift for the whole), or the sticks. The page mixes surge, yaw and
   heave into the four motors the way `core/`'s mixer is laid out (front pair sum and
   difference, rear pair heave; open loop, per motor, which is what the firmware's MANUAL mode
-  takes) and sends them 20 times a second while armed, ramped over 0.4 s so nothing jumps; the
-  limit (30 % by default; D-pad ↑/↓ on the pad) scales everything. Let go and the command ramps
-  to zero. STOP (button, Space, Esc, B on the pad) disarms and coasts; so does a gamepad that
-  disappears while driving, and the Motors panel's deadman chain runs underneath. *Go
+  takes), ramped over 0.4 s so nothing jumps, and the bridge repeats the last command to the
+  blimp while armed; the limit (30 % by default; D-pad ↑/↓ on the pad) scales everything. Let go
+  and the command ramps to zero. STOP (button, Space, Esc, B on the pad, which also reaches the
+  bridge straight from the pad reader's thread) disarms and coasts; so does a gamepad that
+  disappears while driving, and the bridge's 3 s watchdog runs underneath. *Go
   autonomous* is the hand-off to `blimp_step()` on the blimp; it stays disabled until the
   firmware has its mode switch (`MODE_SET`, `docs/control-loop-plan.md` increment 3). `--mode
   pc|deck` sets the input from the command line; the input, the layout and the limit are
@@ -206,7 +208,7 @@ throwaway settings file, so it never changes the remembered window.
 | `widgets.py` | the painted pieces: top view, compass, ToF gauge, plots (the sparklines and the capture's trace plot), camera view, pills, STOP, the stick pads |
 | `theme.py` | the palette's tokens, fonts and the Qt style sheet; new UI keeps to these |
 | `fonts/` | Titillium Web and IBM Plex Mono with their OFL licences |
-| `blimp_bridge.py` | `blimp_link.BlimpLink` and `BlimpConsole` with the setpoint deadman; `DemoBlimp` runs `mock_blimp.py` in-process |
+| `blimp_bridge.py` | `blimp_link.BlimpLink` and `BlimpConsole`; owns the standing motor command, with the 3 s watchdog on the GUI thread; `DemoBlimp` runs `mock_blimp.py` in-process |
 | `camera.py` | `DemoCamera` (rows and frames) and the empty source used until the S3 relays camera data |
 | `wifi.py` | joins the blimp's access point: `netsh wlan` on Windows, `nmcli` on Linux; `python wifi.py status` from the command line |
 

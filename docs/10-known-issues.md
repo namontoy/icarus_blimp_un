@@ -37,7 +37,11 @@ motors 0.5 s after the last refresh; one repaint of a 400 s capture takes about 
 (measured), and a hand on the plot queues them. Analysis, the proposal (the bridge thread
 owns the standing command now; the blimp holds it with increment 3) and the bench tests for
 this and the two other candidate causes (link congestion during a download, the shared 5 V
-rail): `docs/motor-setpoint-ownership.md`. Not changed yet.
+rail): `docs/motor-setpoint-ownership.md`. Fixed the same day on branch `motor-ownership` (its
+§7): the bridge's thread owns the standing command and the window only sends changes and a
+100 ms ping; a window frozen for 3 s releases the motors and STOPs itself when it comes back;
+the trace plot repaints in 3 ms instead of a second (cached paths, per-column decimation, a 1 px
+pen). Checked offscreen; T1 on the bench is the confirmation.
 
 **2026-10-28, PID tuning plan and its instruments (branch `pid-tuning`).**
 `docs/pid-tuning-plan.md`: what the three loops' gains depend on (two plant numbers, a bandwidth

@@ -882,8 +882,15 @@ class TracePlot(QWidget):
     """A downloaded capture's traces (the Bench page): any number of series
     against time in seconds over a [t0, t1] window, auto-ranged, with a
     legend, and on hover a crosshair at the nearest sample with every series'
-    value in a tool tip. A few thousand points per series paint fast enough
-    as one path each."""
+    value in a tool tip. The crosshair repaints the widget on every mouse
+    move, so a repaint has to be cheap even for a 400 s capture (20,000
+    samples per series), and three things make it so (2026-10-28, when a
+    hand on this plot was starving the GUI thread and the motors cut): each
+    series is one QPainterPath built once per data, window and size and
+    kept; a dense series keeps only the lowest and highest sample of each
+    pixel column; and the pen is 1 px, which Qt strokes on its cosmetic fast
+    path (4.6 ms for 20,000 points against 333 ms for a 1.5 px pen with
+    round joins, measured)."""
     PAD = (56, 12, 10, 18)      # left, right, top, bottom
 
     def __init__(self):
@@ -891,6 +898,8 @@ class TracePlot(QWidget):
         self.t, self.series, self.unit, self.digits = [], [], '', 2
         self.win = None
         self.hover_x = None
+        self._ver = 0               # bumps with set_data, so a cache never outlives its data
+        self._cache = None          # (key, (a, b, i0, i1, lo, hi, [(colour, path)]))
         self.setMouseTracking(True)
         self.setMinimumHeight(160)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -900,10 +909,13 @@ class TracePlot(QWidget):
     def set_data(self, t, series, unit='', digits=2):
         """series: [(name, values, colour), ...], each aligned with t."""
         self.t, self.series, self.unit, self.digits = list(t), list(series), unit, digits
+        self._ver += 1
+        self._cache = None
         self.update()
 
     def set_window(self, t0, t1):
         self.win = None if t0 is None else (t0, t1)
+        self._cache = None
         self.update()
 
     def _span(self):
@@ -949,6 +961,73 @@ class TracePlot(QWidget):
             k -= 1
         return k
 
+    def _paths(self, w, h):
+        """The visible window, its range and one path per series at this
+        size, from the cache when data, window and size are unchanged."""
+        a, b = self._span()
+        i0, i1 = self._visible()
+        key = (self._ver, a, b, i0, i1, w, h)
+        if self._cache is not None and self._cache[0] == key:
+            return self._cache[1]
+        lo, hi = self._range(i0, i1)
+        pl, pr, pt, pb = self.PAD
+        X = lambda tt: pl + (tt - a) / (b - a) * (w - pl - pr)
+        Y = lambda v: pt + (1 - (v - lo) / (hi - lo)) * (h - pt - pb)
+        cols = max(1, w - pl - pr)
+        paths = [(col, self._trace_path(vals, i0, i1, X, Y, cols)) for _, vals, col in self.series]
+        res = (a, b, i0, i1, lo, hi, paths)
+        self._cache = (key, res)
+        return res
+
+    def _trace_path(self, vals, i0, i1, X, Y, cols):
+        """One series as a path. With more than two samples per pixel column,
+        each column keeps its lowest and highest sample, in time order: the
+        line covers the same pixels and the path is a tenth of the size. A
+        non-number breaks the line."""
+        pts = []                            # (x, y), or None for a gap
+        if i1 - i0 <= 2 * cols:
+            for k in range(i0, i1):
+                v = vals[k]
+                pts.append((X(self.t[k]), Y(v)) if isnum(v) else None)
+        else:
+            col, lo, hi = None, None, None
+
+            def flush():
+                if lo is not None:
+                    if lo is hi:
+                        pts.append(lo)
+                    else:
+                        pts.extend((lo, hi) if lo[0] <= hi[0] else (hi, lo))
+
+            for k in range(i0, i1):
+                v = vals[k]
+                if not isnum(v):
+                    flush()
+                    pts.append(None)
+                    col, lo, hi = None, None, None
+                    continue
+                x, y = X(self.t[k]), Y(v)
+                c = int(x)
+                if c != col:
+                    flush()
+                    col = c
+                    lo = hi = (x, y)
+                elif y < lo[1]:
+                    lo = (x, y)
+                elif y > hi[1]:
+                    hi = (x, y)
+            flush()
+        path, started = QPainterPath(), False
+        for pt_ in pts:
+            if pt_ is None:
+                started = False
+            elif started:
+                path.lineTo(QPointF(*pt_))
+            else:
+                path.moveTo(QPointF(*pt_))
+                started = True
+        return path
+
     def paintEvent(self, e):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -957,9 +1036,7 @@ class TracePlot(QWidget):
         p.setPen(QPen(C(T.BORDER), 1))
         p.drawRect(QRectF(0.5, 0.5, w - 1, h - 1))
         pl, pr, pt, pb = self.PAD
-        a, b = self._span()
-        i0, i1 = self._visible()
-        lo, hi = self._range(i0, i1)
+        a, b, i0, i1, lo, hi, paths = self._paths(w, h)
         X = lambda tt: pl + (tt - a) / (b - a) * (w - pl - pr)
         Y = lambda v: pt + (1 - (v - lo) / (hi - lo)) * (h - pt - pb)
         p.setFont(self._f)
@@ -999,21 +1076,9 @@ class TracePlot(QWidget):
             x -= 10
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setClipRect(QRectF(pl, pt, w - pl - pr, h - pt - pb))
-        for name, vals, col in self.series:
-            path, started = QPainterPath(), False
-            for k in range(i0, i1):
-                v = vals[k]
-                if not isnum(v):
-                    started = False
-                    continue
-                pt_ = QPointF(X(self.t[k]), Y(v))
-                if started:
-                    path.lineTo(pt_)
-                else:
-                    path.moveTo(pt_)
-                    started = True
-            p.setPen(QPen(C(col), 1.5, cap=Qt.PenCapStyle.RoundCap, join=Qt.PenJoinStyle.RoundJoin))
-            p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        for col, path in paths:
+            p.setPen(QPen(C(col), 1))       # 1 px: the cosmetic fast path, see the class docstring
             p.drawPath(path)
         k = self._nearest()
         if k is not None and i0 <= k < i1:

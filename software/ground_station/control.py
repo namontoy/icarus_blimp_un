@@ -17,11 +17,14 @@ until that packet exists (increment 3 of the plan).
 Two input modes, kept in QSettings and settable with --mode: PC (the
 keyboard, plus a gamepad if one is plugged in) and Steam Deck (the Deck's own
 controls through gamepad.py, the legend in the Deck's names, the hints hidden
-for its 1280 × 800 screen). The safety chain is the Flight page's: the
-setpoint is refreshed every TICK_MS only while armed, the bridge releases the
-motors 0.5 s after the refresh stops, and the blimp coasts on its own timers
-after that. STOP (the button, Space, Esc, or B on the pad) disarms and
-coasts; a pad that disappears while it was driving is a STOP; arming needs
+for its 1280 × 800 screen). The safety chain is the Flight page's: the page
+sends the mixed command every TICK_MS while armed (it ramps, so it changes
+every tick), the bridge's thread holds the last one and repeats it to the
+blimp, its watchdog releases the motors if the window stops responding for
+3 s, and the blimp coasts on its own timers after that. STOP (the button,
+Space, Esc, or B on the pad, which the pad reader's thread also sends to the
+bridge directly) disarms and coasts; a pad that disappears while it was
+driving is a STOP; arming needs
 telemetry from the blimp and the sticks at rest, so the motors never jump.
 Only one source drives at a time: arming here switches the Flight page's
 "Motors enabled" off, and the other way round (app.py).
@@ -137,10 +140,10 @@ class ControlPage(QWidget):
     axes) | Motors (the blimp's readback, as on the Flight page)."""
     armed_changed = pyqtSignal(bool)
     stop_requested = pyqtSignal()           # B on the pad: the window's STOP, flash included
-    HINT = ('Pick the input, arm, then fly: the page mixes surge, yaw and heave into the four motors and repeats '
-            'the setpoint 20 times a second while armed. Let go and everything ramps back to zero; STOP, a lost '
-            'pad or a frozen window coast the motors within half a second. Arming needs telemetry and the sticks '
-            'at rest. "Go autonomous" waits for the firmware\'s mode switch.')
+    HINT = ('Pick the input, arm, then fly: the page mixes surge, yaw and heave into the four motors, and the '
+            'station repeats the last command to the blimp until you change it. Let go and everything ramps back '
+            'to zero; STOP or a lost pad coast the motors at once, a window frozen for 3 s releases them. Arming '
+            'needs telemetry and the sticks at rest. "Go autonomous" waits for the firmware\'s mode switch.')
 
     def __init__(self, station, settings):
         super().__init__()
