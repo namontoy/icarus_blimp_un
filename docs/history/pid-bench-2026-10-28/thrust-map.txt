@@ -1,0 +1,9 @@
+motor  dir        n    a (gf)    b (gf)     R^2   F(1)   F(0.3)      u0  cell V
+RL     forward   21      5.31      0.25   0.997    5.6      0.6   0.123     nan
+RL     reverse   21      8.42      0.63   0.996    9.0      0.9   0.122     nan
+RR     forward   21      6.44      2.35   0.989    8.8      1.3   0.098     nan
+RR     reverse   21     10.69      3.90   0.994   14.6      2.1   0.097     nan
+Rule 13: four motors forward at full duty give 28.7 gf (missing motors taken as the mean) (RL, RR measured of 4), cap 100 gf: under the cap
+  params.c MOTOR_MAX_GF: 8.8 (the strongest; the weakest is 5.6, spread 45 %). The Rule 13 basis is the strongest motor; a per-motor curve in the firmware is what closes the spread
+  reverse / forward at full duty: RL 1.63, RR 1.66 (AGENTS.md: about 0.74)
+written to docs/history/pid-bench-2026-10-28/thrust-map.json
