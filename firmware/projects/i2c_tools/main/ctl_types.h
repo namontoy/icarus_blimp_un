@@ -140,8 +140,9 @@ typedef struct {
     cam_result_t cam[CTL_CAM_COUNT];
     bool         cam_fresh[CTL_CAM_COUNT];
 
-    /* battery divider on GPIO1 (ADC1_CH0): raw count, calibrated millivolts
-       at the pin before the divider ratio, and the running average after it */
+    /* battery divider on CONFIG_BATTERY_ADC_GPIO (GPIO1, ADC1_CH0, by
+       default; cmd_battery.c): raw count, calibrated millivolts at the pin
+       before the divider ratio, and the running average after it */
     uint16_t bat_raw;
     uint16_t bat_pin_mv;
     uint16_t bat_mv;

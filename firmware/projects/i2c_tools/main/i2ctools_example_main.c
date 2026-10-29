@@ -27,6 +27,7 @@
 #include "sensor_stream.h"
 #include "ctl_task.h"
 #include "capture.h"
+#include "cmd_battery.h"
 
 static const char *TAG = "i2c-tools";
 
@@ -157,6 +158,7 @@ void app_main(void)
     register_sensors();
     register_ctl();
     register_capture();
+    register_battery();
     register_exit();
 
     /*
@@ -204,6 +206,15 @@ void app_main(void)
     }
 
     /*
+     * The battery ADC (cmd_battery.c) is set up before the control task,
+     * whose read stage samples it every tick. Not fatal: the records then
+     * carry 0 mV and 'battery' says why.
+     */
+    if (battery_init() != ESP_OK) {
+        ESP_LOGE(TAG, "battery monitor unavailable - no voltage in the records");
+    }
+
+    /*
      * The fixed-rate control task (ctl_task.c) runs on core 1 from here on.
      * In this increment its stages are empty but for two: the read stage
      * peeks the sensor stream's latest sample (the stream still owns the
@@ -239,7 +250,8 @@ void app_main(void)
     printf(" | 13. Try 'sensors' for the stream the ground station plots  |\n");
     printf(" | 14. Try 'ctl' for the control loop and its timing          |\n");
     printf(" | 15. Try 'capture' to record a minute of the loop's records |\n");
-    printf(" | 16. Type 'exit' or 'quit' to see how to leave the monitor  |\n");
+    printf(" | 16. Try 'battery' for the motor cell's voltage on GPIO1    |\n");
+    printf(" | 17. Type 'exit' or 'quit' to see how to leave the monitor  |\n");
     printf(" |                                                            |\n");
     printf(" ==============================================================\n\n");
 
