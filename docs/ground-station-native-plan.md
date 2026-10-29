@@ -37,7 +37,7 @@ Decisions:
 
 | File | Fate |
 |---|---|
-| `blimp_bridge.py` | **kept as is**: BlimpLink and console, 20 Hz stream, 0.5 s deadman, `DemoBlimp`. Only the wording "from the page" becomes "from the GUI". |
+| `blimp_bridge.py` | **kept as is**: BlimpLink and console, 20 Hz stream, 0.5 s deadman, `DemoBlimp`. Only the wording "from the page" becomes "from the GUI". (2026-10-28: the bridge now owns the standing command, with a 3 s watchdog on the GUI thread; `docs/motor-setpoint-ownership.md` §7.) |
 | `camera.py` | **kept**: `DemoCamera`, `SerialCamera`, `make_camera`. Frames still arrive as PNG bytes; Qt decodes them with `QImage.fromData`. Docstring updated. |
 | `wifi.py` | **kept unchanged** |
 | `server.py`, `window.py`, `web/` | **deleted** |
@@ -69,9 +69,10 @@ and the console worker thread. It is ported nearly line for line from `server.Hu
 
 It is unchanged in substance from `docs/ground-station-plan.md` §6.
 
-- While "Motors enabled" is on, a GUI-thread `QTimer` (100 ms) calls `station.set_motors(...)`.
-  If the GUI thread freezes, the refresh stops, the bridge's deadman releases within 0.5 s and the
-  firmware coasts. This is the same chain the browser had.
+- While "Motors enabled" is on, the bridge's thread repeats the standing command; the window
+  sends changes and a 100 ms ping (since 2026-10-28; before that a GUI-thread `QTimer` refreshed
+  the setpoint against a 0.5 s deadman, and a long repaint cut the motors). If the GUI thread
+  freezes for 3 s, the bridge releases the motors and the firmware coasts.
 - STOP: the papaya button, `Esc` always, and `Space` unless the console input has focus (the
   page's rule), through application-wide `QShortcut`s. It sends `MOTOR_STOP` three times,
   zeroes the sliders and disables the motors.

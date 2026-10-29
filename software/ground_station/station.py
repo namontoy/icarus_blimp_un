@@ -22,7 +22,7 @@ from PyQt6.QtGui import QImage
 import blimp_link as bl
 import blimp_log
 
-from .blimp_bridge import DEADMAN_S, STREAM_HZ, BlimpBridge, DemoBlimp
+from .blimp_bridge import STREAM_HZ, WATCHDOG_S, BlimpBridge, DemoBlimp
 from .camera import make_camera
 from .gamepad import Gamepad, empty_state
 from .wifi import Wifi, WifiError
@@ -97,7 +97,7 @@ class Station(QObject):
         self.blimp.start()
         self.camera = make_camera(self.demo, self._cam_frame, self._cam_row, self.cam_status.emit, self.log)
         self.camera.start()
-        self.pad = Gamepad().start()
+        self.pad = Gamepad(on_press=self._pad_press).start()
         threading.Thread(target=self._console_loop, daemon=True, name='console').start()
         threading.Thread(target=self._cap_loop, daemon=True, name='capture').start()
         self.log('info', 'ground station up: %s' % ('demo blimp and demo camera' if self.demo else
@@ -120,10 +120,12 @@ class Station(QObject):
     # ------------------------------------------------------------- periodic
 
     def tick(self):
+        self.blimp.ping()                   # this thread is alive: the bridge's watchdog counts on it
         snap = self.blimp.snapshot()
         self.alive = bool(snap['alive'])
         self.tel.emit({'alive': snap['alive'], 'age_s': snap['age_s'], 'rx': snap['rx'], 'bad': snap['bad'],
-                       'streaming': snap['streaming'], 'tel': snap['tel']})
+                       'streaming': snap['streaming'], 'standing': snap['standing'], 'tripped': snap['tripped'],
+                       'tel': snap['tel']})
         self._ticks += 1
         if self.radio is not None and self._ticks % WIFI_TICKS == 0:
             st = self.wifi_status()
@@ -152,10 +154,20 @@ class Station(QObject):
         return self.pad.state()
 
     def set_motors(self, cmd):
-        self.blimp.set_motors(cmd)
+        """The command stands on the bridge, which repeats it to the blimp
+        until the next one or a stop; the pages call this on change."""
+        return self.blimp.set_motors(cmd)
 
     def stop(self, brake=False):
         self.blimp.stop(brake)
+
+    def _pad_press(self, button):
+        """The gamepad reader's thread, on a press edge. B is STOP straight to
+        the bridge, so it reaches the blimp even while the GUI thread is
+        busy; the Control page sees the same press on its own tick and does
+        the window's part (disarm, the flash)."""
+        if button == 'b' and self.blimp is not None and not self._closed:
+            self.blimp.stop(False)
 
     # --------------------------------------------------------------- camera
 
@@ -300,8 +312,8 @@ class Station(QObject):
     # ---------------------------------------------------------------- close
 
     @property
-    def deadman_s(self):
-        return DEADMAN_S
+    def watchdog_s(self):
+        return WATCHDOG_S
 
     @property
     def stream_hz(self):

@@ -149,7 +149,7 @@ only, for now), `wifi_action('connect' | 'disconnect')`, `capture(action, second
 Control page at its own 20 Hz tick rather than signalled, since a stick is a continuous input;
 2026-10-28), and `close()`. The demo flag and the blimp
 address that the old `hello` message carried are attributes of the station (`demo`,
-`blimp_host`), and so are the deadman and stream rate (`deadman_s`, `stream_hz`).
+`blimp_host`), and so are the watchdog and stream rate (`watchdog_s`, `stream_hz`).
 
 The header's **Join blimp Wi-Fi** button has the station join the `ICARUS-…` access point
 (`wifi.py`: `netsh wlan` on Windows by profile name, since Windows 11 withholds scans from
@@ -173,12 +173,16 @@ what it found.
 
 ## 6. Safety, end to end
 
-- A thrust command is a standing command only while it keeps arriving. The browser sends its
-  motor setpoint at least 5 times a second while motors are enabled; the back end repeats it to
-  the blimp at 20 Hz but **stops within 500 ms of the last browser update**; the firmware
-  coasts 500 ms after the last packet (link timeout) or 1 s after the last thrust command
-  (motor failsafe). A closed tab, a frozen browser, a dead laptop and a dropped Wi-Fi all end
-  in coasting motors within about a second.
+- A thrust command is a standing command only while it keeps arriving at the blimp, and since
+  2026-10-28 the bridge's own thread is what keeps it arriving: the window hands it the command
+  when something changes, and the thread repeats it at 20 Hz for as long as it stands. The GUI
+  thread's liveness is a 100 ms ping; **3 s without one releases the motors**, logs a crit event
+  and latches the bridge until the window STOPs (which it does itself when it comes back). The
+  firmware coasts 500 ms after the last packet (link timeout) or 1 s after the last thrust
+  command (motor failsafe). A closed window, a dead laptop and a dropped Wi-Fi end in coasting
+  motors within about a second; a frozen window within three. Until 2026-10-28 the window had
+  to refresh the setpoint every 100 ms against a 0.5 s deadman, and a long repaint cut the
+  motors: `docs/motor-setpoint-ownership.md`.
 - STOP (button, Space, Escape) sends `MOTOR_STOP` three times and disables the motor controls.
 - The thrust limit defaults to 30 % and clamps every slider; raising it is a deliberate act.
 - Motors are off until the operator enables them; enabling never moves a motor by itself.

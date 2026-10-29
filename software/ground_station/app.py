@@ -6,12 +6,15 @@
 One process: the Station (station.py) runs the blimp link, the camera and the
 Wi-Fi on their own threads and signals the window on the GUI thread.
 
-Safety on this side, as on the page it replaces: setpoints go out 10 times a
-second only while "Motors enabled" is on; STOP (the button, Esc, or Space
-when no text field has focus) sends a stop and switches the motors off;
-closing the window stops the motors first. Behind that, the bridge releases
-the motors if the setpoint stops for 0.5 s, and the blimp coasts on its own
-timers if the link stops.
+Safety on this side: the bridge's thread owns the standing motor command and
+repeats it to the blimp while "Motors enabled" is on or the Control page is
+armed; the window only sends changes, STOP (the button, Esc, or Space when
+no text field has focus; it also switches the motors off) and, from the
+station's tick, a 100 ms ping that proves this thread alive. Closing the
+window stops the motors first. Behind that, the bridge's watchdog releases
+the motors if the window stops responding for 3 s (and the window STOPs
+itself when it comes back: on_tel), and the blimp coasts on its own timers
+if the link stops. docs/motor-setpoint-ownership.md has the history.
 """
 import argparse
 import signal
@@ -263,8 +266,8 @@ class MainWindow(QMainWindow):
         station.cap.connect(self.bench.capture.on_cap)
         station.cap_data.connect(self.bench.on_data)
         # One source drives the motors at a time: arming the Control page
-        # switches the Flight page's stream off and the other way round, else
-        # two 10 Hz setpoints would alternate on the wire.
+        # switches the Flight page off and the other way round, else two
+        # standing commands would alternate on the wire.
         self.control.armed_changed.connect(lambda on: on and self.motors.enabled and self.motors.set_enabled(False))
         self.motors.enable.toggled.connect(lambda on: on and self.control.disarm(send_stop=False))
         self.control.stop_requested.connect(self.stop)
@@ -288,6 +291,11 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ station in
 
     def on_tel(self, m):
+        if m.get('tripped'):
+            # The bridge's watchdog released the motors while this thread was
+            # stuck. Make it the operator's STOP: the controls go off, the
+            # latch clears (blimp_bridge.py), the button flashes.
+            self.stop()
         was_alive = self.alive
         self.tel_at, self.alive = time.monotonic(), bool(m.get('alive'))
         self.header.on_tel(m)

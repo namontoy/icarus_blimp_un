@@ -2,12 +2,13 @@
 
 **Date:** 2026-10-28
 **Branch:** `s3-wireless-link`
-**Status:** analysis and proposal, no code changed. Measured figures are marked; the rest is
+**Status:** the analysis (§1–§6, written on the morning of 2026-10-28) and what was done the same
+day on branch `motor-ownership` (§7). Measured figures are marked; the rest is
 reasoned from the code as it is today. The bench observation that started this: with the motors
 driven from the Flight page, going to the Bench tab and moving the mouse or using its controls
 made the motors cut and restart.
 
-## 1. The chain today
+## 1. The chain as it was (until 2026-10-28; §7 has the new one)
 
 Three timers decide whether a motor turns, and every one of them can only ever stop it:
 
@@ -155,3 +156,62 @@ every drop is a 500 ms link-timeout coast followed by a restart, unrelated to th
 T1 is the one that reproduces the report; run it first. T2 and T3 are worth one bench session each
 because the download and the console are things the operator will do with the motors on, and
 cause 3 is the one no software change can fix.
+
+## 7. What was done (2026-10-28, branch `motor-ownership`)
+
+Options A and B of §4, as §5 recommended; C and D stay with control-loop plan increment 3.
+
+**B, the bridge owns the standing command** (`blimp_bridge.py`, `station.py`, `panels.py`,
+`control.py`, `app.py`, `gamepad.py`):
+
+- `BlimpBridge.set_motors()` sets the standing command, and the bridge's thread repeats it to the
+  blimp at 20 Hz for as long as it stands, on its own clock. The Motors panel sends on change
+  only (a slider, the limit, Zero, Enable); its 100 ms refresh timer is gone. The Control page
+  still sends every 50 ms while armed, because its ramp changes the command every tick; a stall
+  leaves the last command standing.
+- Liveness is a ping: the station's 100 ms tick calls `bridge.ping()`. If the pings stop for
+  `WATCHDOG_S` = 3 s while a command stands, the bridge sends `MOTOR_STOP` twice, drops the
+  command, logs a `crit` event and latches: `set_motors()` is refused until `stop()`. The window
+  learns of the trip from the snapshot (`tel['tripped']`) when its thread comes back and makes it
+  the operator's STOP (`MainWindow.on_tel`): controls off, latch cleared, button flashed. A
+  thawed window therefore never restarts the motors by itself.
+- B on the gamepad reaches `bridge.stop()` from the pad reader's thread (`Gamepad(on_press=…)`,
+  `Station._pad_press`), GUI thread or not; the Control page still does the window's part on its
+  own tick.
+- The firmware's timers are untouched: 500 ms link timeout, 1 s motor failsafe.
+
+**A, the trace plot** (`widgets.TracePlot`): one `QPainterPath` per series, built once per data,
+window and size and cached; a series denser than two samples per pixel column keeps only each
+column's lowest and highest sample, in time order (the line covers the same pixels; on a
+20,000-sample series with a gap and a spike the decimated and the full path's bounding boxes agree
+within a pixel); and the pen is 1 px, which Qt strokes on its cosmetic fast path. The pen was most
+of it: a 1.5 px pen with round joins goes through the general stroker.
+
+Measured offscreen on the Windows laptop (a 1200 × 420 plot, three series, painted into an RGB32
+image like the window's backing store; medians of 10):
+
+| | 60 s, 3,000 samples × 3 | 400 s, 20,000 samples × 3 |
+|---|---|---|
+| hover repaint, old pen, paths already cached | 161 ms | 1,095 ms |
+| hover repaint, 1 px pen and decimation | 2.3 ms | 3.4 ms |
+| first paint after a download (the paths are built once) | 44 ms | 83 ms |
+| one `drawPath` of 20,000 points, 1.5 px pen with round joins | | 333 ms |
+| the same path, 1 px pen | | 4.6 ms |
+
+§2's 231 ms was measured in the window on a narrower plot; the figures here are the probe's and
+comparable only with each other. Before the cache the paths were rebuilt on every repaint, which
+added about 110 ms to each of the old figures on the 400 s capture.
+
+**Checked offscreen** (`--demo`, 30 checks, 2026-10-28): a command stands 1.5 s with no refresh at
+all; with no pings the bridge releases 3.1 s after the last sign of life, logs `crit`, refuses
+`set_motors()` and nothing restarts; STOP clears the latch; pings every 100 ms keep a command
+standing for 4 s. In the window: a GUI thread blocked for 1.2 s with a duty held leaves the motors
+running (the old chain cut them at 0.5 s); one blocked for 3.6 s ends with the motors released,
+"Motors enabled" off and the latch cleared; the Control page's command survives a 1.2 s stall and
+ramps to zero on key-up; B from the reader's thread stops the blimp while the GUI thread is
+blocked. The earlier Control-page checks still pass. Not yet run on the vehicle: T1 of §6 is the
+confirmation, and T2 to T4 are still worth their sessions.
+
+**For the operator** nothing changes in the hands: the Motors and Control hints now say that a
+command stands until changed and that a window frozen for 3 s releases the motors. What was traded:
+a frozen window keeps the motors going for up to 3 s instead of 0.5 s, as §5 accepted.
