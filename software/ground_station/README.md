@@ -68,19 +68,44 @@ the menu bar. Not tried.
 
 ### Steam Deck (SteamOS)
 
-The Deck is a Linux computer with a gamepad built in, so the Linux lines above apply: in
-Desktop mode, from a terminal, install into a virtual environment (SteamOS's root filesystem is
-read-only) and run `python3 -m software.ground_station --mode deck`. The Wi-Fi button goes
-through NetworkManager, which SteamOS runs. The Deck's controls reach the window through
-`gamepad.py`, which reads the kernel's event devices and takes the first one that has a
-gamepad's buttons; the `hid-steam` driver presents them that way and stops their keyboard-and-
-mouse emulation while the device is held open. None of this has run on a Deck yet
-(2026-10-28): the event parsing is checked with synthetic events, the Windows side with XInput.
-`python software/ground_station/gamepad.py` prints what the reader sees and is the first thing
-to run there; permission denied on `/dev/input` means the user needs the `input` group or a
-udev rule. Launching the station from Gaming mode as a non-Steam game is another matter: Steam
-Input would then present a virtual Xbox pad, which the same reader takes, but the window has
-not been tried under gamescope.
+The Deck is a Linux computer with a gamepad built in, so the Linux lines above apply, with one
+rule learned on 2026-10-29: **run the station from Gaming mode, as a non-Steam game**. The Deck's
+controls only reach a program through Steam Input, which presents them as a virtual "Microsoft
+X-Box 360 pad" that `gamepad.py` reads. In Desktop mode Steam Input keeps its Desktop Layout
+(sticks as mouse and arrow keys, A and B as Enter and Escape) whatever layout the shortcut is
+given, and the virtual pad stays silent: five minutes of stick and button input were watched on
+it and nothing arrived, while the arrow keys moved the page's yaw and heave and Escape sent a
+STOP, which looks like a half-working pad and is not one. In Gaming mode the shortcut's own
+layout applies and both sticks, A, B and the D-pad arrive as analogue axes and buttons.
+
+Setup, once, in Desktop mode from a Konsole terminal (SteamOS's root filesystem is read-only,
+hence the virtual environment):
+
+```
+cd $HOME
+git clone -b s3-wireless-link https://github.com/namontoy/icarus_blimp_un.git
+cd icarus_blimp_un
+python3 -m venv .venv
+.venv/bin/python -m pip install -r software/ground_station/requirements.txt
+```
+
+Then in the Steam client on the desktop: Games, "Add a Non-Steam Game to My Library…", Browse
+with the file type set to All Files, pick `software/ground_station/steamdeck.sh` inside the
+clone, Add. On the entry's library page, the controller icon next to Play, templates,
+**Gamepad**, apply; and `--demo` under Properties, Launch Options, for a look without the blimp
+(remove it for the real thing). Return to Gaming Mode (the desktop icon, or
+`steamos-session-select gamescope` from a terminal) and launch the entry from the Library's
+Non-Steam tab. `steamdeck.sh` runs the station with `--mode deck` from the repo's `.venv` and
+writes its output to `/tmp/ground_station.log`, the place to look when Play shows nothing.
+
+Checked on a Deck on 2026-10-29 (SteamOS 3.8.16, Python 3.13, PyQt6 6.11): the window at
+1280 × 800, both sticks on the Control page, A arms, B stops (once from the pad reader's thread
+and once from the window, as designed), the D-pad steps the limit. Not yet tried there: joining
+the blimp's Wi-Fi from the header (NetworkManager through `wifi.py`), and a flight. From Konsole
+in Desktop mode the window runs too, for the keyboard, with the gamepad caveat above.
+`python software/ground_station/gamepad.py` prints what the reader sees; permission denied on
+`/dev/input` means the user needs the `input` group or a udev rule, which the Deck's own user
+does not need (the seat's ACL covers its pad).
 
 ### Windows and Linux side by side
 
@@ -205,6 +230,7 @@ throwaway settings file, so it never changes the remembered window.
 | `gamepad.py` | the gamepad reader: XInput on Windows, the kernel's event devices on Linux and the Steam Deck; `python gamepad.py` prints what it sees |
 | `bench.py` | the Bench page: the capture panel and the trace viewer |
 | `screens.py` | renders every page to PNG offscreen, PC and Steam Deck sets, for a look without hardware |
+| `steamdeck.sh` | the Steam Deck launcher: the target of Steam's "Add a Non-Steam Game", runs the station with `--mode deck` from the repo's `.venv`, output in `/tmp/ground_station.log` |
 | `widgets.py` | the painted pieces: top view, compass, ToF gauge, plots (the sparklines and the capture's trace plot), camera view, pills, STOP, the stick pads |
 | `theme.py` | the palette's tokens, fonts and the Qt style sheet; new UI keeps to these |
 | `fonts/` | Titillium Web and IBM Plex Mono with their OFL licences |
