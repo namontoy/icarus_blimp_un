@@ -107,7 +107,8 @@ address toward the blimp, so a network joined by hand shows as joined too.
   arrows on the top view are the blimp's readback, not the slider. The window repeats the
   setpoint 10 times a second; the bridge stops repeating it 0.5 s after the window goes quiet,
   and the firmware coasts on its own timers after that. Closing the window stops the motors. Remove the propellers on the bench.
-- **Sensors**: live numbers, 10 s plots of the accelerometer and gyroscope (hover for values),
+- **Sensors**: live numbers, 10 s plots of the accelerometer and gyroscope (hover for values; every
+  packet the blimp sends is plotted, up to 20 a second),
   roll and pitch from the accelerometer, the magnetic heading, the range below with the
   1.85–2.25 m hover band, the barometer and the magnetometer. The firmware streams them from boot (`sensors` in
   the console shows what it found). A console sensor command (`imu`, `mag`, `baro`, `tof`)
@@ -120,7 +121,8 @@ address toward the blimp, so a network joined by hand shows as joined too.
   packet for them. The picture view with Grab frame, Live and Rotate 180° (display only) is
   kept for the occasional calibration frame the S3 may relay later (`docs/inter-board-link-plan.md`);
   outside the demo the two buttons are disabled.
-- **Bench** (the second tab under the header): the blimp's capture. Set a length and press
+- **Bench** (the second tab under the header): the blimp's capture. Set a length (the box is
+  bounded by the blimp's own buffer, 400 s by default, once the page has asked it) and press
   *Start*; the blimp records one 72-byte record per 20 ms of its control loop into PSRAM (IMU,
   magnetometer and barometer, the range, the motor readback, the loop's execution time, which
   sensors were fresh). *Download* fetches it over the link in chunks (the ones that are lost

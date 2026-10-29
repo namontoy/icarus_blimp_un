@@ -71,8 +71,9 @@ esp_err_t motors_init(void);
  * GPIOs in Kconfig rather than by negating commands in the controller.
  *
  * The magnitude is mapped through the break-away deadband (see
- * motors_set_deadband), so 0.01 produces the smallest duty that actually
- * turns the prop rather than a duty that only heats the winding.
+ * motors_set_deadband). With the default deadband of 0 the magnitude is the
+ * duty itself; with a measured one, 0.01 produces the smallest duty that
+ * actually turns the prop rather than a duty that only heats the winding.
  *
  * Rejects a non-finite throttle with ESP_ERR_INVALID_ARG rather than passing
  * a NaN through to the duty arithmetic - a NaN out of a controller must not
@@ -99,8 +100,9 @@ esp_err_t motors_set_decay(motor_decay_t mode);
  * Smallest duty, 0.0 to 0.9, that is assumed to break the prop away from
  * rest. Thrust commands are mapped onto [deadband, 1.0].
  *
- * This is a per-motor physical property and the default is only a starting
- * guess - measure it with 'motor --sweep' and set it from the result.
+ * This is a per-motor physical property. The default is 0 (command = duty)
+ * until it has been measured - measure it with 'motor --sweep' and set it
+ * from the result.
  */
 esp_err_t motors_set_deadband(float deadband);
 float motors_get_deadband(void);

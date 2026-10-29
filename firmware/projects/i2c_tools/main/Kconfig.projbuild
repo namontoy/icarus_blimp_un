@@ -107,15 +107,19 @@ menu "Motor driver (DRV8833)"
     config MOTOR_DEADBAND_PERMILLE
         int "Break-away duty in parts per thousand"
         range 0 900
-        default 120
+        default 0
         help
             Smallest duty that actually starts the prop turning. Thrust
             commands are mapped onto [deadband, 1.0] so that a small command
             produces a small thrust instead of nothing at all.
 
-            120 is only a plausible starting point for a small brushed motor.
-            Measure the real value per motor with 'motor -m 1A --sweep' and
-            set it from what you see.
+            0 means no mapping: a command is its duty, so 0.05 is 5 % duty,
+            which is what the ground station's sliders and the readback
+            assume. The earlier default of 120 was an unmeasured guess that
+            turned the smallest slider step (0.003) into 12.3 % duty, and
+            the motors ran far faster than the slider said (2026-10-28).
+            Measure the real value per motor with 'motor -m FL --sweep'
+            before you set a non-zero one.
 
     config MOTOR_FAILSAFE_MS
         int "Coast all motors after this long with no command; 0 disables"
@@ -220,7 +224,7 @@ menu "Sensor stream (the packet the ground station plots)"
     config SENSOR_STREAM_HZ
         int "Sample and packet rate in Hz"
         range 1 50
-        default 20
+        default 50
         help
             The IMU, the magnetometer and the rangefinder are polled at this
             rate; the barometer runs on its own slower schedule, see
@@ -228,6 +232,12 @@ menu "Sensor stream (the packet the ground station plots)"
             is two ticks. The link sends at most one SENSORS packet per
             telemetry tick (NET_LINK_TELEMETRY_HZ), so a faster stream only
             means fresher samples, not more packets.
+
+            50 Hz, the control loop's own rate, since 2026-10-28: the loop
+            peeks this stream's latest sample every 20 ms, and at the old
+            20 Hz two or three records in a row carried the same IMU
+            sample, which read as steps in the traces. At 50 Hz every record
+            can carry a new one. Not yet run on hardware at this rate.
 
 endmenu
 
@@ -256,12 +266,17 @@ menu "Capture (the control loop's records, kept in PSRAM)"
     config CAPTURE_MAX_SECONDS
         int "Longest capture in seconds"
         range 1 600
-        default 120
+        default 400
         help
             The buffer is allocated once at boot for this many seconds of
-            records: 3.6 kB per second (72 bytes at 50 Hz), so 120 s is
-            432 kB of the 2 MB PSRAM. A capture asks for its own length at
-            start, up to this. Without PSRAM the firmware falls back to a
-            10 s buffer in internal RAM and says so in the boot log.
+            records: 3.6 kB per second (72 bytes at 50 Hz), so 400 s is
+            1.4 MB of the 1594 kB of PSRAM measured free on 2026-10-27 with
+            Wi-Fi up. A capture asks for its own length at start, up to
+            this; a longer request is refused, not shortened. If this much
+            cannot be allocated the firmware takes the largest free PSRAM
+            block instead, then falls back to a 10 s buffer in internal RAM,
+            and says so in the boot log either way. The ground station reads
+            the real limit from the blimp. Longer than the buffer means
+            streaming the records as they are made, not implemented.
 
 endmenu

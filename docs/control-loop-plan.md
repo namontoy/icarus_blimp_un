@@ -189,9 +189,14 @@ and their scales travel in the capture header. And the buffer is a linear captur
 requested length, not a ring: a bench session is a minute long, the question it answers is
 "what happened during this test", and a linear buffer lets the link read records while the
 loop keeps writing (records below the count never change). `capture_init()` allocates
-`CONFIG_CAPTURE_MAX_SECONDS` of records (120 s, 432 kB) once at boot in PSRAM, with a 10 s
-fallback in internal RAM when there is none. A ring with a pre-trigger can be added behind the
-same API if a flight log asks for one.
+`CONFIG_CAPTURE_MAX_SECONDS` of records once at boot in PSRAM, with a 10 s fallback in internal
+RAM when there is none. A ring with a pre-trigger can be added behind the same API if a flight
+log asks for one. **2026-10-28:** the default is 400 s (1.4 MB of the 1594 kB measured free),
+up from 120 s; if that much is not free the largest free PSRAM block is taken instead; and a
+request longer than the buffer is refused (`LOG_INFO` result 5, `ESP_ERR_INVALID_SIZE`) rather
+than shortened, because a capture that ends before the time asked for looked like a broken
+progress bar on the bench. Longer than the buffer means streaming the records as they are made,
+which the stable link now allows; not implemented.
 
 **D8. Dump over UDP with re-request (built 2026-10-27).** One host-to-blimp packet,
 `LOG_CMD` (20 B): `INFO`; `START` with the length in seconds (0 for the firmware's 60 s
@@ -255,7 +260,9 @@ fresh when the frame sequence number moved.
    cloned read-only and `docs/reuse_log.md` started.
 2. **Sensors in the loop**: the schedule above, DLPF, barometer in normal mode, ToF polled,
    battery ADC, camera mailboxes; `sensor_stream.c` retired, and with it the interim
-   `sensor_stream_latest_raw()` peek that `read_sensors()` does today; SENSORS packet and the console
+   `sensor_stream_latest_raw()` peek that `read_sensors()` does today (the stream runs at 50 Hz
+   since 2026-10-28 so that every record can carry a new IMU sample; the MPU-6050's DLPF is set
+   to 21 Hz at attach since the same day, `docs/sensor-configuration-report.md`); SENSORS packet and the console
    sensor commands from the loop's copy; `ctl_suspend()`/`ctl_resume()`; `params_t`; the
    `CONTROL` packet (timing statistics, battery, bus state; mode and latches zero until
    increment 3) and `blimp_link.py status` showing it.

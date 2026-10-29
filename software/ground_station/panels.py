@@ -124,7 +124,10 @@ class MotorsPanel(Panel):
             'bridge releases the motors within 0.5 s and the blimp coasts on its own timers.')
 
     def __init__(self, station):
-        super().__init__('Motors', "signed thrust, −1 … +1 · bars show the blimp's readback")
+        # The value is the PWM duty as a signed fraction: 0.003 is 0.3 %. That
+        # holds only while the firmware's deadband is 0 (its default since
+        # 2026-10-28); a non-zero one maps a command c to db + (1 − db)·|c|.
+        super().__init__('Motors', "signed PWM duty, −1 … +1 · bars show the blimp's readback")
         self.station = station
         self.enabled = False
         self.limit = 0.30
@@ -152,7 +155,7 @@ class MotorsPanel(Panel):
         for i, m in enumerate(MOTORS):
             sl = ThrustSlider()
             sl.setEnabled(False)
-            sl.setToolTip('%s thrust, percent of the limit · double-click for zero' % m)
+            sl.setToolTip('%s duty, percent of the limit · double-click for zero' % m)
             sl.valueChanged.connect(lambda v, m=m: self._slid(m, v))
             # Steps of 1 on the slider's −100…100 scale, i.e. 1 % of the limit.
             # setValue() goes through valueChanged, so a step follows the pair
@@ -258,7 +261,7 @@ class MotorsPanel(Panel):
 
     def _limit_changed(self, pct):
         self.limit = clamp(pct / 100, 0.05, 1.0)
-        self.station.log('warn' if self.limit > 0.5 else 'info', 'thrust limit %d %%' % round(self.limit * 100))
+        self.station.log('warn' if self.limit > 0.5 else 'info', 'duty limit %d %%' % round(self.limit * 100))
         self.send()
 
     # readback in

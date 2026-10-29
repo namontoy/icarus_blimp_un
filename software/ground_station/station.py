@@ -73,7 +73,7 @@ class Station(QObject):
         self.radio = None
         self.blimp = None
         self.camera = None
-        self._last_sensors_rx = -1
+        self.alive = False                  # telemetry within the last second, as of the last tick
         self._ticks = 0
         self._wifi_last = None
         self._console_q = collections.deque()
@@ -89,9 +89,9 @@ class Station(QObject):
         if self._wifi_opts is not None:
             self.radio = Wifi(**self._wifi_opts)
         if self.demo:
-            self.blimp = DemoBlimp(self.log)
+            self.blimp = DemoBlimp(self.log, self._packet)
         else:
-            self.blimp = BlimpBridge(self.blimp_host, 7200, 7201, self.log)
+            self.blimp = BlimpBridge(self.blimp_host, 7200, 7201, self.log, self._packet)
         self.blimp.start()
         self.camera = make_camera(self.demo, self._cam_frame, self._cam_row, self.cam_status.emit, self.log)
         self.camera.start()
@@ -118,17 +118,24 @@ class Station(QObject):
 
     def tick(self):
         snap = self.blimp.snapshot()
+        self.alive = bool(snap['alive'])
         self.tel.emit({'alive': snap['alive'], 'age_s': snap['age_s'], 'rx': snap['rx'], 'bad': snap['bad'],
                        'streaming': snap['streaming'], 'tel': snap['tel']})
-        if snap['sen'] is not None and snap['sensors_rx'] != self._last_sensors_rx:
-            self._last_sensors_rx = snap['sensors_rx']
-            self.sen.emit(dict(snap['sen']))
         self._ticks += 1
         if self.radio is not None and self._ticks % WIFI_TICKS == 0:
             st = self.wifi_status()
             if st != self._wifi_last:           # a manual join or drop shows up here too
                 self._wifi_last = st
                 self.wifi.emit(st)
+
+    def _packet(self, kind, d):
+        """Receive thread: every SENSORS packet reaches the window, in the
+        order it arrived. Until 2026-10-28 the window took the newest one at
+        each 10 Hz tick, so half of a 20 Hz stream was dropped and the plots
+        and the capture disagreed; a signal emitted here is queued onto the
+        GUI thread by Qt, one per packet."""
+        if kind == 'sensors' and not self._closed:
+            self.sen.emit(dict(d))
 
     # --------------------------------------------------------------- motors
 

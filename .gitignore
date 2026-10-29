@@ -40,6 +40,8 @@ venv/
 .ruff_cache/
 .pytest_cache/
 .mypy_cache/
+# clangd index, made beside compile_commands.json
+.cache/
 
 # MuJoCo
 MUJOCO_LOG.TXT

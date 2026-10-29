@@ -69,7 +69,11 @@ class CapturePanel(Panel):
         self.seconds.setValue(60)
         self.seconds.setKeyboardTracking(False)
         self.seconds.setFixedWidth(72)
-        self.seconds.setToolTip('length of the next capture; the blimp clamps it to its buffer')
+        self.seconds.setToolTip("length of the next capture, up to the blimp's buffer")
+        # The blimp's buffer bounds the length (LOG_INFO.max_seconds). Until
+        # it has answered once, the box allows anything and the blimp refuses
+        # what does not fit; it never shortens a capture (2026-10-28).
+        self.max_l = label('buffer size: ask the blimp', 11, color=T.FAINT)
         self.b_start = button('Start', 'primary', 'record a new capture on the blimp; the previous one there is lost')
         self.b_stop = button('Stop', tip='end the capture now; what was recorded stays on the blimp')
         self.b_down = button('Download', tip='fetch the records over the link and save them under captures/')
@@ -83,8 +87,8 @@ class CapturePanel(Panel):
         self.notes.setPlaceholderText('what this capture is: "at rest on the desk", "FL at 0.2"…')
         self.notes.setToolTip('saved in the .json beside the capture')
 
-        self.lay.addLayout(hbox(label('Length', color=T.MUTED), self.seconds, label('s', color=T.MUTED), None,
-                                spacing=6))
+        self.lay.addLayout(hbox(label('Length', color=T.MUTED), self.seconds, label('s', color=T.MUTED), 10,
+                                self.max_l, None, spacing=6))
         self.lay.addSpacing(8)
         row = FlowBox(hgap=8, vgap=8)
         for b in (self.b_start, self.b_stop, self.b_down, self.b_clear):
@@ -197,6 +201,9 @@ class CapturePanel(Panel):
                                                             MAG_CHIP.get(i['mag_chip'], '?'),
                                                             BARO_CHIP.get(i['baro_chip'], '?')) if i else '—')
         self.ro['fw'].set((i['fw'] or '?') if i else '—')
+        if i and i['max_seconds'] > 0:
+            self.seconds.setMaximum(i['max_seconds'])
+            self.max_l.setText('up to %d s on this blimp' % i['max_seconds'])
         self.file_l.setText(self.file or 'no capture downloaded yet')
         self.b_start.setEnabled(not busy and not running and (i is None or i['result'] != 1))
         self.b_stop.setEnabled(running and not busy)

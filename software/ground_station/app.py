@@ -275,10 +275,13 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ station in
 
     def on_tel(self, m):
+        was_alive = self.alive
         self.tel_at, self.alive = time.monotonic(), bool(m.get('alive'))
         self.header.on_tel(m)
         self.motors.on_tel(m)
         self.sensors.on_tel_alive(self.alive)
+        if self.alive and not was_alive:
+            self._ask_capture()
 
     def on_wifi(self, w):
         self.wifi = w
@@ -288,6 +291,15 @@ class MainWindow(QMainWindow):
         self.pages.setCurrentIndex(1 if name == 'bench' else 0)
         self.pagebar.set(name)
         self.settings.setValue('window/page', name)
+        if name == 'bench':
+            self._ask_capture()
+
+    def _ask_capture(self):
+        """The Bench page's length box is bounded by the blimp's buffer, which
+        only a LOG_INFO reveals: ask once, when the page is in view and the
+        link is up, so the limit is known before the first Start."""
+        if self.alive and self.pages.currentIndex() == 1 and self.bench.capture.info is None:
+            self.station.capture('status')
 
     def frame(self):
         self.sensors.frame()

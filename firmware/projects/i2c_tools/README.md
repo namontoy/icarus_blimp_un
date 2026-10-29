@@ -53,7 +53,7 @@ written down, but it has not run on hardware.
 | BMP280 (`baro`) | **Built, not run on hardware** | Same driver as the BME280 minus humidity; no BMP280 has been on the bus |
 | VL53L1X (`tof`) | **Measured** 2026-10-11, at 1.57 m only | 1566 mm, sd 1.5 mm at a 100 ms budget, dark room. Budgets below 100 ms read about 5 % short. **Range at 2 m not measured yet** (§8) |
 | Motors (`motor`) | **Measured** 2026-10-12 | 2 s run at 10 %, then the failsafe coasted it. No spurious errors |
-| Per-motor break-away duty | Not measured | The 12 % default is a guess. Measure it with `--sweep` (§6) |
+| Per-motor break-away duty | Not measured | The default deadband is 0, so a command is its duty (it was an unmeasured 12 % until 2026-10-28). Measure it with `--sweep` (§6) |
 | Wi-Fi AP, UDP link | **Measured** 2026-10-24 | The laptop joined `ICARUS-…` and the ground station page (`software/ground_station/`) received telemetry. The rest of the checklist in `docs/wireless-link.md` §8 (console over UDP, link-loss and failsafe tests, current, range) is still open |
 | Sensor stream (`sensors`, the `SENSORS` packet) | **Built, not run on hardware** | Written 2026-10-24 on the four drivers above. The ground station decodes the same packet from `software/mock_blimp.py` |
 | PING))) ultrasonic | **Parked, not tested** | Not in the build (§8) |
@@ -237,6 +237,13 @@ temperature values come from the same instant. Columns: `ax ay az` [g],
 `gx gy gz` [°/s], `T` [°C]. A WHO_AM_I mismatch only prints a warning, because
 clones report other values.
 
+Since 2026-10-28 `imu_attach()` also writes the digital low-pass filter
+(`CONFIG.DLPF_CFG` = 4: 21 Hz on the accelerometer, 20 Hz on the gyro, 8.5 ms
+of delay) and `SMPLRT_DIV` = 0, and reads them back. The filter had never been
+set, so the chip ran at its power-on 260 Hz bandwidth while the firmware
+sampled it at 20-50 Hz, and motor vibration folded into the readings
+(`docs/sensor-configuration-report.md`).
+
 ### `mag`: HMC5883L or QMC5883L
 
 ```
@@ -369,10 +376,12 @@ sensors --off      stop sampling and release every sensor
 sensors --on       start again
 ```
 
-`sensor_stream.c` samples the IMU, the magnetometer and the VL53L1X 20 times a
-second and the barometer 4 times a second, through the same drivers as the
-four commands above, and the link sends each sample as a `SENSORS` packet (§7)
-for the ground station. It starts at boot (`SENSOR_STREAM_AT_BOOT`). A sensor
+`sensor_stream.c` samples the IMU, the magnetometer and the VL53L1X 50 times a
+second (20 until 2026-10-28; the control loop records at 50 Hz and peeks this
+stream, so at 20 Hz two or three records in a row carried the same sample) and
+the barometer 4 times a second, through the same drivers as the four commands
+above, and the link sends each sample as a `SENSORS` packet (§7) for the
+ground station. It starts at boot (`SENSOR_STREAM_AT_BOOT`). A sensor
 that is missing is probed again every 2 s, quietly, so a breakout plugged in
 later shows up; one whose reads fail three times in a row, or that stops
 producing for a second, is released and re-attached the same way. The
@@ -417,8 +426,10 @@ capture --head 5        print the first records, raw, as a sanity check
 ```
 
 `capture.c` stores one 72-byte `log_record_t` per 20 ms tick of the control
-task in a buffer allocated at boot in PSRAM (`CAPTURE_MAX_SECONDS`, 120 s,
-432 kB; a 10 s buffer in internal RAM when PSRAM is missing): the IMU and
+task in a buffer allocated at boot in PSRAM (`CAPTURE_MAX_SECONDS`, 400 s,
+1.4 MB; the largest free block if that is not free; a 10 s buffer in internal
+RAM when PSRAM is missing). A longer capture than the buffer is refused with
+the limit, never shortened. It stores the IMU and
 magnetometer counts, the barometer's compensated pressure, temperature and
 humidity, the range, which sensors were fresh that tick, the motor readback,
 the loop's execution time. A capture is linear: it fills for the length asked
@@ -456,9 +467,12 @@ section.
   usual choice. In *fast* decay the off part coasts.
 - **Deadband.** A small brushed motor doesn't turn below some break-away duty.
   Commands are mapped onto `[deadband, 1.0]`, so a small command gives a small
-  thrust instead of nothing. The default of 12 % is a starting guess. **Measure
-  each motor with `motor --sweep -m FL` (and RL, FR, RR)**, then set the value
-  with `--deadband` at runtime or `CONFIG_MOTOR_DEADBAND_PERMILLE` permanently.
+  thrust instead of nothing. The default is 0: no mapping, a command is its
+  duty, which is what the ground station's sliders show. Until 2026-10-28 it
+  was an unmeasured 12 %, which made the smallest slider step (0.003) drive
+  12.3 % duty. **Measure each motor with `motor --sweep -m FL` (and RL, FR,
+  RR)** before setting one, with `--deadband` at runtime or
+  `CONFIG_MOTOR_DEADBAND_PERMILLE` permanently.
 - **Failsafe** (`CONFIG_MOTOR_FAILSAFE_MS`, default 1000 ms). The PWM peripheral
   holds its last duty forever, so a controller that stops running would leave
   the blimp under thrust. The failsafe is armed only while some motor has a
@@ -508,7 +522,7 @@ A packet with the wrong size, magic, version or CRC is counted and dropped.
 | TELEMETRY | `0x81` | 52 B | blimp → host | Clock, the four motor commands the driver holds, failsafe state, link state, station count, packet counters, free heap |
 | SENSORS | `0x82` | 76 B | blimp → host | Clock, accelerometer and gyroscope (g, °/s), IMU temperature, magnetometer (gauss) and heading, pressure, barometer temperature, altitude relative to the first reading, ToF range (mm) and status, and a `valid` bitmask (IMU 1, MAG 2, BARO 4, TOF 8) |
 | LOG_CMD | `0x04` | 20 B | host → blimp | The capture: info, start (with a length in seconds), stop, clear, or get (a first record index and up to 8 chunks) |
-| LOG_INFO | `0x83` | 64 B | blimp → host | The capture's state, result of the command, record count and capacity, period, the IMU ranges, the magnetometer's LSB/gauss, the chip ids, the firmware version |
+| LOG_INFO | `0x83` | 64 B | blimp → host | The capture's state, result of the command (0 ok, 1 no buffer, 2 busy, 3 range, 4 bad command, 5 longer than the buffer), record count and capacity, `max_seconds`, period, the IMU ranges, the magnetometer's LSB/gauss, the chip ids, the firmware version |
 | LOG_CHUNK | `0x84` | 1172 B | blimp → host | 16 records of 72 bytes with their first index and the capture id; the reply to get, sent back to back |
 
 - **`MOTOR_SET` is a standing command only while the host keeps repeating it.**
@@ -595,7 +609,7 @@ default there or put it in `sdkconfig.defaults*`.
 | Motor driver (DRV8833) | `MOTOR_{FL,RL,FR,RR}_IN{1,2}_GPIO` | see the §2 table |
 | | `MOTOR_NSLEEP_GPIO` | −1 (tied high in hardware) |
 | | `MOTOR_PWM_FREQ_HZ` | 20000 |
-| | `MOTOR_DEADBAND_PERMILLE` | 120 (12 %) |
+| | `MOTOR_DEADBAND_PERMILLE` | 0 (a command is its duty) |
 | | `MOTOR_FAILSAFE_MS` | 1000 (0 disables) |
 | Wireless link (Wi-Fi access point + UDP) | `NET_WIFI_AT_BOOT` | y (otherwise use `wifi --start`) |
 | | `NET_WIFI_SSID_PREFIX` | `ICARUS` |
@@ -605,8 +619,8 @@ default there or put it in `sdkconfig.defaults*`.
 | | `NET_LINK_TIMEOUT_MS` | 500 |
 | | `NET_LINK_TELEMETRY_HZ` | 20 |
 | Sensor stream | `SENSOR_STREAM_AT_BOOT` | y (otherwise `sensors --on`) |
-| | `SENSOR_STREAM_HZ` | 20 |
-| Capture | `CAPTURE_MAX_SECONDS` | 120 (432 kB of PSRAM, allocated at boot) |
+| | `SENSOR_STREAM_HZ` | 50 (20 until 2026-10-28) |
+| Capture | `CAPTURE_MAX_SECONDS` | 400 (1.4 MB of PSRAM, allocated at boot; a longer request is refused) |
 
 ## 10. C API for other modules
 
@@ -737,8 +751,6 @@ for different hardware (a CCS811). It is not a test of this firmware.
   is what the stream reads until its next re-attach.
 - **Stale text to correct later:**
   - `cmd_tof.c`'s header comment about the altimeter decision (§8);
-  - the `MOTOR_DEADBAND_PERMILLE` help in `Kconfig.projbuild`, which says
-    `motor -m 1A --sweep`. The current syntax is `motor -m FL --sweep`.
 - A `build/` folder copied from another checkout is tied to its original path,
   and the build fails with "configured for project …". Run `fullclean` (see
   `BUILD_AND_FLASH.md`).
