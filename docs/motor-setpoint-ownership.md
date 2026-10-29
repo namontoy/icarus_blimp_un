@@ -140,7 +140,12 @@ the bridge thread, the download from the capture thread), but the S3's link task
 and sending chunks. Pass if the FAILSAFE pill never reads TRIPPED and `link` on the console shows
 no "link lost" in the USB log; fail otherwise, and then the cure is on the S3 (a receive task of
 its own, or chunks sent with a yield between them), not on the ground. Also note the LINK pill's
-age during the burst.
+age during the burst. The instrument for this, with the station closed, is
+`python software/link_check.py --download 120 --timers` (2026-10-29): it holds a small duty from
+its own thread, records the capture, downloads it while still holding, and prints the command
+latency, the loss as the blimp counts it and the longest the blimp waited for a packet of ours,
+for the hold and for the download separately; a wait near 500 ms during the download is this
+cause, measured.
 
 **T3, supply coupling (cause 3).** Motors held at a fixed duty with a current meter in the 5 V rail
 (or the battery divider once increment 2 records `bat_mv` in the capture). Send `help` from the

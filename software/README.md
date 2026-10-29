@@ -12,7 +12,15 @@ python software/blimp_link.py status                       # telemetry
 python software/blimp_link.py console                      # the firmware console, over the air
 python software/blimp_link.py motor 0.2 0 0 0 --seconds 2  # FL RL FR RR, PROPS OFF
 python software/blimp_link.py stop
+python software/link_check.py --download 60 --timers      # latency, loss, the blimp's wait, during a download too
 ```
+
+`link_check.py` (2026-10-29) measures the link with the ground station closed: the time from a
+`MOTOR_SET` with a new value to its echo in the telemetry, the loss as the blimp counts our
+packets, the longest the blimp waited for one of ours (`link_age_ms`; it coasts at 500), the
+telemetry and sensor rates and gaps, the same figures during a capture download, and the two
+firmware timeouts (motors coast about 1 s after the last `MOTOR_SET` with heartbeats on, the
+link falls 0.5 s after the last packet).
 
 `mock_blimp.py` serves the same protocol on localhost for development without hardware
 (`--host 127.0.0.1` on the commands above). Protocol, safety timers and the bring-up
