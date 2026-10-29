@@ -77,7 +77,7 @@ window since 2026-10-27 (`blimp_bridge.py`, its side of the link, did not change
 | motor RR IN1/IN2 | 7 / 14 | |
 | nSLEEP | strapped high (`-1`) | |
 | status LED (WS2812, RMT) | 21 | |
-| battery divider | 1 (ADC1_CH0) | `docs/s3-wroom-cam-wiring-plan.md`: 100 k + 100 k, 100 nF to GND; **no firmware yet** |
+| battery divider | 1 (ADC1_CH0) | `docs/s3-wroom-cam-wiring-plan.md`: 100 k + 100 k, 100 nF to GND; read by `cmd_battery.c` from the read stage since 2026-10-29 (`BATTERY_ADC_GPIO`), not yet on the bench |
 | console | native USB (opening the port resets the chip) | `sdkconfig.defaults.esp32s3` |
 
 ### 1.5 What `core/` expects of the shell

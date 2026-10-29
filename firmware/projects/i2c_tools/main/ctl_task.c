@@ -12,7 +12,8 @@
  * layouts the later increments fill in (docs/control-loop-plan.md section 4).
  * Two stages already do their job in an interim form: read_sensors() peeks
  * the sensor stream's latest sample (the stream still owns the chips; the
- * loop only copies, the way it will peek the camera mailboxes), and
+ * loop only copies, the way it will peek the camera mailboxes) and samples
+ * the battery ADC itself (cmd_battery.c, not on the I2C bus), and
  * log_tick() writes one record per tick into the capture (capture.c), with
  * the motor driver's readback standing in for pwm_out()'s own throttles.
  * Nothing here drives the I2C bus or the motors yet.
@@ -65,6 +66,7 @@
 #include "freertos/task.h"
 #include "sdkconfig.h"
 #include "capture.h"
+#include "cmd_battery.h"
 #include "ctl_task.h"
 #include "ctl_types.h"
 #include "sensor_stream.h"
@@ -133,12 +135,17 @@ static struct {
  * source fresh when its timestamp moved since the last tick. So the records
  * the log stage writes already carry real counts, repeated between the
  * stream's samples, with the fresh bits saying which tick brought a new one.
- * Only the four sensor blocks are copied: the camera and battery fields stay
- * whatever their own producers (none yet) leave in them.
+ * Only the four sensor blocks are copied. The battery is already read here,
+ * one oneshot conversion per tick as the schedule has it, because it is on
+ * the ADC and owes nothing to the stream; its fresh bit is set whenever a
+ * calibrated sample came in. The camera fields stay whatever their own
+ * producer (none yet) leaves in them.
  */
 static void read_sensors(uint32_t tick, sensors_raw_t *raw)
 {
     (void)tick;
+    raw->bat_fresh = battery_sample(&raw->bat_raw, &raw->bat_pin_mv, &raw->bat_mv);
+
     sensors_raw_t latest;
     if (!sensor_stream_latest_raw(&latest)) {
         raw->imu_fresh = raw->mag_fresh = raw->baro_fresh = raw->tof_fresh = false;
@@ -535,7 +542,8 @@ static int do_ctl_cmd(int argc, char **argv)
            CTL_TASK_CORE, CTL_TASK_PRIO, (unsigned)CTL_PERIOD_US,
            s.isr_dispatch ? "ISR" : "task", st.total_ticks);
     printf("last window: %s\n", line);
-    printf("stages: read_sensors peeks the sensor stream (interim); estimate, control, mixer, "
+    printf("stages: read_sensors peeks the sensor stream (interim) and samples the battery; "
+           "estimate, control, mixer, "
            "saturate, pwm_out empty; log feeds 'capture'\n");
     size_t psram_size;
     if (psram_ready(&psram_size)) {

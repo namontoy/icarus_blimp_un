@@ -141,6 +141,7 @@ motors stay off while the pins float during reset.
 
 | GPIO | Use |
 |---|---|
+| 1 | Battery divider, ADC1_CH0 (`BATTERY_ADC_GPIO`; read since 2026-10-29, not yet checked on the bench) |
 | 4, 5 | I2C SDA, SCL |
 | 7–14 | Motor driver inputs (all eight LEDC channels) |
 | 21 | WS2812 status LED (RMT) |
@@ -407,7 +408,8 @@ woken every 20 ms by an `esp_timer` dispatched from the timer interrupt, running
 the pipeline read sensors, estimate, control, mixer, saturate, PWM, log, with
 the typed records of `ctl_types.h`. **In the current increment the middle
 stages are empty:** the read stage peeks the sensor stream's latest sample
-(the stream still owns the chips), the log stage feeds `capture` below, and
+(the stream still owns the chips) and samples the battery ADC (`battery`
+below), the log stage feeds `capture` below, and
 the task measures its own period and execution time in one-second windows
 (`ctl: 50 ticks   period 20.00/20.00/20.00 ms ...`). The line is off at boot,
 because once a second it buries the console; `ctl --stats on` turns it on, or
@@ -432,13 +434,33 @@ RAM when PSRAM is missing). A longer capture than the buffer is refused with
 the limit, never shortened. It stores the IMU and
 magnetometer counts, the barometer's compensated pressure, temperature and
 humidity, the range, which sensors were fresh that tick, the motor readback,
-the loop's execution time. A capture is linear: it fills for the length asked
+the battery's running average, the loop's execution time. A capture is linear: it fills for the length asked
 and then holds its records until the next start. **Fetch it over the air**,
 never over USB (opening the port resets the chip and the buffer with it):
 `python software/blimp_link.py capture download` saves
 `captures/capture-<date>.bin` and prints a summary; `software/blimp_log.py`
 decodes the file to units or a CSV; the ground station's Bench page does the
 same with traces. The packets are `LOG_CMD`, `LOG_INFO` and `LOG_CHUNK` (§7).
+
+### `battery`: the motor cell's voltage
+
+```
+battery             the running average, the last sample, the pin voltage and raw count
+```
+
+`cmd_battery.c` reads the divider on GPIO1 (ADC1_CH0; the wiring plan's
+100 k + 100 k with 100 nF to GND, `docs/s3-wroom-cam-wiring-plan.md`). The
+control task takes one oneshot conversion per 20 ms tick in its read stage, at
+12 dB attenuation, converts it with the eFuse curve-fitting calibration,
+multiplies by the divider ratio (`BATTERY_DIVIDER_PERMILLE`, nominal 2.000) and
+averages the last `BATTERY_AVG_TICKS` (25, 0.5 s) samples; that average is the
+`bat_mv` of every capture record, the Bench page's Battery trace. The command
+shows the loop's latest copy, so it reads nothing while the control task is
+down. Without eFuse calibration it reports raw counts and no voltage rather
+than a guessed one. ADC1 only: Wi-Fi takes ADC2. **Not yet checked on the
+bench:** whether the divider is wired, and the ratio against a multimeter.
+Nothing acts on the voltage yet; the low-battery latch is increment 3 of
+`docs/control-loop-plan.md`.
 
 ### `exit` / `quit`: how to leave
 
@@ -620,6 +642,9 @@ default there or put it in `sdkconfig.defaults*`.
 | | `NET_LINK_TELEMETRY_HZ` | 20 |
 | Sensor stream | `SENSOR_STREAM_AT_BOOT` | y (otherwise `sensors --on`) |
 | | `SENSOR_STREAM_HZ` | 50 (20 until 2026-10-28) |
+| Battery monitor | `BATTERY_ADC_GPIO` | 1 (ADC1_CH0; ADC1 pins 1–10 only) |
+| | `BATTERY_DIVIDER_PERMILLE` | 2000 (100 k + 100 k, nominal) |
+| | `BATTERY_AVG_TICKS` | 25 (0.5 s boxcar) |
 | Capture | `CAPTURE_MAX_SECONDS` | 400 (1.4 MB of PSRAM, allocated at boot; a longer request is refused) |
 
 ## 10. C API for other modules
@@ -637,6 +662,7 @@ without parsing console output.
 | `cmd_tof.h` | `tof_attach`, `tof_read`, `tof_info`, `tof_detach`, `tof_budget_valid`, `tof_status_text` |
 | `sensor_stream.h` | `sensor_stream_start`, `sensor_stream_pause`, `sensor_stream_resume`, `sensor_stream_latest`, `sensor_stream_latest_raw` (the same sample as the pipeline's `sensors_raw_t`, for the control task), `sensor_stream_scales` |
 | `capture.h` | `capture_init`, `capture_start`, `capture_stop`, `capture_clear`, `capture_push` (the control task, every tick), `capture_info`, `capture_read` |
+| `cmd_battery.h` | `battery_init`, `battery_sample` (the control task, every tick), `battery_latest` |
 | `net_wifi.h` | `net_wifi_init`, `net_wifi_start`, `net_wifi_stop`, `net_wifi_is_up`, `net_wifi_station_count`, `net_wifi_ssid`, `net_wifi_ip_str` |
 | `net_link.h`, `net_console.h` | Start functions and link status |
 | `components/vl53l1x_uld` | ST's ULD API, plus `vl53l1x_port_attach(bus, addr)` / `vl53l1x_port_detach` to bind it to the shared bus |
@@ -713,6 +739,7 @@ i2c_tools/
     ├── ctl_task.c/.h             fixed-rate control task (core 1, 20 ms), timing statistics + `ctl`
     ├── ctl_types.h               the pipeline's records: sensors_raw_t ... log_record_t
     ├── capture.c/.h              the loop's records kept in PSRAM + `capture`; read out by the link
+    ├── cmd_battery.c/.h          battery divider on ADC1, sampled by the control task, + `battery`
     ├── cmd_motor.c/.h            DRV8833 ×2, failsafe
     ├── cmd_ping.c/.h             PING))) ultrasonic, PARKED (not in SRCS)
     ├── led_blink.c/.h            WS2812 hue sweep

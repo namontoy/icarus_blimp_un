@@ -256,6 +256,43 @@ menu "Control task"
 
 endmenu
 
+menu "Battery monitor (the motor cell's divider)"
+
+    # cmd_battery.c: one ADC conversion per control tick, read by the
+    # control task's read stage and written into every capture record.
+    # The divider ratio and the averaging move into params_t with
+    # increment 2 of docs/control-loop-plan.md (D10).
+
+    config BATTERY_ADC_GPIO
+        int "Divider GPIO (ADC1 only)"
+        range 1 10
+        default 1
+        help
+            GPIO1 is ADC1_CH0, the pin the wiring plan gives the motor
+            battery divider (docs/s3-wroom-cam-wiring-plan.md). Only ADC1
+            (GPIO1-10 on the S3) works here: Wi-Fi takes ADC2.
+
+    config BATTERY_DIVIDER_PERMILLE
+        int "Divider ratio x1000 (battery voltage / pin voltage)"
+        range 1000 10000
+        default 2000
+        help
+            2000 for the planned 100 k + 100 k. A 4.2 V cell then puts
+            2.1 V on the pin, inside the 12 dB range. Replace the nominal
+            value with the one measured against a multimeter.
+
+    config BATTERY_AVG_TICKS
+        int "Running average length in control ticks (20 ms each)"
+        range 1 64
+        default 25
+        help
+            Boxcar over the last this-many samples: 25 is 0.5 s, so a
+            thrust step shows up in the average within 0.5 s and the
+            average lags the cell by 250 ms. The capture records the
+            average; 'battery' also shows the last single sample.
+
+endmenu
+
 menu "Capture (the control loop's records, kept in PSRAM)"
 
     # capture.c stores one 72-byte log record per 20 ms tick of the control
