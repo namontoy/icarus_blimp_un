@@ -1,7 +1,8 @@
 # PID tuning: what to measure, how, and the tests that produce the gains
 
 **Date:** 2026-10-28
-**Branch:** `pid-tuning`, from `s3-wireless-link`
+**Branch:** written on `pid-tuning`, from `s3-wireless-link`, and merged back into it; work
+from `s3-wireless-link` until it reaches `master` (§7)
 **Status:** plan, with its instruments written (2026-10-28). Measured so far: the rear pair's
 thrust on a scale (P0, `docs/history/pid-bench-2026-10-28/`); nothing on the vehicle yet. `software/thrust_map.py` (the thrust stand, P0), `software/step_test.py` (the step
 schedules of Y1, Y2, H1 and H2, with the capture and the fits) and `software/step_response.py`
@@ -278,7 +279,9 @@ thrust on the front pair is worth a mixer change (a pure yaw torque without surg
 
 ## 7. Bench runbook: the session's commands, in order (2026-10-28)
 
-Before anything: the branch `pid-tuning` checked out (the tools live only there), the ground
+Before anything: the branch `s3-wireless-link` checked out (the tools and the motor remap of
+2026-10-29 are there; the old `pid-tuning` branch was deleted on 2026-10-30, and a fresh one is
+made from `master` once `s3-wireless-link` is merged), the ground
 station **closed** while a tool drives the motors (one client at a time; the tools refuse to
 start while the GUI holds the motors, and the blimp answers whoever sent the last packet), the
 laptop on the blimp's Wi-Fi (`ICARUS-…`, from the system's Wi-Fi menu or the ground station's
