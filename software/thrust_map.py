@@ -41,6 +41,7 @@ library only.
 """
 import argparse
 import csv
+import glob
 import json
 import math
 import os
@@ -433,7 +434,20 @@ def format_fit(m):
     return '\n'.join(lines)
 
 
+def expand_files(patterns):
+    """The CSVs a pattern names. A Unix shell expands captures/thrust-*.csv
+    before Python sees it; PowerShell and cmd pass it on as written, so the
+    same command line has to work here too. A name with no wildcard, or one
+    that matches nothing, is kept as given, so a typo still fails loudly."""
+    files = []
+    for p in patterns:
+        hits = sorted(glob.glob(p)) if any(c in p for c in '*?[') else []
+        files.extend(hits or [p])
+    return files
+
+
 def fit(args):
+    args.files = expand_files(args.files)
     rows = read_rows(args.files)
     if not rows:
         sys.exit('no rows in %s' % ', '.join(args.files))
