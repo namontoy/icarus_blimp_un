@@ -502,7 +502,11 @@ as well when a change came during it. In race mode the ground station refuses
 a change and allows a read. `tools/fw_host_test.py` (part of
 `tools/verify.py`) compiles `param_table.c` on the computer against
 `core/src/params.c` and checks that every field has an entry, every default is
-accepted, and whatever a set leaves passes the validator.
+accepted, and whatever a set leaves passes the validator. On the board,
+`python software/param_check.py --reboot` runs the bench checks over the air
+(the listing arriving whole, a set reaching the loop, the refusals, the
+validator, the loop's timing during a burst of sets, a power cycle) and leaves
+every value as it found it.
 
 ### `exit` / `quit`: how to leave
 

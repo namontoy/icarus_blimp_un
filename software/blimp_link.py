@@ -514,9 +514,10 @@ _PARAM_HEAD = re.compile(r'^(\d+) parameters; (\d+) changes since boot')
 
 def parse_params(text):
     """The firmware's 'param' listing, all of it or a prefix's, as
-    {'changes': sets since boot, 'values': {name: value}, 'changed': [names
-    whose value is not params.c's]}. ValueError when the text is not one: a
-    firmware from before 2026-10-30 answers 'Unrecognized command'."""
+    {'count': parameters in the table, 'changes': sets since boot, 'values':
+    {name: value}, 'changed': [names whose value is not params.c's]}.
+    ValueError when the text is not one: a firmware from before 2026-10-30
+    answers 'Unrecognized command'."""
     head, values, changed = None, {}, []
     for line in text.splitlines():
         if head is None:
@@ -533,7 +534,7 @@ def parse_params(text):
             changed.append(parts[0])
     if head is None or not values:
         raise ValueError('not a parameter listing: %r' % text.strip()[:80])
-    return {'changes': int(head.group(2)), 'values': values, 'changed': changed}
+    return {'count': int(head.group(1)), 'changes': int(head.group(2)), 'values': values, 'changed': changed}
 
 
 def read_params(console, timeout=3.0):
@@ -759,7 +760,7 @@ def cmd_selftest(args):
                'alt.ki                            0  N/(m s)      [0, 10]\n'
                'use_mag                           0  0 or 1       [0, 1]\n')
     pr = parse_params(listing)
-    assert pr['changes'] == 2 and pr['changed'] == ['alt.kp'] and pr['values']['alt.kp'] == 0.4
+    assert pr['count'] == 45 and pr['changes'] == 2 and pr['changed'] == ['alt.kp'] and pr['values']['alt.kp'] == 0.4
     assert pr['values']['alt.ki'] == 0.0 and len(pr['values']) == 3
     for not_params in ('Unrecognized command\n', ''):
         try:

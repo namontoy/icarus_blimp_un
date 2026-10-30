@@ -11,9 +11,9 @@ built on it can be exercised on a laptop alone:
     python software/blimp_link.py --host 127.0.0.1 console "motor --status"
 
 It is a model of the link, not of the sensors: the console knows 'help',
-'motor --status', 'motor -s', 'wifi', 'link' and 'param' (a subset of the
-table, in the firmware's format), and answers anything else the way the
-firmware does ("Unrecognized command"). The capture (LOG_CMD,
+'motor --status', 'motor -s', 'wifi', 'link', 'param' (a subset of the
+table, in the firmware's format) and 'ctl' (an ideal loop's figures), and
+answers anything else the way the firmware does ("Unrecognized command"). The capture (LOG_CMD,
 LOG_INFO, LOG_CHUNK) is modelled too: records at 50 Hz from the same toy
 airframe, so 'blimp_link.py capture' and the ground station's Bench page can
 be exercised without a blimp. Keep it in step with link_protocol.h;
@@ -50,6 +50,8 @@ PARAMS = (      # name, default, accepted min, max, unit
     ('alt.kp', 1.336, 0.0, 20.0, 'N/m'),
     ('alt.ki', 0.0, 0.0, 10.0, 'N/(m s)'),
     ('alt.kd', 1.336, 0.0, 20.0, 'N s/m'),
+    ('alt.i_min', -0.06, -0.980665, 0.980665, 'N'),
+    ('alt.i_max', 0.15, -0.980665, 0.980665, 'N'),
     ('yaw.kp', 0.0332, 0.0, 2.0, 'N m/rad'),
     ('yaw.ki', 0.0, 0.0, 2.0, 'N m/(rad s)'),
     ('yaw.kd', 0.0332, 0.0, 2.0, 'N m s/rad'),
@@ -383,6 +385,15 @@ class MockBlimp:
                     'param [name|prefix [value]] | --reset [name]\n  The controller\'s parameters, live in RAM\n')
         if line.split()[:1] == ['param']:
             return self.param_command(line.split()[1:])
+        if line == 'ctl':
+            # ctl_task.c's answer, for an ideal loop: the mock has no task to time.
+            return ('control task on core 1, priority 20, period 20000 us, task dispatch, %d ticks since boot\n'
+                    'last window: 50 ticks   period 20.00/20.00/20.00 ms   exec 0/0/0 us (min/max/mean)   '
+                    'overruns 0   missed 0   timer silent 0\n'
+                    'stages: none in the mock; this window is an ideal one\n'
+                    "parameters: the loop holds the set after %d of %d 'param' changes (read by nothing until "
+                    'increment 3)\n' % (int((time.monotonic() - self.t0) * 50), self.param_changes,
+                                        self.param_changes))
         if line in ('motor', 'motor --status'):
             rows = ''.join('%-6s %-12s %-9s %+10.3f %9.1f%%\n' % (n, w, g, c, 100 * abs(c))
                            for n, w, g, c in zip(bl.MOTOR_ORDER, ('#1 IN1/IN2', '#1 IN3/IN4', '#2 IN1/IN2', '#2 IN3/IN4'),
@@ -432,6 +443,10 @@ class MockBlimp:
             if not lo <= value <= hi:
                 return '%s: %g outside the accepted range; not changed (accepted: [%g, %g] %s)\n' % (
                     name, value, lo, hi, unit)
+            trial = dict(self.params, **{name: value})
+            if trial.get('alt.i_min', 0.0) > trial.get('alt.i_max', 0.0):      # param_table.c's order rule
+                return ("%s: %g would put a PID clamp's minimum above its maximum; not changed "
+                        "(accepted: [%g, %g] %s)\n" % (name, value, lo, hi, unit))
             was = self.params[name]
             if value == was:
                 return '%s is already %g %s; nothing changed\n' % (name, value, unit)
