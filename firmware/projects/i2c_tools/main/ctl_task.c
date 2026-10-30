@@ -67,6 +67,7 @@
 #include "sdkconfig.h"
 #include "capture.h"
 #include "cmd_battery.h"
+#include "cmd_param.h"
 #include "ctl_task.h"
 #include "ctl_types.h"
 #include "sensor_stream.h"
@@ -116,8 +117,15 @@ static struct {
     setpoint_t    sp;
     ctrl_out_t    out;
     motor_cmd_t   cmd;
+
+    /* The controller's parameters as of the last 'param' change, taken at
+       the top of a tick (cmd_param.h); blimp_step() reads them from
+       increment 3 on. */
+    blimp_params_t params;
+    uint32_t       params_gen;
 } s = {
     .mux = portMUX_INITIALIZER_UNLOCKED,
+    .params_gen = PARAM_GEN_NONE,
     /* Off unless asked for: once a second it drowns the console. */
 #if CONFIG_CTL_STATS_AT_BOOT
     .print = true,
@@ -357,6 +365,7 @@ static void ctl_task(void *arg)
         s.tick++;
         s.raw.t_us = (uint32_t)t0;
 
+        (void)param_take(&s.params, &s.params_gen);
         read_sensors(s.tick, &s.raw);
         estimate(&s.raw, &s.est);
         control(&s.est, &s.sp, &s.out);
@@ -545,6 +554,13 @@ static int do_ctl_cmd(int argc, char **argv)
     printf("stages: read_sensors peeks the sensor stream (interim) and samples the battery; "
            "estimate, control, mixer, "
            "saturate, pwm_out empty; log feeds 'capture'\n");
+    const uint32_t gen = s.params_gen;
+    if (gen == PARAM_GEN_NONE) {
+        printf("parameters: none taken yet\n");
+    } else {
+        printf("parameters: the loop holds the set after %" PRIu32 " of %" PRIu32 " 'param' changes "
+               "(read by nothing until increment 3)\n", gen, param_changes());
+    }
     size_t psram_size;
     if (psram_ready(&psram_size)) {
         printf("PSRAM %u KB, %u KB free (largest block %u KB)\n",

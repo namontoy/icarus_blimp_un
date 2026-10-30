@@ -311,6 +311,19 @@ class BlimpBridge:
         with self._console_lock:
             return self.console.run(line, timeout=300.0, idle=15.0, echo=echo)
 
+    def read_params(self, wait=2.0):
+        """The blimp's parameters now (blimp_link.parse_params()), for the
+        record beside a capture. Waits at most `wait` s behind a console
+        command already running (a 'tof -n 200' takes 20 s) rather than hold
+        a download up; TimeoutError then, ValueError from a firmware without
+        'param'."""
+        if not self._console_lock.acquire(timeout=wait):
+            raise TimeoutError('the console is busy with another command')
+        try:
+            return bl.read_params(self.console)
+        finally:
+            self._console_lock.release()
+
 
 class DemoBlimp(BlimpBridge):
     """mock_blimp.MockBlimp in-process on localhost, with the same bridge on top,

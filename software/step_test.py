@@ -123,6 +123,20 @@ def stream(link, segs, rate, log):
             time.sleep(0.05)
 
 
+def read_params(host, console_port):
+    """The controller's parameters as the test starts, for the .json
+    (blimp_link.parse_params()), or {'error': why}: an open-loop step needs
+    none, but a capture that names its gains can be compared with a later
+    closed-loop one."""
+    con = bl.BlimpConsole(host, console_port)
+    try:
+        return bl.read_params(con)
+    except (TimeoutError, ConnectionError, ValueError, OSError) as e:
+        return {'error': str(e)}
+    finally:
+        con.close()
+
+
 def run(args):
     if args.axis == 'heave' and args.mirror:
         sys.exit('--mirror is for yaw (FL then FR); heave drives both rear motors')
@@ -161,6 +175,9 @@ def run(args):
             cap.stop()
         print('firmware %s, capture at %.0f ms, up to %d s' % (info['fw'] or '?', info['period_us'] / 1000.0,
                                                                 info['max_seconds']))
+        params = read_params(args.host, args.console_port)
+        if 'error' in params:
+            print('note: the parameters are not recorded (%s)' % params['error'])
         try:
             cap.start(cap_s)
         except (TimeoutError, bl.CaptureError) as e:
@@ -194,7 +211,7 @@ def run(args):
     meta = {'file': os.path.basename(path), 'saved': time.strftime('%Y-%m-%d %H:%M:%S'), 'source': 'step_test',
             'notes': args.notes, 'header': h, 'records': len(records), 'duration_s': summ['duration_s'],
             'dt_ms': summ['dt_ms'], 'gaps': summ['gaps'], 'exec_us': summ['exec_us'], 'fresh_hz': summ['fresh_hz'],
-            'flags_seen': summ['flags_seen'],
+            'flags_seen': summ['flags_seen'], 'params': params,
             'test': {'axis': args.axis, 'steps': args.steps, 'lead_s': args.lead, 'hold_s': args.hold,
                      'gap_s': args.gap, 'mirror': args.mirror, 'rate_hz': args.rate, 'limit': args.limit,
                      'host': args.host, 'schedule': [{'t0': s[0], 't1': s[1], 'cmd': s[2], 'label': s[3]} for s in segs],
@@ -225,6 +242,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--host', default=bl.BLIMP_IP)
     ap.add_argument('--port', type=int, default=bl.LINK_PORT)
+    ap.add_argument('--console-port', type=int, default=bl.CONSOLE_PORT,
+                    help="the console, for the 'param' listing in the .json (default %(default)s)")
     ap.add_argument('axis', choices=sorted(sr.AXES))
     ap.add_argument('--steps', type=float, nargs='+', default=[0.25, 0.40, 0.55],
                     help='amplitudes, per unit duty, signed (default %(default)s)')

@@ -1,7 +1,11 @@
 """The whole demo window with its GUI thread deliberately blocked, the pad's B
 from the reader thread, the Drive pill, a Wi-Fi drop seen from the window,
-the Wi-Fi button's lock, a page switch while the pad drives, and race mode
-(docs/motor-setpoint-ownership.md, docs/link-robustness-review.md)."""
+the Wi-Fi button's lock, a page switch while the pad drives, a capture that
+records the gains, and race mode (docs/motor-setpoint-ownership.md,
+docs/link-robustness-review.md)."""
+import json
+import os
+import tempfile
 import threading
 import time
 
@@ -14,6 +18,7 @@ from PyQt6.QtWidgets import QApplication
 from software.ground_station import app as A
 from software.ground_station import control as Cm
 from software.ground_station import gamepad as G
+from software.ground_station import station as S
 
 # ------------------------------------------------------- the gamepad's press edge
 
@@ -156,6 +161,29 @@ check(not win.control.armed and mock.motor[1] == 0.0,
       'pad B: the thawed window disarmed instead of driving again')
 check(not station.blimp.snapshot()['tripped'], "pad B: the window's STOP cleared the latch")
 station.pad_state = real_pad_state
+
+# a capture's .json names the gains it ran with, both sets when a 'param' change came mid-capture
+S.CAPTURES_DIR = tempfile.mkdtemp(prefix='ground-station-captures-')
+caps = []
+station.cap.connect(caps.append)
+station.capture('start', 2)
+pump(app, 0.6)
+station.console('param alt.kp 0.5')
+pump(app, 0.6)
+station.capture('download', notes='params test')
+end = time.monotonic() + 10.0
+while time.monotonic() < end and not any(c.get('phase') == 'saved' for c in caps):
+    pump(app, 0.1)
+saved = [c for c in caps if c.get('phase') == 'saved']
+check(bool(saved), 'capture: downloaded and saved')
+if saved:
+    with open(os.path.splitext(saved[0]['file'])[0] + '.json') as f:
+        pr = json.load(f).get('params') or {}
+    check(pr.get('values', {}).get('alt.kp') == 0.5 and pr.get('changed') == ['alt.kp'],
+          'capture: the .json names the gains at the download (%s)' % pr.get('values', {}).get('alt.kp'))
+    check(pr.get('at_start', {}).get('values', {}).get('alt.kp') == 1.336,
+          'capture: and the set at the start, since a change came between')
+check(said(wev, 'parameters changed during it', 'warn'), 'capture: the window says the gains changed mid-capture')
 A.teardown(station, win)
 
 # ------------------------------------------------------------------ race mode
@@ -178,6 +206,13 @@ check(any('race mode: motor commands are refused' in t for t in con), 'race: the
 station.console('help')
 pump(app, 1.0)
 check(any('Print the list of registered commands' in t for t in con), 'race: other console commands run')
+station.console('param alt.kp 0.9')
+pump(app, 0.3)
+check(any('parameter changes are refused' in t for t in con) and mock.params['alt.kp'] == 1.336,
+      'race: the console refuses a parameter change')
+station.console('param alt.')
+pump(app, 1.0)
+check(any('changes since boot' in t for t in con), 'race: reading the parameters still works')
 check(mock.motor == [0.0] * 4, 'race: nothing reached the motors')
 win.stop()
 pump(app, 0.3)

@@ -57,6 +57,7 @@ written down, but it has not run on hardware.
 | Wi-Fi AP, UDP link | **Measured** 2026-10-24 | The laptop joined `ICARUS-…` and the ground station page (`software/ground_station/`) received telemetry. The rest of the checklist in `docs/wireless-link.md` §8 (console over UDP, link-loss and failsafe tests, current, range) is still open |
 | Sensor stream (`sensors`, the `SENSORS` packet) | **Built, not run on hardware** | Written 2026-10-24 on the four drivers above. The ground station decodes the same packet from `software/mock_blimp.py` |
 | PING))) ultrasonic | **Parked, not tested** | Not in the build (§8) |
+| Controller parameters (`param`) | **Built, not run on hardware** | Written 2026-10-30; the build with `core/` as a component is clean (ESP-IDF v5.5.5, no warnings). The table is tested on the host (`tools/fw_host_test.py`), the ground side against `mock_blimp.py`. Nothing reads the values until increment 3 |
 
 ## 2. Hardware and wiring
 
@@ -418,7 +419,8 @@ the task measures its own period and execution time in one-second windows
 (`ctl: 50 ticks   period 20.00/20.00/20.00 ms ...`). The line is off at boot,
 because once a second it buries the console; `ctl --stats on` turns it on, or
 `CONFIG_CTL_STATS_AT_BOOT` (menuconfig, "Control task") from boot. Nothing drives the
-bus or the motors through it yet. The plan, the design decisions and the
+bus or the motors through it yet. It also takes the `param` set at the top of a
+tick, and `ctl` says after which change. The plan, the design decisions and the
 bench checks per increment are in `docs/control-loop-plan.md`.
 
 ### `capture`: a minute of the loop's records
@@ -465,6 +467,42 @@ than a guessed one. ADC1 only: Wi-Fi takes ADC2. **Not yet checked on the
 bench:** whether the divider is wired, and the ratio against a multimeter.
 Nothing acts on the voltage yet; the low-battery latch is increment 3 of
 `docs/control-loop-plan.md`.
+
+### `param`: the controller's parameters, live
+
+```
+param                   every field of core/'s blimp_params_t: value, unit, accepted range; * = not params.c's
+param alt.              the ones whose name starts with "alt."
+param alt.kp            one
+param alt.kp 0.4        set one (a negative value is fine: param alt.i_min -0.06)
+param --reset [name]    back to params.c's values, all or one
+```
+
+Added 2026-10-30, pulled forward from increment 5 of
+`docs/control-loop-plan.md` so a gain change on the bench is a console line
+instead of a rebuild. It runs over the air like every other command
+(`python software/blimp_link.py console "param alt.kp 0.4"`, or the ground
+station's console dock). The names are the C field paths, the same as the
+simulator's (`sim/blimp_ffi.py`). `param_table.c` lists every field with the
+range the console accepts; the ranges catch a typo or a slipped sign (a
+negative gain is refused), not a bad tune. A set is checked against its range
+and against the PID clamps' order (`i_min` ≤ `i_max`, `out_min` ≤ `out_max`),
+then `blimp_params_validate()` from `core/` runs over the whole set, as
+`blimp_step()` does every tick, and the reply names anything it clamped
+(lowering `heave_budget_n` below `hover_thrust_n` pulls the feed-forward down
+with it, for example).
+
+**RAM only:** a reboot returns to `core/src/params.c`, and a tune worth keeping
+is committed there. The control task takes the new set at the top of its next
+tick (`ctl` says which change it holds); **until increment 3 runs
+`blimp_step()` in the loop, nothing reads it**, and every set says so. The
+ground station's Bench page and `software/step_test.py` write the listing into
+each capture's `.json` (`params`), with the set from the start of the capture
+as well when a change came during it. In race mode the ground station refuses
+a change and allows a read. `tools/fw_host_test.py` (part of
+`tools/verify.py`) compiles `param_table.c` on the computer against
+`core/src/params.c` and checks that every field has an entry, every default is
+accepted, and whatever a set leaves passes the validator.
 
 ### `exit` / `quit`: how to leave
 
@@ -667,6 +705,8 @@ without parsing console output.
 | `sensor_stream.h` | `sensor_stream_start`, `sensor_stream_pause`, `sensor_stream_resume`, `sensor_stream_latest`, `sensor_stream_latest_raw` (the same sample as the pipeline's `sensors_raw_t`, for the control task), `sensor_stream_scales` |
 | `capture.h` | `capture_init`, `capture_start`, `capture_stop`, `capture_clear`, `capture_push` (the control task, every tick), `capture_info`, `capture_read` |
 | `cmd_battery.h` | `battery_init`, `battery_sample` (the control task, every tick), `battery_latest` |
+| `cmd_param.h` | `register_param` (also loads params.c's values), `param_take` (the control task, every tick), `param_changes` |
+| `param_table.h` | `param_count`, `param_at`, `param_find`, `param_get`, `param_parse`, `param_set`, `param_result_str`; portable C, tested on the host |
 | `net_wifi.h` | `net_wifi_init`, `net_wifi_start`, `net_wifi_stop`, `net_wifi_is_up`, `net_wifi_station_count`, `net_wifi_ssid`, `net_wifi_ip_str` |
 | `net_link.h`, `net_console.h` | Start functions and link status |
 | `components/vl53l1x_uld` | ST's ULD API, plus `vl53l1x_port_attach(bus, addr)` / `vl53l1x_port_detach` to bind it to the shared bus |
@@ -730,6 +770,8 @@ i2c_tools/
 ├── sdkconfig.defaults.esp32s3  S3-Zero: 4 MB, USB Serial/JTAG console, LED 21, I2C 4/5, quad PSRAM
 ├── components/
 │   └── vl53l1x_uld/          ST VL53L1X ULD 3.5.5 + port onto the shared bus
+├── host/
+│   └── test_param_table.c    the `param` table on the computer (tools/fw_host_test.py)
 └── main/
     ├── i2ctools_example_main.c   app_main: boot order, registration, banner
     ├── Kconfig.projbuild         menuconfig settings (§9)
@@ -744,6 +786,8 @@ i2c_tools/
     ├── ctl_types.h               the pipeline's records: sensors_raw_t ... log_record_t
     ├── capture.c/.h              the loop's records kept in PSRAM + `capture`; read out by the link
     ├── cmd_battery.c/.h          battery divider on ADC1, sampled by the control task, + `battery`
+    ├── param_table.c/.h          every field of core/'s blimp_params_t by name, with its range
+    ├── cmd_param.c/.h            the live parameters, their hand-over to the control task, + `param`
     ├── cmd_motor.c/.h            DRV8833 ×2, failsafe
     ├── cmd_ping.c/.h             PING))) ultrasonic, PARKED (not in SRCS)
     ├── led_blink.c/.h            WS2812 hue sweep
@@ -753,8 +797,10 @@ i2c_tools/
     └── link_protocol.h           packet layouts, shared with blimp_link.py
 ```
 
-The `pytest_*.py` file in this folder is Espressif's stock example test, written
-for different hardware (a CCS811). It is not a test of this firmware.
+`main/param_table.c` is the one file here with a host test
+(`host/test_param_table.c`, run by `tools/fw_host_test.py`); the rest is
+checked on the bench. The project also compiles `core/` as a component
+(`EXTRA_COMPONENT_DIRS` in `CMakeLists.txt`) since 2026-10-30.
 
 ## 14. Known issues and caveats
 

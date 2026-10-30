@@ -43,6 +43,17 @@ rail): `docs/motor-setpoint-ownership.md`. Fixed the same day on branch `motor-o
 the trace plot repaints in 3 ms instead of a second (cached paths, per-column decimation, a 1 px
 pen). Checked offscreen; T1 on the bench is the confirmation.
 
+**2026-10-30, gains changed live (branch `param-table`).** The S3 firmware compiles `core/` as a
+component and has a `param` console command over `blimp_params_t`: list, set, reset by name
+(`param alt.kp 0.4`), over USB or the air, range- and order-checked, then
+`blimp_params_validate()`; RAM only, a reboot restores `params.c`. It is increment 5's
+parameter table of `docs/control-loop-plan.md`, pulled forward as a console command instead of
+packets. Every capture's `.json` (Bench page, `step_test.py`) records the gains; race mode
+refuses a change. Builds clean; the table is tested on the host and the ground side against
+the mock; not yet run on the board, and nothing on the blimp reads the gains until increment 3
+puts `blimp_step()` in the loop. Found on the way: the closed-loop tests C1–C4 step a setpoint
+that `blimp_step()` cannot take today (a `core/` change, noted in the plan's increment 3).
+
 **2026-10-29, the link and the window reviewed.** Four reviewers and the team settled how the
 window and the link may affect the motors: `docs/link-robustness-review.md`. The ground station
 changed on branch `link-robustness`: a change leaves at once and the repeat holds 20 Hz on

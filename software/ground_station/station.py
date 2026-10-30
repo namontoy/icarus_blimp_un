@@ -33,18 +33,20 @@ CAP_POLL_S = 0.5        # progress of a running capture
 CAPTURES_DIR = 'captures'   # under the working directory; gitignored
 
 
-def save_capture(info, data, notes, source, folder=CAPTURES_DIR):
+def save_capture(info, data, notes, source, folder=None, params=None):
     """The .bin blimp_log.py reads, and a .json beside it with the header, the
-    operator's notes and the summary figures, so a capture found a month later
-    still says what it was. Returns (path, header, records, summary)."""
-    path = bl.capture_path(folder=folder)
+    operator's notes, the summary figures and the controller's parameters
+    (`params`, from Station._params_for()), so a capture found a month later
+    still says what it was and which gains it ran with. Returns (path,
+    header, records, summary)."""
+    path = bl.capture_path(folder=folder or CAPTURES_DIR)
     blimp_log.write_file(path, info['raw'], data)
     h, records = blimp_log.decode(info['raw'], data)
     summ = blimp_log.summary(h, records)
     meta = {'file': os.path.basename(path), 'saved': time.strftime('%Y-%m-%d %H:%M:%S'), 'source': source,
             'notes': notes, 'header': h, 'records': len(records), 'duration_s': summ['duration_s'],
             'dt_ms': summ['dt_ms'], 'gaps': summ['gaps'], 'exec_us': summ['exec_us'],
-            'fresh_hz': summ['fresh_hz'], 'flags_seen': summ['flags_seen']}
+            'fresh_hz': summ['fresh_hz'], 'flags_seen': summ['flags_seen'], 'params': params}
     with open(os.path.splitext(path)[0] + '.json', 'w') as f:
         json.dump(meta, f, indent=2)
     return path, h, records, summ
@@ -88,6 +90,7 @@ class Station(QObject):
         self._cap_q = collections.deque()
         self._cap_ev = threading.Event()
         self._cap_watch = False             # poll the blimp while a capture runs
+        self._cap_params = None             # (capture id, parameters) when this window started it
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.tick)
         self._closed = False
@@ -236,11 +239,18 @@ class Station(QObject):
     # -------------------------------------------------------------- console
 
     def console(self, line):
-        if self.race and line.split()[:1] == ['motor']:
+        words = line.split()
+        if self.race and words[:1] == ['motor']:
             # The console's motor command drives the motors with no link timer
             # at all; the firmware refuses it in the autonomous modes only from
             # increment 3 on, so the window refuses it here meanwhile.
             self.con_text.emit('> %s\n[race mode: motor commands are refused here; STOP is the only one]\n' % line)
+            self.con_end.emit()
+            return
+        if self.race and words[:1] == ['param'] and (len(words) > 2 or words[1:2] in (['--reset'], ['-r'])):
+            # A gain changed during a run is a hand on the controller, which
+            # the race forbids; reading the gains is monitoring.
+            self.con_text.emit('> %s\n[race mode: parameter changes are refused here; reading them is not]\n' % line)
             self.con_end.emit()
             return
         self._console_q.append(line)
@@ -296,6 +306,10 @@ class Station(QObject):
                 self._cap_watch = True
                 self.log('info', 'capture %d started: %d s' % (info['capture_id'], seconds))
                 self.cap.emit({'phase': 'status', 'info': info})
+                try:
+                    self._cap_params = (info['capture_id'], self.blimp.read_params())
+                except (TimeoutError, ConnectionError, ValueError, OSError):
+                    self._cap_params = None     # the download reads them again and says why
             elif action == 'stop':
                 info = cap.stop()
                 self._cap_watch = False
@@ -322,7 +336,8 @@ class Station(QObject):
                 info, data = cap.download(
                     progress=lambda k, n: self.cap.emit({'phase': 'download', 'info': info, 'progress': k / n}))
                 path, h, records, summ = save_capture(info, data, notes,
-                                                      'demo' if self.demo else self.blimp_host)
+                                                      'demo' if self.demo else self.blimp_host,
+                                                      params=self._params_for(info))
                 self.log('ok', 'capture %d: %d records saved to %s' % (info['capture_id'], len(records), path))
                 self.cap.emit({'phase': 'saved', 'info': info, 'file': path})
                 self.cap_data.emit({'header': h, 'records': records, 'rows': blimp_log.to_units(h, records),
@@ -331,6 +346,24 @@ class Station(QObject):
             self._cap_watch = False
             self.log('warn', 'capture: %s' % e)
             self.cap.emit({'phase': 'error', 'error': str(e)})
+
+    def _params_for(self, info):
+        """The capture's 'params' for its .json: the blimp's parameters read at
+        the download, with the set read at the start under 'at_start' when
+        this window started the capture and a 'param' change came between
+        (a step response then belongs to two sets of gains)."""
+        try:
+            now = self.blimp.read_params()
+        except (TimeoutError, ConnectionError, ValueError, OSError) as e:
+            self.log('warn', 'capture: the parameters were not recorded (%s)' % e)
+            return {'error': str(e)}
+        now['read'] = 'at the download'
+        start = self._cap_params
+        if start and start[0] == info['capture_id'] and start[1]['changes'] != now['changes']:
+            now['at_start'] = start[1]
+            self.log('warn', 'capture %d: the parameters changed during it; the .json keeps both sets'
+                     % info['capture_id'])
+        return now
 
     # ---------------------------------------------------------------- close
 

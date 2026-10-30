@@ -11,6 +11,7 @@ the firmware's "Wireless link" menuconfig settings). The blimp is 192.168.4.1.
     python software/blimp_link.py status                       # telemetry for 5 s
     python software/blimp_link.py console                      # interactive console over the air
     python software/blimp_link.py console "motor --status"     # one command
+    python software/blimp_link.py console "param alt.kp 0.4"   # a controller gain, live, RAM only
     python software/blimp_link.py motor 0.2 0 0 0 --seconds 2  # FL RL FR RR, signed, -1..1
     python software/blimp_link.py stop
     python software/blimp_link.py capture start -t 60          # record the loop's records on the blimp
@@ -25,6 +26,7 @@ command, whichever comes first. Ctrl+C sends a stop.
 import argparse
 import os
 import queue
+import re
 import socket
 import struct
 import sys
@@ -504,6 +506,41 @@ class BlimpConsole:
                 print('\n[interrupted; the command may still be running on the blimp]')
 
 
+# ------------------------------------------------------------- parameters
+
+# The first line of the firmware's 'param' listing (main/cmd_param.c).
+_PARAM_HEAD = re.compile(r'^(\d+) parameters; (\d+) changes since boot')
+
+
+def parse_params(text):
+    """The firmware's 'param' listing, all of it or a prefix's, as
+    {'changes': sets since boot, 'values': {name: value}, 'changed': [names
+    whose value is not params.c's]}. ValueError when the text is not one: a
+    firmware from before 2026-10-30 answers 'Unrecognized command'."""
+    head, values, changed = None, {}, []
+    for line in text.splitlines():
+        if head is None:
+            head = _PARAM_HEAD.match(line.strip())
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        try:
+            values[parts[0]] = float(parts[1])
+        except ValueError:
+            continue                    # the column titles
+        if line.rstrip().endswith('*'):
+            changed.append(parts[0])
+    if head is None or not values:
+        raise ValueError('not a parameter listing: %r' % text.strip()[:80])
+    return {'changes': int(head.group(2)), 'values': values, 'changed': changed}
+
+
+def read_params(console, timeout=3.0):
+    """The blimp's parameters now, through the console; see parse_params()."""
+    return parse_params(console.run('param', timeout=timeout, idle=timeout))
+
+
 # -------------------------------------------------------------------- CLI
 
 def _need_link(args):
@@ -714,6 +751,23 @@ def cmd_selftest(args):
         summ = blimp_log.summary(h, recs)
         assert summ['records'] == 3 and summ['overruns'] == 3 and 'overrun' in summ['flags_seen']
         blimp_log.format_summary(summ)
+
+    listing = ('45 parameters; 2 changes since boot; 1 differ from params.c (marked *); RAM only, '
+               'a reboot restores params.c\n'
+               'name                          value  unit         accepted\n'
+               'alt.kp                          0.4  N/m          [0, 20]  *\n'
+               'alt.ki                            0  N/(m s)      [0, 10]\n'
+               'use_mag                           0  0 or 1       [0, 1]\n')
+    pr = parse_params(listing)
+    assert pr['changes'] == 2 and pr['changed'] == ['alt.kp'] and pr['values']['alt.kp'] == 0.4
+    assert pr['values']['alt.ki'] == 0.0 and len(pr['values']) == 3
+    for not_params in ('Unrecognized command\n', ''):
+        try:
+            parse_params(not_params)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('parsed %r as parameters' % not_params)
 
     for bad, why in ((ms[:-1], 'truncated'),
                      (ms[:10] + bytes([ms[10] ^ 0x01]) + ms[11:], 'bit flip'),

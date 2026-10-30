@@ -13,6 +13,9 @@ idf_component_register(SRCS "i2ctools_example_main.c"
                             "ctl_task.c"
                             "capture.c"
                             "cmd_battery.c"
+                            "param_table.c"
+                            "cmd_param.c"
                        PRIV_REQUIRES fatfs esp_driver_i2c esp_driver_gpio esp_driver_ledc esp_timer vl53l1x_uld esp_adc
                                      console esp_wifi esp_netif esp_event nvs_flash lwip esp_psram esp_app_format
+                                     core
                        INCLUDE_DIRS ".")

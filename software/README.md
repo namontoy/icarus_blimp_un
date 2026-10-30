@@ -10,6 +10,7 @@ then:
 python software/blimp_link.py selftest                     # no hardware
 python software/blimp_link.py status                       # telemetry
 python software/blimp_link.py console                      # the firmware console, over the air
+python software/blimp_link.py console "param alt."         # the controller's gains; "param alt.kp 0.4" sets one
 python software/blimp_link.py motor 0.2 0 0 0 --seconds 2  # FL RL FR RR, PROPS OFF
 python software/blimp_link.py stop
 python software/link_check.py --download 60 --timers      # latency, loss, the blimp's wait, during a download too

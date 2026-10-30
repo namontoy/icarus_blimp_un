@@ -44,7 +44,8 @@ CLAUDE.md, and others). Keep it tool-neutral; tool-specific notes belong in that
   task (`main/ctl_task.c`, middle stages empty) with the capture of its records
   (`main/capture.c`, in PSRAM, fetched over the link); plan and increments in
   `docs/control-loop-plan.md`, esp-drone reuse in `docs/reuse_log.md`. Once its stages are
-  filled, it calls `blimp_step()`.
+  filled, it calls `blimp_step()`. Since 2026-10-30 it compiles `core/` as a component, and
+  the `param` console command (`main/cmd_param.c`) reads and sets `blimp_params_t` live, in RAM.
 - `firmware/projects/espfly/`: the previous board's shell. `main/main.c` is only an RTOS shell
   around `blimp_step()` (the esp_timer loop pattern); not part of day-to-day builds.
 - `firmware/projects/optflow_cam/`: ESP32-CAM optical-flow experiment. `blink/`: toolchain test.
@@ -111,6 +112,9 @@ python tools/wifi_soak.py <label> --connection ICARUS-xxxxxx   # Linux: S3 link 
   the evidence that total thrust stays at or under 100 gf.
 - Changing a struct in `core/include/blimp/*.h` means updating its ctypes mirror and
   `_EXPECTED_LAYOUT` in `sim/blimp_ffi.py`; the import-time check against the DLL fails otherwise.
+  A field added to `blimp_params_t` also needs its entry and accepted range in
+  `firmware/projects/i2c_tools/main/param_table.c` (the S3's `param` command);
+  `tools/fw_host_test.py`, run by `verify.py`, fails otherwise.
 - `tools/build.py` compiles with `-std=c11 -Wall -Werror`. On Windows clang targets MSVC, so never
   add `-lm` there; on Linux `build.py` adds it itself (`LDLIBS`). Include the header that owns
   what you use (`<stddef.h>` for `NULL`): MSVC's headers pull in more than glibc's.

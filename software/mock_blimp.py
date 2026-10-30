@@ -11,8 +11,9 @@ built on it can be exercised on a laptop alone:
     python software/blimp_link.py --host 127.0.0.1 console "motor --status"
 
 It is a model of the link, not of the sensors: the console knows 'help',
-'motor --status', 'motor -s', 'wifi' and 'link', and answers anything else
-the way the firmware does ("Unrecognized command"). The capture (LOG_CMD,
+'motor --status', 'motor -s', 'wifi', 'link' and 'param' (a subset of the
+table, in the firmware's format), and answers anything else the way the
+firmware does ("Unrecognized command"). The capture (LOG_CMD,
 LOG_INFO, LOG_CHUNK) is modelled too: records at 50 Hz from the same toy
 airframe, so 'blimp_link.py capture' and the ground station's Bench page can
 be exercised without a blimp. Keep it in step with link_protocol.h;
@@ -40,6 +41,22 @@ CAP_MAX_S = 400             # CONFIG_CAPTURE_MAX_SECONDS
 # attach settings: +/-2 g (16384 LSB/g), +/-250 deg/s (131 LSB/(deg/s)), a
 # QMC5883L at 12000 LSB/gauss, a BME280.
 ACC_LSB, GYRO_LSB, MAG_LSB = 16384.0, 131.0, 12000.0
+# A subset of the 'param' table (firmware main/param_table.c) with params.c's
+# values of 2026-10-30: the PID gains and the hover feed-forward, enough for
+# the ground station's capture record and its tests. The mock keeps them and
+# prints them; it has no controller to give them to.
+PARAMS = (      # name, default, accepted min, max, unit
+    ('hover_thrust_n', 0.0588399, 0.0, 0.0980665, 'N'),
+    ('alt.kp', 1.336, 0.0, 20.0, 'N/m'),
+    ('alt.ki', 0.0, 0.0, 10.0, 'N/(m s)'),
+    ('alt.kd', 1.336, 0.0, 20.0, 'N s/m'),
+    ('yaw.kp', 0.0332, 0.0, 2.0, 'N m/rad'),
+    ('yaw.ki', 0.0, 0.0, 2.0, 'N m/(rad s)'),
+    ('yaw.kd', 0.0332, 0.0, 2.0, 'N m s/rad'),
+    ('surge.kp', 0.3, 0.0, 10.0, 'N/m'),
+    ('surge.ki', 0.0, 0.0, 10.0, 'N/(m s)'),
+    ('surge.kd', 0.0, 0.0, 10.0, 'N s/m'),
+)
 
 
 class MockBlimp:
@@ -63,6 +80,8 @@ class MockBlimp:
         self.motor_seq = 0
         self.rx_stale = 0
         self.radio_on = True            # tests: False is the Wi-Fi gone both ways (reboot() is the other fault)
+        self.params = {name: default for name, default, *_ in PARAMS}
+        self.param_changes = 0
         # A toy airframe for the sensor packet: heading turns with the front
         # pair's difference, height rises with the rear pair, and the IMU sees
         # gravity plus motor vibration. Enough for a GUI to show motion; not a
@@ -111,6 +130,8 @@ class MockBlimp:
         self.last_rx = 0.0
         self.motor_from = None
         self.last_motor_rx = 0.0
+        self.params = {name: default for name, default, *_ in PARAMS}     # RAM only, as on the blimp
+        self.param_changes = 0
 
     def failsafe_state(self):
         if not self.failsafe_on:
@@ -358,7 +379,10 @@ class MockBlimp:
             return ('help \n  Print the list of registered commands\n\n'
                     'motor [-m <id>] [-t <-1..1>] [-s] [--status]\n  Drive the two DRV8833 motor drivers\n\n'
                     'wifi [--start] [--stop]\n  Status of the blimp\'s Wi-Fi access point\n\n'
-                    'link \n  Status of the UDP command/telemetry link\n')
+                    'link \n  Status of the UDP command/telemetry link\n\n'
+                    'param [name|prefix [value]] | --reset [name]\n  The controller\'s parameters, live in RAM\n')
+        if line.split()[:1] == ['param']:
+            return self.param_command(line.split()[1:])
         if line in ('motor', 'motor --status'):
             rows = ''.join('%-6s %-12s %-9s %+10.3f %9.1f%%\n' % (n, w, g, c, 100 * abs(c))
                            for n, w, g, c in zip(bl.MOTOR_ORDER, ('#1 IN1/IN2', '#1 IN3/IN4', '#2 IN1/IN2', '#2 IN3/IN4'),
@@ -384,6 +408,55 @@ class MockBlimp:
                 time.sleep(0.3)
             return ''.join(out)
         return 'Unrecognized command\n'
+
+    def param_command(self, args):
+        """'param' as main/cmd_param.c answers it, over PARAMS only."""
+        table = {p[0]: p for p in PARAMS}
+
+        def listing(prefix):
+            rows = [p for p in PARAMS if p[0].startswith(prefix)]
+            if not rows:
+                return "no parameter named or starting with '%s'; 'param' lists them\n" % prefix
+            differ = sum(self.params[p[0]] != p[1] for p in PARAMS)
+            out = ['%d parameters; %d changes since boot; %d differ from params.c (marked *); RAM only, '
+                   'a reboot restores params.c\n' % (len(PARAMS), self.param_changes, differ),
+                   '%-22s %12s  %-12s %s\n' % ('name', 'value', 'unit', 'accepted')]
+            for name, default, lo, hi, unit in rows:
+                v = self.params[name]
+                out.append('%-22s %12.6g  %-12s [%g, %g]%s\n' % (name, v, unit, lo, hi,
+                                                                 '  *' if v != default else ''))
+            return ''.join(out)
+
+        def put(name, value):
+            _, _, lo, hi, unit = table[name]
+            if not lo <= value <= hi:
+                return '%s: %g outside the accepted range; not changed (accepted: [%g, %g] %s)\n' % (
+                    name, value, lo, hi, unit)
+            was = self.params[name]
+            if value == was:
+                return '%s is already %g %s; nothing changed\n' % (name, value, unit)
+            self.params[name] = value
+            self.param_changes += 1
+            return '%s = %g %s (was %g); %d changes since boot\n' % (name, value, unit, was, self.param_changes)
+
+        if not args:
+            return listing('')
+        if args[0] in ('--reset', '-r'):
+            if len(args) == 1:
+                if self.params != {p[0]: p[1] for p in PARAMS}:
+                    self.params = {p[0]: p[1] for p in PARAMS}
+                    self.param_changes += 1
+                return '%d changes since boot\n' % self.param_changes
+            return put(args[1], table[args[1]][1]) if args[1] in table else "no parameter '%s'\n" % args[1]
+        if len(args) == 1:
+            return listing(args[0])
+        if args[0] not in table:
+            return "no parameter '%s'; 'param' lists them\n" % args[0]
+        try:
+            value = float(args[1])
+        except ValueError:
+            return "%s: '%s' is not a number; not changed\n" % (args[0], args[1])
+        return put(args[0], value)
 
     def console_loop(self):
         while True:

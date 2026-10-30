@@ -22,8 +22,10 @@ description: Checklist for changing the blimp's C flight controller in core/ (es
 - Non-finite or out-of-range inputs must still produce a safe output (all-zero thrust), as the
   existing modules do.
 - **New tunable:** add a field to `blimp_params_t` (`core/include/blimp/params.h`), its default
-  and the reasoning behind it in `core/src/params.c`, and the same field at the same position in
-  `BlimpParams` in `sim/blimp_ffi.py`.
+  and the reasoning behind it in `core/src/params.c`, the same field at the same position in
+  `BlimpParams` in `sim/blimp_ffi.py`, and an entry with its accepted range in
+  `firmware/projects/i2c_tools/main/param_table.c`, so the S3's `param` command can set it
+  (`tools/fw_host_test.py`, part of `tools/verify.py`, fails on a field with no entry).
 - **Changed struct** that crosses the simulator boundary (listed in `_C_ORDER` in
   `sim/blimp_ffi.py`): update its ctypes mirror field for field in declaration order, and update
   `_EXPECTED_LAYOUT`. A new struct crossing the boundary also needs a case in

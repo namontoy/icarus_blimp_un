@@ -233,7 +233,10 @@ source will be the `cam_result_t` mailbox; the packet belongs to the camera-to-S
 **D10. Every tunable in one `params_t`, in one file, with its default.** Introduced in
 increment 2 with the first tunables (mounting rotations, DLPF setting, ToF timing, battery
 divider and averaging); increment 3 adds the mixer geometry, thrust map, caps and cutoff.
-Prompt 2's flat table `{name, type, pointer, min, max}` indexes the same struct.
+Prompt 2's flat table `{name, type, pointer, min, max}` indexes the same struct. **2026-10-30:**
+the table that exists (`main/param_table.c`, offsets rather than pointers) indexes `core/`'s
+`blimp_params_t`, the controller's tunables; the firmware's own (this decision's) join it when
+they exist.
 
 **D11. The period is a compile-time constant, not a parameter.** The rate dividers, the DLPF
 choice and the log cadence all assume 20 ms, so a runtime change would silently break them.
@@ -275,7 +278,13 @@ fresh when the frame sequence number moved.
    switch, both sending `MODE_SET` MANUAL; that page's "Go autonomous" button sending the
    autonomous mode, disabled until then (the page exists since 2026-10-28, `control.py`); mode
    and latch pills; the "sensor stream paused" notice reworded for D3; `mock_blimp.py` modelling
-   the latch).
+   the latch). **Open (found 2026-10-30):** the closed-loop tests of `docs/pid-tuning-plan.md`
+   (C1–C4) step a setpoint, an altitude of 1.2 → 1.7 → 1.2 m or a 90° heading, but
+   `blimp_step()`'s input (`blimp_input_t`: the IMU, the target observation, contact, arm) has
+   no setpoint, and guidance chooses the altitude and heading itself. A test mode that holds a
+   commanded altitude or heading is a `core/` change (the core-change skill, the ctypes mirror
+   in `sim/blimp_ffi.py`), and the firmware then needs a way to send it: `MODE_SET`'s payload
+   or a console command. Plan it with this increment.
 4. **Logging** (built 2026-10-27, ahead of 2 and 3): `capture.c` (the buffer in PSRAM, the
    `capture` command), `LOG_CMD`/`LOG_INFO`/`LOG_CHUNK` in `net_link.c`, the chunked download
    with re-request in `blimp_link.py capture`, `software/blimp_log.py` (decode, summary, CSV),
@@ -284,7 +293,14 @@ fresh when the frame sequence number moved.
    carry grows with the stages: the loop's own throttles with `pwm_out()` (today the motor
    driver's readback), the battery with the ADC, the cameras with their mailboxes.
 5. **Reuse items from esp-drone**: the parameter table with `PARAM_GET`/`PARAM_SET`, the log
-   block request (`LOG_BLOCK_REQ`/`LOG_BLOCK_DATA`), `reuse_log.md` completed.
+   block request (`LOG_BLOCK_REQ`/`LOG_BLOCK_DATA`), `reuse_log.md` completed. **The table was
+   pulled forward on 2026-10-30** (`main/param_table.c`, `main/cmd_param.c`), as the `param`
+   console command over `core/`'s `blimp_params_t`: the UDP console already carries any command
+   over the air, so a gain change on the bench is a console line, with no new packet. The
+   control task takes the set at the top of a tick; until increment 3 nothing reads it. The
+   `PARAM_GET`/`PARAM_SET`/`PARAM_VALUE` packets stay here, to be built over the same table if
+   the ground station wants a panel. The same day `core/` became an ESP-IDF component of the
+   S3 project, which increment 3 needs for `blimp_step()`.
 
 ## 5. What the esp-drone prompt adds, and what it does not
 

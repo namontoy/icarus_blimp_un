@@ -40,9 +40,13 @@ numbers. Two more things sit in series with every gain:
   2.25 m range question (CLAUDE.md) is open, so the delay is a measurement too.
 
 Where the gains live: `blimp_params_t`, defaults in `params.c`; in the simulator they change at
-run time through `ctl.set_params()` (docs/09 §7); on the blimp they change by rebuild and flash
-until `PARAM_SET` arrives (control-loop plan increment 5), which is an argument for doing the
-open-loop identification first, when no gain is on the vehicle at all.
+run time through `ctl.set_params()` (docs/09 §7); on the blimp, since 2026-10-30, through the
+`param` console command, over USB or over the air (`blimp_link.py console "param alt.kp 0.4"`,
+or the ground station's console dock; `firmware/projects/i2c_tools/README.md` §5). The values
+live in RAM, so a reboot returns to `params.c`, and the gains that pass go into `params.c` by a
+commit. Nothing on the blimp reads them until increment 3 runs `blimp_step()` in the loop,
+which is an argument for doing the open-loop identification first, when no gain is on the
+vehicle at all. Every capture's `.json` (Bench page, `step_test.py`) records the listing.
 
 ## 2. Methods, and what this plan takes from each
 
@@ -222,8 +226,9 @@ Pass: the Rule 13 sweep still passes; no sustained oscillation on either loop at
 the lap-time tables updated with the settings stated.
 
 **C1–C4, closed loop on the vehicle.** Need control-loop plan increment 3 (`blimp_step()` on the
-S3, `MODE_SET`, the kill latch) and want increment 5 (`PARAM_SET`, so a gain change is a packet
-and not a flash).
+S3, `MODE_SET`, the kill latch) and a setpoint the tests can step, which `blimp_step()` does not
+take today (control-loop plan, increment 3's open item). A gain change is a `param` line, not a
+flash, since 2026-10-30.
 - C1, altitude alone, yaw held by the Y1 thread: setpoint steps 1.2 → 1.7 → 1.2 m. Pass: 95 %
   within 4 s, overshoot under 0.1 m, holds within ±0.05 m for 30 s, no limit cycle; the sink
   side slower, as H2 predicts.
@@ -261,8 +266,8 @@ into a capture; Ku and Tu from it, gains from Tyreus–Luyben, checked against C
    `MOTOR_SET`, which is the firmware's passthrough, and the capture already records everything
    the fits need. One bench session for yaw, one for heave.
 3. S1 follows in an afternoon.
-4. C1–C4 wait for increment 3; doing them by rebuilding per gain is possible but slow, so
-   increment 5's `PARAM_SET` is worth pulling forward.
+4. C1–C4 wait for increment 3 and its setpoint input. The gains no longer wait for a rebuild:
+   the `param` command (2026-10-30) is increment 5's table, pulled forward.
 5. The GUI's motor-ownership change (`docs/motor-setpoint-ownership.md`) should land before the
    closed-loop sessions: a 3 s cut from a repaint during C1 is a failed test for the wrong reason.
 

@@ -1,8 +1,9 @@
 """The bridge alone, against the in-process demo blimp: the standing command,
 the watchdog and its latch, send on change, the stream's rate, STOP against a
 send in flight, a Wi-Fi drop with its ramped resume, a long outage, a reboot,
-race mode, pad B's latch and the stall report (blimp_bridge.py's docstring
-has the rules; docs/link-robustness-review.md why)."""
+race mode, pad B's latch, the stall report (blimp_bridge.py's docstring
+has the rules; docs/link-robustness-review.md why) and the controller's
+parameters read over the console."""
 import socket
 import threading
 import time
@@ -224,6 +225,40 @@ other.sendto(bl.pack(bl.PKT_MOTOR_STOP, 1, bl._MOTOR_STOP.pack(0)), b.link.addr)
 other.close()
 time.sleep(0.05)
 check(fl() == 0.0, "mock: another station's STOP is obeyed")
+
+# ------------------------------------------- the parameters, through the console
+# The firmware's 'param' (main/cmd_param.c, 2026-10-30) in the mock's subset;
+# blimp_link.parse_params() reads the same format from both.
+p0 = b.read_params()
+check(p0['changes'] == 0 and near(p0['values']['alt.kp'], 1.336) and not p0['changed'],
+      "params: read over the console, params.c's values, nothing changed")
+out = b.run_console('param alt.kp 0.4', None)
+check('alt.kp = 0.4' in out, 'params: a set answers with the value in effect: %r' % out.strip())
+out = b.run_console('param alt.kp 40', None)
+check('not changed' in out and mock.params['alt.kp'] == 0.4, 'params: a value outside the range is refused')
+p1 = b.read_params()
+check(p1['changes'] == 1 and p1['values']['alt.kp'] == 0.4 and p1['changed'] == ['alt.kp'],
+      'params: the listing shows the change, its count and its mark')
+held = threading.Event()
+release = threading.Event()
+
+
+def hold_console():
+    with b._console_lock:            # a long console command, as 'tof -n 200' would be
+        held.set()
+        release.wait(2.0)
+
+
+threading.Thread(target=hold_console, daemon=True).start()
+held.wait(1.0)
+t0 = time.monotonic()
+try:
+    b.read_params(wait=0.2)
+    busy = False
+except TimeoutError:
+    busy = True
+release.set()
+check(busy and time.monotonic() - t0 < 0.5, 'params: a busy console makes the read give up after its wait')
 ping.on = False
 b.close()
 

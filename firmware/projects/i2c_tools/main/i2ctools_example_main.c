@@ -28,6 +28,7 @@
 #include "ctl_task.h"
 #include "capture.h"
 #include "cmd_battery.h"
+#include "cmd_param.h"
 
 static const char *TAG = "i2c-tools";
 
@@ -159,6 +160,7 @@ void app_main(void)
     register_ctl();
     register_capture();
     register_battery();
+    register_param();     /* before ctl_task_start(): the loop takes its first set */
     register_exit();
 
     /*
@@ -251,7 +253,8 @@ void app_main(void)
     printf(" | 14. Try 'ctl' for the control loop and its timing          |\n");
     printf(" | 15. Try 'capture' to record a minute of the loop's records |\n");
     printf(" | 16. Try 'battery' for the motor cell's voltage on GPIO1    |\n");
-    printf(" | 17. Type 'exit' or 'quit' to see how to leave the monitor  |\n");
+    printf(" | 17. Try 'param' for the controller's gains, changed live   |\n");
+    printf(" | 18. Type 'exit' or 'quit' to see how to leave the monitor  |\n");
     printf(" |                                                            |\n");
     printf(" ==============================================================\n\n");
 
