@@ -1,0 +1,43 @@
+# Python dependencies for the MuJoCo simulation (sim/).
+#
+# NOT needed for the C control core (core/, built by tools/build.py with clang)
+# and NOT needed for the firmware (firmware/, which uses ESP-IDF's own separate
+# Python 3.11 environment that its installer manages). Only sim/ needs this.
+#
+# Install into a PROJECT-LOCAL virtual environment, never globally:
+#
+#     python -m venv .venv
+#     .venv\Scripts\python.exe -m pip install -r requirements.txt     (Windows)
+#     .venv/bin/python -m pip install -r requirements.txt             (Linux/macOS)
+#
+# or just run  python tools/setup_env.py  which does it for you.
+#
+# WHY NOT GLOBAL: installing MuJoCo globally on 2026-09-21 put it into a
+# personal Python that also holds TensorFlow, pandas and scikit-learn. Sharing
+# one environment between a competition robot and unrelated data-science work
+# means either can silently break the other, and neither is reproducible for
+# the team in Bogota. Hence the venv.
+#
+# Versions are PINNED EXACTLY, not floated. The simulation's results are only
+# meaningful if everyone is running the same physics engine: MuJoCo's contact
+# solver, fluid model and default solref have all changed across minor
+# releases, and sim/scene/build_scene.py's physics notes were written against
+# the behaviour of 3.13.0 specifically (it documents two MuJoCo behaviours
+# that were established by direct experiment against this exact build).
+#
+# Verified working together on 2026-09-22, Python 3.12.10, Windows 11, and on
+# 2026-10-27, Python 3.12 (conda), Ubuntu 22.04.
+
+# --- direct dependencies ---------------------------------------------------
+mujoco==3.13.0        # physics engine; sim/sim_main.py, sim/scene/*.py
+numpy==1.26.4         # arrays and the sensor-noise RNG; sim/sim_main.py
+
+# --- transitive, pinned so the environment is fully reproducible -----------
+# (pulled in by mujoco; listed explicitly so `pip install -r` cannot drift)
+absl-py==2.5.0
+etils==1.14.0
+fsspec==2026.9.0
+glfw==2.10.2          # also provides the interactive viewer window
+PyOpenGL==3.1.10      # also provides the interactive viewer rendering
+typing_extensions==4.16.0
+zipp==4.1.0

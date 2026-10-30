@@ -1,0 +1,44 @@
+menu "Lens test"
+
+    choice LENS_TEST_WIFI_MODE
+        prompt "Wi-Fi mode"
+        default LENS_TEST_WIFI_AP
+        help
+            Access point: the board creates its own network and is always
+            http://192.168.4.1/. Nothing to configure at the lab or the venue.
+            Station: the board joins the router named below and prints its
+            address on the serial console.
+
+        config LENS_TEST_WIFI_AP
+            bool "Access point (laptop joins the board)"
+        config LENS_TEST_WIFI_STA
+            bool "Station (board joins your router)"
+    endchoice
+
+    config LENS_TEST_WIFI_SSID
+        string "Network name (SSID)"
+        default "lens-test"
+
+    config LENS_TEST_WIFI_PASSWORD
+        string "Password (8+ characters, or empty for an open network)"
+        default "lenstest1"
+
+    config LENS_TEST_SERIAL_BAUD
+        int "Serial rate for the PC tool on UART0 (after the boot log)"
+        default 460800
+        help
+            The boot log stays at 115200 baud; the firmware then switches UART0
+            to this rate for lens_test.py --port. 460800 is what the generic
+            USB-C adapters on the bench are known to handle (esptool flashes at
+            it); the one tried could not do 921600 at all.
+
+    config LENS_TEST_JPEG_QUALITY
+        int "JPEG quality for stills and stream (0 best .. 63 worst)"
+        range 0 63
+        default 10
+        help
+            esp32-camera's scale. 10 keeps the sharpness and vignetting numbers
+            meaningful; below about 8 the OV2640's full-size frames can overflow
+            the frame buffer and get dropped.
+
+endmenu

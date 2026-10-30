@@ -1,0 +1,11 @@
+# The blimp's ground station (software/ground_station). Python 3.9 or newer.
+# PyQt6 6.11.0: what the laptop (Windows 11) and the Steam Deck run.
+# Nothing else: the station talks only to the S3, over Wi-Fi, with the standard
+# library's sockets; the cameras are wired to the S3, never to this computer.
+#
+#   pip install -r software/ground_station/requirements.txt
+#
+# The same line on Windows, Linux and macOS: the PyQt6 wheels carry Qt itself,
+# so there is no system package or web engine to install (README, "Installing").
+
+PyQt6==6.11.0         # the window

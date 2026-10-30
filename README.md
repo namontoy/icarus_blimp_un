@@ -1,0 +1,429 @@
+# DroneUN
+
+**An autonomous blimp for IAR-LARC 2026**, a Universidad Nacional de Colombia team's entry in
+*International Airship Racing at LARC*, held at Universidad Militar Nueva Granada in Bogotá.
+
+A helium blimp has to fly itself around a course and physically touch four tethered red
+balloons in a set order, on two different courses. The lowest combined time wins. The catch:
+**all motors together may produce at most 100 grams-force of thrust.**
+
+This repository holds the flight controller, the ESP32-S3 firmware, a MuJoCo simulation of both
+race courses, and the analysis behind the design.
+
+> **One controller, two hosts.** The whole flight controller is a single portable C function,
+> `blimp_step()`. The firmware runs it on the airship; the simulation loads the same source
+> compiled as a DLL. Whatever is tuned in simulation is exactly what flies.
+
+---
+
+## Status
+
+| Part | State |
+|---|---|
+| **Control core** · `core/` | ✅ 11,276 unit checks pass, including a sweep of 114,244 actuator demands proving the 100 gf cap cannot be exceeded |
+| **Simulation** · `sim/` | ✅ Completes both courses: every loop with a downward range sensor, about two in three without one |
+| **Bench firmware** · `firmware/projects/i2c_tools/` | 🟡 Runs on the ESP32-S3-Zero: every sensor and the four reversible motors, its own Wi-Fi access point with a UDP link and console, a 50 Hz control task that logs a 400 s capture (its estimate, control and mixer stages still empty), and the controller's gains changed live over the air (`param`). The link's hardening, the motor remap of 2026-10-29 and `param` were checked on the board on 2026-10-30 |
+| **Flight shell, previous board** · `firmware/projects/espfly/` | 🟡 Builds and links for the ESP-FLY board; never flashed; kept as the reference for the S3-Zero control task |
+| **Ground station** · `software/ground_station/` | 🟡 One PyQt6 window on Windows, Linux and the Steam Deck (Gaming mode, checked 2026-10-29): telemetry and sensors, the capture with a trace viewer, flying by hand from the keyboard or a gamepad, a race mode that only watches; using the window cannot change the motors (offscreen tests in `tools/verify.py --gui`). Not yet: the cameras' data, which has no link packet |
+| **Hardware** | 🟡 ESP32-S3-Zero, two DRV8833, MPU-6050, QMC5883L, BME280, VL53L1X, a battery divider, ESP32-CAMs; the rear pair's thrust swept on a scale through the DRV8833 (2026-10-28), the front pair not yet; the controller still assumes 35 gf per motor |
+
+### Simulated lap times
+
+Five runs per cell (sensor-noise seeds 0–4), 0.78 m envelope, camera field of view 58 × 45°
+(the measured OV2640 lens, see [docs/10](docs/10-known-issues.md)), up to 3 loops within 220 s
+of simulated time per run:
+
+| Course | Current board (no altitude sensor) | With a downward ToF sensor |
+|---|---|---|
+| 1 · rectangle | 6 of 15 loops completed · best laps 19.0–78.7 s | 15 of 15 loops completed · best laps 21.6–24.0 s |
+| 2 · figure-eight | 8 of 15 loops completed · best laps 25.9–113.4 s | 15 of 15 loops completed · best laps 23.0–24.2 s |
+
+Without an altitude reference the vehicle went into failsafe in all 10 runs; with the ToF sensor,
+in none, and every loop finished. With the earlier, optimistic 90 × 70° camera the sensorless
+board had completed 19 of 30 loops: the real lens loses the balloons more often, and every lost
+sighting is a lost altitude reference, while the ToF rows did not move. That is why the top
+hardware recommendation is a **VL53L1X time-of-flight sensor** (about 2 g) on the existing I²C
+bus, which the firmware and estimator already support. Among the team's own lenses the 58° type
+is the narrowest that completes every loop with the ToF; the 54° and 44° modules drop 3 and 6 of
+30 loops (comparison in [docs/10](docs/10-known-issues.md)).
+Every number here simulates a vehicle that has not been weighed or thrust-tested yet;
+[docs/10](docs/10-known-issues.md) lists what that leaves out.
+
+---
+
+## The race
+
+The rules that shape the design, from the official rulebook (see [reference/](reference/)):
+
+| Rule | Constraint |
+|---|---|
+| 13 | Total thrust across all motors ≤ **100 gf** (servos excluded) |
+| 11 | Neutrally buoyant to within **±10 gf** |
+| 10 | Helium ≤ one 50-inch balloon's worth; any envelope shape is allowed |
+| 14 | Fits in a **1 m × 1 m × 1.5 m** box |
+| 1, 15 | Fully autonomous; all sensing onboard, but **computation may run offboard** |
+| 2–4 | Touch the four balloons in the announced order; the clock starts at the first touch |
+| 5–6 | Up to 3 loops per course; the best loop on each of the two courses, summed, is the score |
+| 7 | A run is void if the airship leaves the competition area or needs human help |
+| 18–22 | 10 m × 5 m arena; four 22-inch red mylar balloons at 2 m height on a 4 m × 2 m rectangle; course 1 goes round it, course 2 is a figure-eight |
+
+Offboard computation is the most useful rule in the book: heavy processing can run on a laptop,
+and the airship only has to carry sensors, the controller and a radio.
+
+The rulebook also contradicts itself twice. Rule 12 says there are no size limits while Rule 14
+sets a box, and Rule 10's "approximately 1 m³" would be a 1.27 m sphere that does not fit in
+that box. We design to the stricter reading; the questions for the organizers are in
+[docs/01](docs/01-competition-brief.md).
+
+---
+
+## Why small is fast
+
+One piece of physics drives every design decision.
+
+**Neutral buoyancy fixes the mass.** A neutrally buoyant body weighs exactly as much as the air it
+displaces, so its mass is not a free choice; the envelope volume sets it:
+
+```
+m = ρ_air · V
+```
+
+**Added mass makes it heavier still.** An accelerating sphere also drags along air worth half its
+displaced mass:
+
+```
+m_eff = m + ½ ρ_air V = 1.5 · ρ_air · V
+```
+
+**So acceleration falls as volume grows.** With thrust capped at F = 100 gf = 0.981 N:
+
+```
+a_max = F / (1.5 · ρ_air · V)
+```
+
+At Bogotá's air density (ρ ≈ 0.89 kg/m³):
+
+| Envelope volume | Equivalent sphere | Vehicle mass (forced) | a_max | 4 m leg* |
+|---:|---:|---:|---:|---:|
+| 0.15 m³ | 0.66 m (26″) | 134 g | **4.9 m/s²** | ~1.9 s |
+| 0.25 m³ | 0.78 m (31″) | 223 g | **2.9 m/s²** | ~2.4 s |
+| 0.40 m³ | 0.91 m (36″) | 356 g | **1.8 m/s²** | ~3.0 s |
+| 0.785 m³ | 1 × 1 × 1.5 m ellipsoid (box limit) | 699 g | **0.94 m/s²** | ~4.2 s |
+
+<sub>\* Accelerate, then decelerate; drag neglected; indicative only.</sub>
+
+> **The smallest envelope that can lift the electronics is the fastest vehicle.** Using the full
+> volume allowance would make the airship roughly five times slower. Every gram saved on
+> electronics lets the envelope shrink, and that compounds straight into lap time. Mass
+> reduction *is* the race strategy.
+
+A streamlined envelope is about 7 % faster, but at useful volumes it breaks the 1.5 m box and
+handles badly in sideslip, so the envelope is a **sphere**. Target lap times and the full argument
+are in [docs/05](docs/05-race-strategy.md).
+
+### Altitude changes the size, not the speed
+
+Bogotá sits at about 2,640 m, where air is roughly 73 % as dense as at sea level, so each litre of
+helium lifts about 27 % less. That hurts if you buy an off-the-shelf balloon, because spec sheets,
+build videos and papers almost always quote sea-level lift.
+
+If you size your own envelope, the penalty cancels. Carrying the same 180 g of envelope and
+electronics needs 38 % more volume (a 0.77 m sphere instead of 0.69 m), yet total mass, added
+mass and maximum acceleration stay within 1 %, and top speed even improves by about 5 %. Neutral
+buoyancy means mass *is* displaced-air mass either way. Altitude is a sizing and logistics problem
+(fitting the box, helium per fill, handling a bigger balloon), not a performance one.
+
+### What "50-inch balloon" really means
+
+The rulebook equates a 50-inch balloon with "approximately 1 m³", while the baseline MochiSwarm
+paper says its 50-inch foil balloon gives 120 g of net lift. Those two figures are about nine
+times apart. The explanation is that "50-inch" is the foil balloon's flat, *uninflated* size.
+Inflated, it is a lens of roughly **0.17 m³**, back-solved from the 120 g figure. So Rule 10 is far
+looser than it reads, the Rule 14 box binds first, and we want to be smaller than either anyway.
+
+The largest remaining unknown is the envelope film's weight per area (42 vs 85 g/m² across
+sources), which swings usable payload at Bogotá between about 88 g and 200 g. One afternoon with
+a balloon and a scale settles it; the procedure is in [docs/00 §C](docs/00-action-now.md).
+
+---
+
+## How it works
+
+### The vehicle
+
+The flight controller is a Waveshare **ESP32-S3-Zero** (since 2026-10-09). Two DRV8833 dual
+H-bridges drive four brushed motors, each of them reversible; an MPU-6050 IMU, a QMC5883L
+magnetometer, a BME280 barometer and a VL53L1X time-of-flight range finder share one I²C bus, and
+a divider lets it read the battery. AI-Thinker ESP32-CAM modules (OV2640, 58 × 45° lens) are the
+perception sensors. The Seeed × Max Imagination **ESP-FLY** board was the previous controller.
+
+| Motors | Push | Provide |
+|---|---|---|
+| Front pair (FL, FR) | forward | surge, and yaw by running one faster than the other |
+| Rear pair (RL, RR) | up | heave |
+
+The drivers can reverse every motor, but the controller still uses each one in a single
+direction (allowing reverse thrust is a change to `core/`'s mixer), and that shapes it:
+
+- **No brakes.** Drag is the only thing that slows the airship, so arrival speed is decided on the
+  way in.
+- **No push-down.** The airship is trimmed a few grams heavy and the rear pair holds it up.
+  Switching the motors off makes it sink gently to the floor, which doubles as the failsafe.
+- **No turning on the spot.** Yaw needs one front motor faster than the other, so every turn costs
+  some forward motion.
+- **No sideways force.** Cross-track error is corrected by re-aiming.
+
+### The software
+
+```mermaid
+flowchart LR
+    subgraph AIR["Blimp · ESP32-S3-Zero"]
+        direction TB
+        SEN["IMU · magnetometer<br/>barometer · downward ToF"]
+        CAM["ESP32-CAM<br/>balloon detection"]
+        CORE["Control core<br/>blimp_step()"]
+        MOT["4 motors on 2 DRV8833<br/>FL · RL · FR · RR"]
+        SEN --> CORE
+        CAM -. "wired link, planned" .-> CORE
+        CORE --> MOT
+    end
+    subgraph GS["Ground station · laptop or Steam Deck"]
+        WIN["Telemetry, sensors, captures,<br/>manual control, STOP"]
+    end
+    AIR -- "telemetry, sensors, captures<br/>Wi-Fi, UDP" --> WIN
+    WIN -- "motor commands by hand,<br/>STOP" --> AIR
+```
+
+- **Control core** (`core/`, C11): an estimator; a guidance state machine that, for each balloon,
+  searches, aligns, approaches, touches, confirms the contact and coasts; PID loops for altitude,
+  yaw and surge; and a mixer that enforces the thrust budget. It is freestanding, with no dynamic
+  allocation, no global state and deterministic output, so flight logs can be replayed.
+- **Firmware** (`firmware/projects/`, ESP-IDF): `i2c_tools/` is the live ESP32-S3-Zero firmware:
+  sensor drivers, the reversible motor driver with its failsafe, a Wi-Fi access point carrying a
+  UDP packet link and the console, and a 50 Hz control task that reads the sensors and logs every
+  tick to a capture in PSRAM; its estimate, control and mixer stages wait for `blimp_step()`
+  ([docs/control-loop-plan.md](docs/control-loop-plan.md)). `espfly/` is the previous board's shell
+  (ESP-NOW link, three FreeRTOS tasks calling `blimp_step()` at 200 Hz), kept as the reference. No
+  control logic lives in either.
+- **Ground station** (`software/ground_station/`, PyQt6): one window on a laptop or a Steam Deck
+  with three pages. Flight shows the motors, the sensors and the camera panel; Control flies the
+  blimp by hand from the keyboard or a gamepad; Bench records and downloads the capture and plots
+  it. It talks only to the S3, and the bridge thread that holds the motor command keeps anything
+  the window does from reaching the motors
+  ([docs/link-robustness-review.md](docs/link-robustness-review.md)); `--race` makes it a monitor
+  whose one command is STOP. The ESP32-CAMs are to be wired to the S3
+  ([docs/inter-board-link-plan.md](docs/inter-board-link-plan.md), a draft); the lidar was ruled out
+  as too heavy.
+- **Simulation** (`sim/`, MuJoCo): replaces everything around the core. It builds the arena from
+  the rulebook, synthesises noisy IMU, ToF and target observations from ground truth, applies the
+  core's motor commands, and runs its own judge that times laps from real balloon contacts.
+
+```mermaid
+flowchart LR
+    SCENE["MuJoCo arena<br/>built from the rulebook"] -- "synthetic IMU, ToF,<br/>target observation" --> CORE["Control core<br/>build/libblimp.dll"]
+    CORE -- "motor commands" --> SCENE
+    SCENE -- "balloon contacts" --> JUDGE["Independent judge<br/>lap times"]
+```
+
+---
+
+## Repository layout
+
+```
+core/               Portable C11 flight controller and its host unit tests
+  include/blimp/      Public headers; blimp.h is the single entry point
+  src/                Estimator, guidance, PID, mixer, parameters, FFI shim
+  tests/              One test program per module
+firmware/projects/  ESP-IDF projects
+  i2c_tools/          Live ESP32-S3-Zero firmware: drivers, reversible motors, Wi-Fi link, console
+  optflow_cam/        ESP32-CAM optical-flow experiment
+  espfly/             Previous board's flight shell (ESP-FLY): RTOS loop, ESP-NOW link, protocol
+  blink/              Toolchain smoke test
+sim/                Closed-loop MuJoCo simulation that drives the compiled core
+  scene/              Course generator and physics checks, from the rulebook geometry
+tools/              Build, verify and environment-setup scripts
+  lens_test/          ESP32-CAM bench firmware + PC tool that measures camera modules (field of view, IR filter, ...)
+docs/               Design, strategy, setup and status documents
+research/           The research behind the docs, with sources and fact-checks
+reference/          Where to download the rulebook and the baseline paper
+software/           Ground tools: ground_station/, blimp_link.py, mock_blimp.py, link_check.py, the PID bench tools
+scripts/            idf.bat, the ESP-IDF v5.5.5 wrapper for the S3-Zero projects on Windows
+```
+
+---
+
+## Getting started
+
+Verified on Windows 11 and Ubuntu 22.04. You need:
+
+- **Python 3.12** for the simulation; any Python 3.9 or newer with PyQt6 for the ground station
+- **clang** (LLVM) on `PATH` for the core's unit tests and the simulation DLL
+- **ESP-IDF v5.5.5** for the S3-Zero firmware (`scripts\idf.bat`, see [CLAUDE.md](CLAUDE.md));
+  **v5.3** only for the previous board's shell, see [docs/08](docs/08-firmware-setup.md)
+
+```powershell
+python tools/setup_env.py        # once: creates .venv with the pinned MuJoCo build
+python tools/verify.py           # builds and tests the core, smoke-tests the sim (~15 s)
+python tools/verify.py --full    # adds both courses, with and without ToF (~1-2 min)
+```
+
+`verify.py` exits non-zero if any check fails, the Rule 13 thrust sweep included. Run the fast
+suite often and the full one before any flight; `--gui` adds the ground station's offscreen tests.
+
+### Open the ground station
+
+```powershell
+python -m pip install -r software/requirements.txt    # PyQt6; everything else is the standard library
+python -m software.ground_station --demo              # a mock blimp in-process, no hardware
+python -m software.ground_station                     # the blimp, after joining its ICARUS-xxxxxx Wi-Fi
+```
+
+[software/ground_station/README.md](software/ground_station/README.md) covers Linux and the Steam
+Deck, and how to use each page.
+
+### Fly a course in simulation
+
+```powershell
+python tools/build.py dll                                       # after any change to core/
+.venv\Scripts\python sim\run_course.py --course 1
+.venv\Scripts\python sim\run_course.py --course 2 --altitude-source tof --seed 3
+```
+
+Each run prints one row per loop and the best time. The first 60 s of every run are the gyro-bias
+convergence, so the default 150 s budget usually stops before the third loop; add
+`--max-time 220` to reproduce the table above. `--help` lists every option, and
+[docs/09](docs/09-simulation.md) explains the output.
+
+To reproduce the whole table, or to judge whether a change helped, run the same matrix across
+seeds:
+
+```powershell
+python tools/sim_sweep.py                                       # both courses, none + ToF, seeds 0-4
+python tools/sim_sweep.py --courses 1 --altitude-sources tof --seeds 0-9 --markdown
+python tools/sim_sweep.py --fov-deg 54x42                       # another lens than the measured 58 x 45
+```
+
+### Test one core module
+
+```powershell
+python tools/build.py module mixer      # or: pid, params, estimator, guidance, blimp
+```
+
+### Build and flash the firmware
+
+The live firmware is the ESP32-S3-Zero project. On Windows:
+
+```powershell
+scripts\idf.bat i2c_tools build                   # ESP-IDF v5.5.5; any idf.py arguments after the project name
+scripts\idf.bat i2c_tools -p COM5 flash monitor
+```
+
+On Linux, see [CLAUDE.md](CLAUDE.md). The previous board's shell still builds on its own:
+
+```powershell
+tools\idf_build.bat                     # ESP-IDF v5.3, firmware/projects/espfly
+```
+
+> [!WARNING]
+> Measure real motor thrust through the DRV8833 before any closed-loop flight: the controller
+> still assumes a 35 gf-per-motor placeholder, and Rule 13 compliance depends on the real number.
+
+### Working with coding agents
+
+[AGENTS.md](AGENTS.md) holds the project's rules, commands and gotchas for any coding agent.
+OpenAI Codex reads it directly, as do many other agents (see [agents.md](https://agents.md)), and
+[CLAUDE.md](CLAUDE.md) imports it for Claude Code. Three workflows are packaged as skills:
+
+| Skill | What it does |
+|---|---|
+| `core-change` | Checklist for changing the C flight controller safely; agents also apply it on their own when editing `core/` |
+| `sim-sweep` | Runs the seed sweep, compares it with the recorded results and updates the tables |
+| `flash-firmware` | Builds and flashes the previous board's shell (`espfly`); runs only when you ask for it. The S3-Zero firmware flashes with `scripts\idf.bat` |
+
+In Claude Code, run a skill as `/sim-sweep`; in Codex, as `$sim-sweep` or from `/skills`. The
+originals live in `.claude/skills/`. After editing one, run `python tools/sync_skills.py` to
+regenerate the Codex copies in `.agents/skills/`; `tools/verify.py` fails until you do. Keep
+personal Claude notes in `CLAUDE.local.md`, which is gitignored.
+
+---
+
+## Documentation
+
+| Document | What's in it |
+|---|---|
+| **[docs/10 · Known issues](docs/10-known-issues.md)** | **Start here.** What is broken, unresolved or deferred, and why |
+| [Control loop plan](docs/control-loop-plan.md) | The S3 firmware's fixed-rate control task, its increments and their bench checks |
+| [Wireless link](docs/wireless-link.md) | The S3's access point, the UDP packets, the safety timers, bring-up |
+| [Link robustness review](docs/link-robustness-review.md) | How the window and the link may affect the motors, the team's decisions, the bench checks owed |
+| [Ground station plan](docs/ground-station-plan.md) | The window's design, its signals and its pages |
+| [PID tuning plan](docs/pid-tuning-plan.md) | What to measure, the bench runbook and the tools that turn step tests into gains |
+| [Sensor configuration](docs/sensor-configuration-report.md), [bring-up](docs/sensor-bringup-report.md) | Every chip's settings and rates; how each sensor came up on the bench |
+| [docs/07 · Control design](docs/07-control-design.md) | Plant model, mixer, loop gains, estimator, guidance, bring-up ladder, system identification |
+| [docs/09 · Simulation](docs/09-simulation.md) | Running the simulation and reading its output |
+| [docs/08 · Firmware setup](docs/08-firmware-setup.md) | ESP-IDF on Windows: install, the traps, build, flash, monitor |
+| [docs/05 · Race strategy](docs/05-race-strategy.md) | Target lap times, envelope size and shape, rule exploits, touching without popping |
+| [docs/01 · Competition brief](docs/01-competition-brief.md) | Rules, logistics, open questions for the organizers |
+| [docs/02 · Hardware](docs/02-hardware.md) | Envelope sizing, weight budget, bill of materials |
+| [docs/03 · Software architecture](docs/03-software-architecture.md) | The original architecture plan and the esp-drone verdict |
+| [docs/04 · Risks and troubleshooting](docs/04-risk-and-troubleshooting.md) | Risk register, symptom → cause → fix tables, checklists, field kit |
+| [docs/00 · Action list](docs/00-action-now.md) | Organizer emails, questions about the PCB, the balloon-lift experiment |
+| [research/](research/) | The research digests behind all of the above, with sources and verdicts |
+
+Several documents were written for the earlier tilting-bicopter design, or before the firmware
+first built, and keep that history. For the current design, docs/07 and docs/10 take precedence.
+
+---
+
+## What's next
+
+1. **Bench**: flash the firmware of 2026-10-29, check each motor's position and direction after
+   the remount, and run the link checks ([docs/link-robustness-review.md](docs/link-robustness-review.md) §5–6).
+2. **Thrust**: the front pair on the scale (the rear pair was swept on 2026-10-28), then per-motor
+   curves and real maxima for the controller in place of the 35 gf placeholder.
+3. **PID bench**: the yaw and heave step tests and their fits ([docs/pid-tuning-plan.md](docs/pid-tuning-plan.md)).
+4. **Control loop**: `blimp_step()` on the S3, the mode switch and the latched STOP (increments 2–3
+   of [docs/control-loop-plan.md](docs/control-loop-plan.md)).
+5. **Cameras**: the balloon detector on the ESP32-CAM and its wired link to the S3.
+6. **Envelope and gondola**: measure a real balloon's lift, weigh the gondola, and re-run the
+   simulation with measured numbers.
+7. **Arena boundary**: teach the simulation's judge Rule 7's boundary, then keep the vehicle
+   inside it.
+8. **Flight**: tethered, then free; tune the loops; timed autonomous laps.
+9. **Team Description Paper**, spares and field kit.
+
+## Biggest risks
+
+- **Thrust only half measured.** Gains, lap times and Rule 13 compliance still rest on a
+  placeholder; the rear pair's sweep showed the motors differ by about 1.6 times.
+- **Envelope lift.** If the film is at the heavy end, the electronics may need an envelope too
+  large to be competitive.
+- **Leaving the arena.** With no brakes it is easy to overshoot a balloon, and Rule 7 voids the
+  run. The simulation does not check this yet.
+- **Air currents.** Drafts from ventilation can exceed what 100 gf can fight; test in a large hall
+  early.
+- **Perception.** The camera's balloon detector is in development; nothing carries its output to
+  the controller yet.
+
+The full register is in [docs/04](docs/04-risk-and-troubleshooting.md).
+
+---
+
+## Prior work
+
+- **[MochiSwarm / BlimpSwarm](https://github.com/LehighBlimpGroup/BlimpSwarm)** (Lehigh
+  University): the baseline design the rulebook names. Paper:
+  [arXiv:2503.03077](https://arxiv.org/abs/2503.03077).
+- **[mochi-swarm-sim](https://github.com/TongshuWu1/mochi-swarm-sim)**: the MuJoCo blimp model we
+  used as a reference. Its race scenes are not the IAR course, so ours is generated from the
+  rulebook.
+- **[esp-drone](https://github.com/espressif/esp-drone)** (Espressif): firmware infrastructure
+  patterns.
+- **[ESP-FLY](https://github.com/Seeed-Projects/Co-Create_ESP-FLY)** (Seeed × Max Imagination): the
+  previous flight-controller board and its pin map.
+
+No third-party code is copied into this repository.
+
+## License
+
+No license has been chosen yet, so all rights are reserved. Please ask the team before reusing
+anything here.

@@ -10,6 +10,8 @@
 #include "esp_log.h"
 #include "esp_console.h"
 #include "esp_vfs_fat.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "cmd_system.h"
 #include "cmd_i2ctools.h"
 #include "cmd_imu.h"
@@ -19,6 +21,14 @@
 #include "cmd_motor.h"
 #include "driver/i2c_master.h"
 #include "led_blink.h"
+#include "net_wifi.h"
+#include "net_link.h"
+#include "net_console.h"
+#include "sensor_stream.h"
+#include "ctl_task.h"
+#include "capture.h"
+#include "cmd_battery.h"
+#include "cmd_param.h"
 
 static const char *TAG = "i2c-tools";
 
@@ -46,6 +56,43 @@ static void initialize_filesystem(void)
     }
 }
 #endif // CONFIG_EXAMPLE_STORE_HISTORY
+
+/*
+ * 'exit' / 'quit' only explain how to leave. The REPL runs on the chip, and
+ * the program holding the serial port open is idf.py monitor on the laptop:
+ * nothing the chip prints can make it close. People type 'exit' by habit, so
+ * the answer belongs where they look. The console over UDP runs these same
+ * commands in its own task, and there the monitor's keys mean nothing, so the
+ * hint follows whichever console asked.
+ */
+static int do_exit_cmd(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    if (strcmp(pcTaskGetName(NULL), "net_console") == 0) {
+        printf("This console runs on the blimp and has nothing to close here.\n"
+               "blimp_link.py's interactive console leaves on 'exit' or Ctrl+C.\n");
+    } else {
+        printf("This console runs on the blimp; it can't close the monitor on your laptop.\n"
+               "To leave idf.py monitor press Ctrl+X (or Ctrl+T, then x).\n"
+               "That also frees the serial port. Ctrl+C is passed to the chip, not the monitor.\n");
+    }
+    return 0;
+}
+
+static void register_exit(void)
+{
+    const char *names[] = { "exit", "quit" };
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        const esp_console_cmd_t cmd = {
+            .command = names[i],
+            .help = "How to leave this console (the monitor exits with Ctrl+X)",
+            .hint = NULL,
+            .func = &do_exit_cmd,
+        };
+        ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
+    }
+}
 
 void app_main(void)
 {
@@ -107,6 +154,81 @@ void app_main(void)
     register_baro();
     register_tof();
     register_motor();     /* already initialised above */
+    register_wifi();
+    register_link();
+    register_sensors();
+    register_ctl();
+    register_capture();
+    register_battery();
+    register_param();     /* before ctl_task_start(): the loop takes its first set */
+    register_exit();
+
+    /*
+     * The wireless link comes up after every command is registered: the
+     * console over UDP runs the same registry as the USB REPL, so the first
+     * datagram can already be 'help'. Nothing here is fatal. A bench
+     * instrument without a radio is still a bench instrument, and the USB
+     * console is how we would find out what went wrong.
+     */
+    esp_err_t net_err = net_wifi_init();
+    if (net_err != ESP_OK) {
+        ESP_LOGE(TAG, "Wi-Fi unavailable: %s - serial console only", esp_err_to_name(net_err));
+    } else {
+        if (net_link_start() != ESP_OK) {
+            ESP_LOGE(TAG, "UDP link unavailable");
+        }
+        if (net_console_start() != ESP_OK) {
+            ESP_LOGE(TAG, "console over UDP unavailable");
+        }
+    }
+
+    /*
+     * The sensor stream feeds the link's SENSORS packet, so it starts after
+     * the link. It samples through the same drivers as the console commands
+     * and hands the chips over whenever one of them runs (sensor_stream.h).
+     * CONFIG_SENSOR_STREAM_AT_BOOT=n leaves the chips untouched until
+     * 'sensors --on'. Not fatal either: the console commands still work.
+     */
+#if CONFIG_SENSOR_STREAM_AT_BOOT
+    const bool stream_at_boot = true;
+#else
+    const bool stream_at_boot = false;   /* a disabled Kconfig bool is undefined, not 0 */
+#endif
+    if (sensor_stream_start(stream_at_boot) != ESP_OK) {
+        ESP_LOGE(TAG, "sensor stream unavailable - console sensor commands only");
+    }
+
+    /*
+     * The capture buffer (capture.c) is allocated before the control task
+     * exists, so the task's log stage finds it or finds nothing, never a
+     * buffer that appears mid-run. Not fatal: 'capture' then says why.
+     */
+    if (capture_init() != ESP_OK) {
+        ESP_LOGE(TAG, "capture buffer unavailable - the loop runs, nothing is recorded");
+    }
+
+    /*
+     * The battery ADC (cmd_battery.c) is set up before the control task,
+     * whose read stage samples it every tick. Not fatal: the records then
+     * carry 0 mV and 'battery' says why.
+     */
+    if (battery_init() != ESP_OK) {
+        ESP_LOGE(TAG, "battery monitor unavailable - no voltage in the records");
+    }
+
+    /*
+     * The fixed-rate control task (ctl_task.c) runs on core 1 from here on.
+     * In this increment its stages are empty but for two: the read stage
+     * peeks the sensor stream's latest sample (the stream still owns the
+     * chips) and the log stage feeds the capture. It neither drives the bus
+     * nor the motors; it measures its own period and execution time, which
+     * is what the bench has to confirm before the sensors move into it
+     * (docs/control-loop-plan.md). Not fatal: the console and the link are
+     * how a failure here would be diagnosed.
+     */
+    if (ctl_task_start() != ESP_OK) {
+        ESP_LOGE(TAG, "control task unavailable");
+    }
 
     /* Status LED runs in its own task, so the REPL below stays responsive. */
     led_blink_start();
@@ -125,6 +247,14 @@ void app_main(void)
     printf(" |  9. Try 'baro' for BMP180 pressure and altitude            |\n");
     printf(" | 10. Try 'tof' for VL53L1X time-of-flight range             |\n");
     printf(" | 11. Try 'motor' to drive the DRV8833 thrusters             |\n");
+    printf(" | 12. Try 'wifi' and 'link' for the Wi-Fi ground link        |\n");
+    printf(" |     (software/blimp_link.py runs all of this over the air) |\n");
+    printf(" | 13. Try 'sensors' for the stream the ground station plots  |\n");
+    printf(" | 14. Try 'ctl' for the control loop and its timing          |\n");
+    printf(" | 15. Try 'capture' to record a minute of the loop's records |\n");
+    printf(" | 16. Try 'battery' for the motor cell's voltage on GPIO1    |\n");
+    printf(" | 17. Try 'param' for the controller's gains, changed live   |\n");
+    printf(" | 18. Type 'exit' or 'quit' to see how to leave the monitor  |\n");
     printf(" |                                                            |\n");
     printf(" ==============================================================\n\n");
 

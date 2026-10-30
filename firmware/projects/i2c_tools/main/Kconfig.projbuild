@@ -45,42 +45,49 @@ menu "Motor driver (DRV8833)"
     # counts as "forward" is set by how the motor leads and prop are fitted -
     # correct a backwards thruster by swapping its pair here, not by negating
     # the command upstream, so that the sign lives in one place.
+    #
+    # Remounted 2026-10-29: the motor on driver #1's OUT1/OUT2 is now the rear
+    # left one and the one on OUT3/OUT4 the front left (driver #2 the same on
+    # the right), and every motor turned the wrong way. So each motor took the
+    # other pair of its driver, with IN1 and IN2 swapped to reverse it. Before:
+    # FL 13/12, RL 11/10, FR 9/8, RR 7/14. An existing sdkconfig keeps the
+    # numbers it has: set them in menuconfig, or delete it and run set-target.
 
     config MOTOR_FL_IN1_GPIO
-        int "motor_FL - driver #1 IN1 GPIO"
-        range 0 48
-        default 13
-    config MOTOR_FL_IN2_GPIO
-        int "motor_FL - driver #1 IN2 GPIO"
-        range 0 48
-        default 12
-
-    config MOTOR_RL_IN1_GPIO
-        int "motor_RL - driver #1 IN3 GPIO"
-        range 0 48
-        default 11
-    config MOTOR_RL_IN2_GPIO
-        int "motor_RL - driver #1 IN4 GPIO"
+        int "motor_FL IN1 - driver #1 IN4 GPIO"
         range 0 48
         default 10
+    config MOTOR_FL_IN2_GPIO
+        int "motor_FL IN2 - driver #1 IN3 GPIO"
+        range 0 48
+        default 11
+
+    config MOTOR_RL_IN1_GPIO
+        int "motor_RL IN1 - driver #1 IN2 GPIO"
+        range 0 48
+        default 12
+    config MOTOR_RL_IN2_GPIO
+        int "motor_RL IN2 - driver #1 IN1 GPIO"
+        range 0 48
+        default 13
 
     config MOTOR_FR_IN1_GPIO
-        int "motor_FR - driver #2 IN1 GPIO"
-        range 0 48
-        default 9
-    config MOTOR_FR_IN2_GPIO
-        int "motor_FR - driver #2 IN2 GPIO"
-        range 0 48
-        default 8
-
-    config MOTOR_RR_IN1_GPIO
-        int "motor_RR - driver #2 IN3 GPIO"
-        range 0 48
-        default 7
-    config MOTOR_RR_IN2_GPIO
-        int "motor_RR - driver #2 IN4 GPIO"
+        int "motor_FR IN1 - driver #2 IN4 GPIO"
         range 0 48
         default 14
+    config MOTOR_FR_IN2_GPIO
+        int "motor_FR IN2 - driver #2 IN3 GPIO"
+        range 0 48
+        default 7
+
+    config MOTOR_RR_IN1_GPIO
+        int "motor_RR IN1 - driver #2 IN2 GPIO"
+        range 0 48
+        default 8
+    config MOTOR_RR_IN2_GPIO
+        int "motor_RR IN2 - driver #2 IN1 GPIO"
+        range 0 48
+        default 9
 
     config MOTOR_NSLEEP_GPIO
         int "nSLEEP GPIO, or -1 if strapped high in hardware"
@@ -107,15 +114,19 @@ menu "Motor driver (DRV8833)"
     config MOTOR_DEADBAND_PERMILLE
         int "Break-away duty in parts per thousand"
         range 0 900
-        default 120
+        default 0
         help
             Smallest duty that actually starts the prop turning. Thrust
             commands are mapped onto [deadband, 1.0] so that a small command
             produces a small thrust instead of nothing at all.
 
-            120 is only a plausible starting point for a small brushed motor.
-            Measure the real value per motor with 'motor -m 1A --sweep' and
-            set it from what you see.
+            0 means no mapping: a command is its duty, so 0.05 is 5 % duty,
+            which is what the ground station's sliders and the readback
+            assume. The earlier default of 120 was an unmeasured guess that
+            turned the smallest slider step (0.003) into 12.3 % duty, and
+            the motors ran far faster than the slider said (2026-10-28).
+            Measure the real value per motor with 'motor -m FL --sweep'
+            before you set a non-zero one.
 
     config MOTOR_FAILSAFE_MS
         int "Coast all motors after this long with no command; 0 disables"
@@ -125,5 +136,191 @@ menu "Motor driver (DRV8833)"
             The PWM peripheral holds the last duty forever, so a controller
             that stops running leaves the airship under full thrust. This
             timer is what makes that failure stop the motors instead.
+
+endmenu
+
+menu "Wireless link (Wi-Fi access point + UDP)"
+
+    # The blimp is its own access point: the laptop joins it, no router
+    # involved. See net_wifi.c for why this and not ESP-NOW.
+
+    config NET_WIFI_AT_BOOT
+        bool "Start the access point at boot"
+        default y
+        help
+            Off, the radio stays down until 'wifi --start' is typed on the
+            USB console - useful on a USB-only bench to keep the current
+            draw out of the picture while probing the sensor rail.
+
+    config NET_WIFI_SSID_PREFIX
+        string "SSID prefix"
+        default "ICARUS"
+        help
+            The SSID is this prefix, a dash and the last three bytes of the
+            board's Wi-Fi MAC in hex, e.g. ICARUS-A1B2C3, so two boards in
+            one room are distinguishable.
+
+    config NET_WIFI_PASSWORD
+        string "WPA2 key"
+        default "icarusblimp"
+        help
+            8 to 63 characters. Empty makes the network open, which is a
+            bench-only setting: the key is the only thing between a stray
+            phone and the 'motor' command.
+
+    config NET_WIFI_CHANNEL
+        int "Channel"
+        range 1 13
+        default 1
+        help
+            Fixed on purpose, so the laptop never has to follow a channel
+            change. Survey the venue's 2.4 GHz band before picking the one
+            for competition day.
+
+    config NET_WIFI_MAX_STA
+        int "Maximum stations"
+        range 1 4
+        default 2
+        help
+            One ground station plus a spare. The link replies to the last
+            host that sent a valid packet, so more stations do not mean more
+            simultaneous operators.
+
+    config NET_LINK_PORT
+        int "UDP port for command/telemetry packets"
+        range 1024 65535
+        default 7200
+
+    config NET_CONSOLE_PORT
+        int "UDP port for the text console"
+        range 1024 65535
+        default 7201
+
+    config NET_LINK_TIMEOUT_MS
+        int "Coast motors driven over the link after this long without a packet"
+        range 100 5000
+        default 500
+        help
+            Independent of the motor driver's own failsafe
+            (MOTOR_FAILSAFE_MS), which only counts thrust commands. This one
+            counts any valid packet and only acts on motors that were last
+            commanded over the air; see net_link.c.
+
+    config NET_LINK_TELEMETRY_HZ
+        int "Telemetry rate in Hz"
+        range 1 100
+        default 20
+
+endmenu
+
+menu "Sensor stream (the packet the ground station plots)"
+
+    # sensor_stream.c samples every sensor through the same drivers as the
+    # console commands and hands the latest reading to net_link.c, which
+    # sends it as LINK_PKT_SENSORS. A console sensor command pauses the
+    # stream and takes the chip for its own run either way.
+
+    config SENSOR_STREAM_AT_BOOT
+        bool "Sample the sensors from boot"
+        default y
+        help
+            Off, nothing touches the chips until 'sensors --on' is typed, for
+            a bench where the console commands should own them, or to keep
+            the bus quiet while probing the sensor rail.
+
+    config SENSOR_STREAM_HZ
+        int "Sample and packet rate in Hz"
+        range 1 50
+        default 50
+        help
+            The IMU, the magnetometer and the rangefinder are polled at this
+            rate; the barometer runs on its own slower schedule, see
+            sensor_stream.c. Bounded above by the 10 ms FreeRTOS tick: 50 Hz
+            is two ticks. The link sends at most one SENSORS packet per
+            telemetry tick (NET_LINK_TELEMETRY_HZ), so a faster stream only
+            means fresher samples, not more packets.
+
+            50 Hz, the control loop's own rate, since 2026-10-28: the loop
+            peeks this stream's latest sample every 20 ms, and at the old
+            20 Hz two or three records in a row carried the same IMU
+            sample, which read as steps in the traces. At 50 Hz every record
+            can carry a new one. Not yet run on hardware at this rate.
+
+endmenu
+
+menu "Control task"
+
+    config CTL_STATS_AT_BOOT
+        bool "Print the control task's timing line once a second from boot"
+        default n
+        help
+            ctl_task.c measures its own period and execution time in
+            one-second windows. Printed every second, that line buries
+            everything else typed on the USB console, so it starts off:
+            'ctl' shows the last window on demand, and 'ctl --stats on'
+            turns the line on until the next reset (the increment 1 bench
+            check). Say y for a session spent watching the timing.
+
+endmenu
+
+menu "Battery monitor (the motor cell's divider)"
+
+    # cmd_battery.c: one ADC conversion per control tick, read by the
+    # control task's read stage and written into every capture record.
+    # The divider ratio and the averaging move into params_t with
+    # increment 2 of docs/control-loop-plan.md (D10).
+
+    config BATTERY_ADC_GPIO
+        int "Divider GPIO (ADC1 only)"
+        range 1 10
+        default 1
+        help
+            GPIO1 is ADC1_CH0, the pin the wiring plan gives the motor
+            battery divider (docs/s3-wroom-cam-wiring-plan.md). Only ADC1
+            (GPIO1-10 on the S3) works here: Wi-Fi takes ADC2.
+
+    config BATTERY_DIVIDER_PERMILLE
+        int "Divider ratio x1000 (battery voltage / pin voltage)"
+        range 1000 10000
+        default 2000
+        help
+            2000 for the planned 100 k + 100 k. A 4.2 V cell then puts
+            2.1 V on the pin, inside the 12 dB range. Replace the nominal
+            value with the one measured against a multimeter.
+
+    config BATTERY_AVG_TICKS
+        int "Running average length in control ticks (20 ms each)"
+        range 1 64
+        default 25
+        help
+            Boxcar over the last this-many samples: 25 is 0.5 s, so a
+            thrust step shows up in the average within 0.5 s and the
+            average lags the cell by 250 ms. The capture records the
+            average; 'battery' also shows the last single sample.
+
+endmenu
+
+menu "Capture (the control loop's records, kept in PSRAM)"
+
+    # capture.c stores one 72-byte log record per 20 ms tick of the control
+    # task, for a bench session, and the link reads them back afterwards
+    # ('capture' on the console, blimp_link.py capture, the ground station's
+    # Bench page).
+
+    config CAPTURE_MAX_SECONDS
+        int "Longest capture in seconds"
+        range 1 600
+        default 400
+        help
+            The buffer is allocated once at boot for this many seconds of
+            records: 3.6 kB per second (72 bytes at 50 Hz), so 400 s is
+            1.4 MB of the 1594 kB of PSRAM measured free on 2026-10-27 with
+            Wi-Fi up. A capture asks for its own length at start, up to
+            this; a longer request is refused, not shortened. If this much
+            cannot be allocated the firmware takes the largest free PSRAM
+            block instead, then falls back to a 10 s buffer in internal RAM,
+            and says so in the boot log either way. The ground station reads
+            the real limit from the blimp. Longer than the buffer means
+            streaming the records as they are made, not implemented.
 
 endmenu

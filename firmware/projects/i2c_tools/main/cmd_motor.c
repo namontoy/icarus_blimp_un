@@ -5,10 +5,10 @@
  * in total. As wired:
  *
  *                      +-----------------+
- *     step-up 5V ----->| VM         OUT1 |---- motor_FL
+ *     step-up 5V ----->| VM         OUT1 |---- motor_RL
  *            GND ----->| GND        OUT2 |---'
  *        GPIO 13 ----->| IN1             |
- *        GPIO 12 ----->| IN2        OUT3 |---- motor_RL
+ *        GPIO 12 ----->| IN2        OUT3 |---- motor_FL
  *        GPIO 11 ----->| IN3        OUT4 |---'
  *        GPIO 10 ----->| IN4             |
  *                      |         nSLEEP  |<--- 3V3 (or a GPIO, see Kconfig)
@@ -16,14 +16,19 @@
  *                      +-----------------+  DRV8833 #1  (the left side)
  *
  *                      +-----------------+
- *        GPIO  9 ----->| IN1        OUT1 |---- motor_FR
+ *        GPIO  9 ----->| IN1        OUT1 |---- motor_RR
  *        GPIO  8 ----->| IN2        OUT2 |---'
- *        GPIO  7 ----->| IN3        OUT3 |---- motor_RR
+ *        GPIO  7 ----->| IN3        OUT3 |---- motor_FR
  *        GPIO 14 ----->| IN4        OUT4 |---'
  *                      +-----------------+  DRV8833 #2  (the right side)
  *
  * IN1/IN2 are the datasheet's AIN1/AIN2 and IN3/IN4 its BIN1/BIN2; breakout
- * boards relabel them, the silicon does not care.
+ * boards relabel them, the silicon does not care. Since the remount of
+ * 2026-10-29 each motor's own IN1 is the second line of its pair (FL's IN1
+ * is driver #1 IN4, RL's is IN2, FR's is driver #2 IN4, RR's is IN2): that
+ * swap is what reversed all four. Before it, FL and RL were the other way
+ * round on driver #1, FR and RR on driver #2, each with IN1 first. The
+ * numbers are Kconfig's (MOTOR_*_IN*_GPIO); this drawing follows them.
  *
  * The split falls along the airframe rather than across it: driver #1 carries
  * the whole left side, driver #2 the whole right. Worth knowing before it
@@ -80,6 +85,7 @@
 #include "sdkconfig.h"
 #include "soc/soc_caps.h"
 #include "cmd_motor.h"
+#include "net_console.h"
 
 static const char *TAG = "cmd_motor";
 
@@ -110,13 +116,13 @@ typedef struct {
 
 /* Order matches motor_id_t and the array taken by motors_set_all(). */
 static const motor_pins_t s_pins[MOTOR_COUNT] = {
-    { "FL", "#1 IN1/IN2", CONFIG_MOTOR_FL_IN1_GPIO, CONFIG_MOTOR_FL_IN2_GPIO,
+    { "FL", "#1 IN4/IN3", CONFIG_MOTOR_FL_IN1_GPIO, CONFIG_MOTOR_FL_IN2_GPIO,
       LEDC_CHANNEL_0, LEDC_CHANNEL_1 },
-    { "RL", "#1 IN3/IN4", CONFIG_MOTOR_RL_IN1_GPIO, CONFIG_MOTOR_RL_IN2_GPIO,
+    { "RL", "#1 IN2/IN1", CONFIG_MOTOR_RL_IN1_GPIO, CONFIG_MOTOR_RL_IN2_GPIO,
       LEDC_CHANNEL_2, LEDC_CHANNEL_3 },
-    { "FR", "#2 IN1/IN2", CONFIG_MOTOR_FR_IN1_GPIO, CONFIG_MOTOR_FR_IN2_GPIO,
+    { "FR", "#2 IN4/IN3", CONFIG_MOTOR_FR_IN1_GPIO, CONFIG_MOTOR_FR_IN2_GPIO,
       LEDC_CHANNEL_4, LEDC_CHANNEL_5 },
-    { "RR", "#2 IN3/IN4", CONFIG_MOTOR_RR_IN1_GPIO, CONFIG_MOTOR_RR_IN2_GPIO,
+    { "RR", "#2 IN2/IN1", CONFIG_MOTOR_RR_IN1_GPIO, CONFIG_MOTOR_RR_IN2_GPIO,
       LEDC_CHANNEL_6, LEDC_CHANNEL_7 },
 };
 
@@ -127,6 +133,11 @@ static int               s_freq_hz;
 static motor_decay_t     s_decay = MOTOR_DECAY_SLOW;
 static float             s_deadband = CONFIG_MOTOR_DEADBAND_PERMILLE / 1000.0f;
 static float             s_cmd[MOTOR_COUNT];
+/* The throttle each pin pair was last written for by motor_write(), so
+   motors_set_all() can leave a bridge alone when its command has not changed.
+   NAN after anything that writes the pins some other way (coast, brake, the
+   failsafe, init): NAN equals nothing, so the next command always lands. */
+static float             s_out[MOTOR_COUNT];
 static SemaphoreHandle_t s_lock;
 
 static esp_timer_handle_t s_fs_timer;
@@ -220,6 +231,7 @@ static void motor_write(motor_id_t m, float throttle)
     ledc_set_duty(LEDC_LOW_SPEED_MODE, p->ch_in2, d2);
     ledc_update_duty(LEDC_LOW_SPEED_MODE, p->ch_in1);
     ledc_update_duty(LEDC_LOW_SPEED_MODE, p->ch_in2);
+    s_out[m] = throttle;
 }
 
 /* Both inputs to the same level on every motor: 0 coasts, full brakes. */
@@ -231,6 +243,7 @@ static void motor_write_all_static(uint32_t duty)
         ledc_update_duty(LEDC_LOW_SPEED_MODE, s_pins[m].ch_in1);
         ledc_update_duty(LEDC_LOW_SPEED_MODE, s_pins[m].ch_in2);
         s_cmd[m] = 0.0f;
+        s_out[m] = NAN;     /* a brake is "0" in s_cmd but not on the pins */
     }
 }
 
@@ -290,6 +303,17 @@ bool motors_failsafe_tripped(void)
     return s_fs_tripped;
 }
 
+motor_failsafe_state_t motors_failsafe_state(void)
+{
+    if (s_fs_timeout_ms <= 0) {
+        return MOTOR_FAILSAFE_OFF;
+    }
+    if (s_fs_tripped) {
+        return MOTOR_FAILSAFE_TRIPPED;
+    }
+    return s_fs_armed ? MOTOR_FAILSAFE_ARMED : MOTOR_FAILSAFE_IDLE;
+}
+
 esp_err_t motors_failsafe_set_timeout_ms(int timeout_ms)
 {
     if (timeout_ms < 0) {
@@ -322,6 +346,9 @@ esp_err_t motors_init(void)
     s_lock = xSemaphoreCreateMutex();
     if (s_lock == NULL) {
         return ESP_ERR_NO_MEM;
+    }
+    for (int m = 0; m < MOTOR_COUNT; m++) {
+        s_out[m] = NAN;
     }
 
     /*
@@ -510,7 +537,13 @@ esp_err_t motors_set_all(const float throttle[MOTOR_COUNT])
 
     /* One lock for the whole set, so a reader of s_cmd never sees half of a
        four-motor mix applied. The four pin pairs still reach the hardware a
-       few microseconds apart, which is far inside one PWM period. */
+       few microseconds apart, which is far inside one PWM period.
+       A bridge whose command has not changed is not written again. The link
+       repeats an unchanged command 20 times a second as its keep-alive
+       (net_link.c); rewriting the same duties changes nothing on the pins,
+       since the LEDC only latches a duty at the next period, so it was work
+       for nothing on the link task. The failsafe is fed either way: a repeat
+       is still a command. */
     xSemaphoreTake(s_lock, portMAX_DELAY);
     for (int m = 0; m < MOTOR_COUNT; m++) {
         float t = throttle[m];
@@ -520,7 +553,9 @@ esp_err_t motors_set_all(const float throttle[MOTOR_COUNT])
             t = -1.0f;
         }
         s_cmd[m] = t;
-        motor_write((motor_id_t)m, t);
+        if (t != s_out[m]) {
+            motor_write((motor_id_t)m, t);
+        }
     }
     xSemaphoreGive(s_lock);
 
@@ -721,6 +756,21 @@ static int do_motor_cmd(int argc, char **argv)
     esp_err_t err = motors_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "motor driver not available: %s", esp_err_to_name(err));
+        return 1;
+    }
+
+    /* Over the air the failsafe is the one timer a console-driven motor has:
+       the link timeout watches MOTOR_SET, not this console (net_link.c). So
+       it is changed at the desk only, and --hold over the air needs it on.
+       Before 2026-10-29 'motor --failsafe 0' and then '--hold' over UDP ran
+       a motor with no timer at all (docs/link-robustness-review.md, F4). */
+    const bool remote = net_console_is_caller();
+    if (remote && motor_args.failsafe->count) {
+        printf("--failsafe is refused over the air; change it on the USB console\n");
+        return 1;
+    }
+    if (remote && motor_args.hold->count && s_fs_timeout_ms <= 0) {
+        printf("--hold is refused over the air while the failsafe is off\n");
         return 1;
     }
 

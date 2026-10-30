@@ -15,3 +15,14 @@ CONFIG_FREERTOS_USE_TRACE_FACILITY=y
 CONFIG_FREERTOS_USE_STATS_FORMATTING_FUNCTIONS=y
 
 CONFIG_ESPTOOLPY_FLASHSIZE_2MB=y
+
+# Control loop (main/ctl_task.c). The 20 ms period comes from an esp_timer,
+# so it does not depend on the FreeRTOS tick (left at its 100 Hz default:
+# decision D1 in docs/control-loop-plan.md). Task dispatch, not ISR dispatch:
+# CONFIG_ESP_TIMER_SUPPORTS_ISR_DISPATCH_METHOD stays off. In ESP-IDF v5.5.5
+# (and up to v5.5.6 and v6.0.x) an ISR-dispatch alarm firing close to a
+# task-dispatch one can leave the esp_timer task un-notified, so task timers,
+# Wi-Fi's among them, stall (esp-idf issue #18808, fixed on master in
+# 958dc8a). On 2026-10-28 that made the access point drop the laptop every
+# ~14 s; with task dispatch the link held for 10 min. Re-enable it only on an
+# ESP-IDF that carries the fix.
