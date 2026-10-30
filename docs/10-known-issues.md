@@ -50,7 +50,8 @@ component and has a `param` console command over `blimp_params_t`: list, set, re
 parameter table of `docs/control-loop-plan.md`, pulled forward as a console command instead of
 packets. Every capture's `.json` (Bench page, `step_test.py`) records the gains; race mode
 refuses a change. Builds clean; the table is tested on the host and the ground side against
-the mock; not yet run on the board, and nothing on the blimp reads the gains until increment 3
+the mock; on the board, `software/param_check.py --reboot` passed 13 of 13 the same day
+(`docs/history/bench-2026-10-30.md`). Nothing on the blimp reads the gains until increment 3
 puts `blimp_step()` in the loop. Found on the way: the closed-loop tests C1–C4 step a setpoint
 that `blimp_step()` cannot take today (a `core/` change, noted in the plan's increment 3).
 
@@ -66,7 +67,10 @@ the link timeout counts motor packets only (a heartbeat or another station's pac
 command alive before), an out-of-date `MOTOR_SET` is dropped, `MOTOR_STOP` is obeyed from anyone,
 an unchanged command no longer rewrites the PWM, the console over Wi-Fi refuses `motor
 --failsafe` (it could switch the failsafe off), and the brownout and watchdog settings are pinned.
-It builds; it has not run on the board. The other firmware proposals (telemetry to both stations,
+On the board on 2026-10-30 (`docs/history/bench-2026-10-30.md`): with the heartbeat on, the
+motors stopped 0.50 s after the last `MOTOR_SET`, the link fell 0.45 s after the last packet, no
+packet was lost in 582, and `motor --failsafe` was refused over the air; the brake-then-zero
+check was skipped by the team's choice (they coast only). The other firmware proposals (telemetry to both stations,
 the reset reason and a motor-only age in telemetry, download pacing) wait for namontoy.
 
 **2026-10-29, motors remounted.** After the gondola was rebuilt the motor on each driver's
@@ -80,7 +84,9 @@ boot log's `motor_XX on GPIO a/b` lines show what a build uses. And the 2026-10-
 (`docs/history/pid-bench-2026-10-28/`) names its motors as they were wired then: whatever motor
 now answers to a name, its curve and its "forward" may be another's, so redo the PID runbook's
 hand sign check of each pair, and check which physical motors the scale measured, before using
-`thrust-map.json`. Not yet checked on the bench.
+`thrust-map.json`. Checked on the bench 2026-10-30: the running firmware reads back the new pins,
+and each motor turned in its place and its intended direction, by eye
+(`docs/history/bench-2026-10-30.md`).
 
 **2026-10-28, PID tuning plan and its instruments (branch `pid-tuning`).**
 `docs/pid-tuning-plan.md`: what the three loops' gains depend on (two plant numbers, a bandwidth

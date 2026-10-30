@@ -52,12 +52,12 @@ written down, but it has not run on hardware.
 | BME280 (`baro`), stand-alone breakout | **Measured** 2026-10-22, 10 samples per setting | Sold as a BMP280; the chip ID (`0x60`) says BME280. 853.24 hPa, 27.0 °C, 58 % RH. Pressure sd 0.008 hPa (about 0.09 m) at `-o 3`, 0.026 hPa (about 0.27 m) at `-o 0`. Ten samples on a still bench, not a noise characterisation |
 | BMP280 (`baro`) | **Built, not run on hardware** | Same driver as the BME280 minus humidity; no BMP280 has been on the bus |
 | VL53L1X (`tof`) | **Measured** 2026-10-11, at 1.57 m only | 1566 mm, sd 1.5 mm at a 100 ms budget, dark room. Budgets below 100 ms read about 5 % short. **Range at 2 m not measured yet** (§8) |
-| Motors (`motor`) | **Measured** 2026-10-12 | 2 s run at 10 %, then the failsafe coasted it. No spurious errors |
+| Motors (`motor`) | **Measured** 2026-10-12, 2026-10-30 | 2 s run at 10 %, then the failsafe coasted it. No spurious errors. After the remount (2026-10-30): the pins in use read back as FL 10/11, RL 12/13, FR 14/7, RR 8/9, and each motor turned in its place and its intended direction, checked by eye |
 | Per-motor break-away duty | Not measured | The default deadband is 0, so a command is its duty (it was an unmeasured 12 % until 2026-10-28). Measure it with `--sweep` (§6) |
-| Wi-Fi AP, UDP link | **Measured** 2026-10-24 | The laptop joined `ICARUS-…` and the ground station page (`software/ground_station/`) received telemetry. The rest of the checklist in `docs/wireless-link.md` §8 (console over UDP, link-loss and failsafe tests, current, range) is still open |
+| Wi-Fi AP, UDP link | **Measured** 2026-10-24 | The laptop joined `ICARUS-…` and the ground station page (`software/ground_station/`) received telemetry. 2026-10-30 (`docs/history/bench-2026-10-30.md`): the console over UDP; 0.0 % loss over 582 packets, the blimp's longest wait 66 ms, a command echoed in 47 ms median; with the heartbeat on, the motors stop 0.50 s after the last `MOTOR_SET`, and the link falls 0.45 s after the last packet; `motor --failsafe` refused over the air. Still open from `docs/wireless-link.md` §8: current, range |
 | Sensor stream (`sensors`, the `SENSORS` packet) | **Built, not run on hardware** | Written 2026-10-24 on the four drivers above. The ground station decodes the same packet from `software/mock_blimp.py` |
 | PING))) ultrasonic | **Parked, not tested** | Not in the build (§8) |
-| Controller parameters (`param`) | **Built, not run on hardware** | Written 2026-10-30; the build with `core/` as a component is clean (ESP-IDF v5.5.5, no warnings). The table is tested on the host (`tools/fw_host_test.py`), the ground side against `mock_blimp.py`. Nothing reads the values until increment 3 |
+| Controller parameters (`param`) | **Measured** 2026-10-30 | `software/param_check.py --reboot`, 13 of 13: the 45-row listing (2959 bytes) arrives whole over the air, a set reaches the loop at its next tick, the refusals hold, core/'s validator clamps on the S3, no overrun or skipped tick during 20 sets, a power cycle returns to params.c (`docs/history/bench-2026-10-30.md`). Nothing reads the values until increment 3 |
 
 ## 2. Hardware and wiring
 

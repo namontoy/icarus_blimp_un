@@ -2,8 +2,10 @@
 
 **Date:** 2026-10-21
 **Branch:** `s3-wireless-link`
-**Status:** builds on ESP-IDF v5.5.5; **not yet run on hardware**. Section 9 lists what the
-first bench session has to prove.
+**Status:** builds on ESP-IDF v5.5.5; runs on the board since 2026-10-24 (the ground station
+received telemetry). On 2026-10-30 the console over UDP, the loss, the two timeouts and the
+over-the-air refusal of `motor --failsafe` were measured (`docs/history/bench-2026-10-30.md`);
+current and range are still open. Section 9 lists what the first bench session had to prove.
 
 ## 1. Why
 

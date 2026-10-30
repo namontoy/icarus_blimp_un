@@ -123,8 +123,12 @@ short outage, only zero.
 
 F1 to F4 and F8 were made on 2026-10-29 on branch `link-robustness`, with the team's agreement
 (namontoy owns `net_link.c` and `ctl_task.c`); `mock_blimp.py` follows F2 and F3. They build
-with ESP-IDF v5.5.5 and have **not yet run on the board**: flash, then the checks under the
-table. The rest are proposals.
+with ESP-IDF v5.5.5 and ran on the board on 2026-10-30 (`docs/history/bench-2026-10-30.md`):
+F2's motor-only timeout stopped the motors 0.50 s after the last `MOTOR_SET` with the heartbeat
+still on, and F4 refused `motor --failsafe 0` over the air. F1's brake-then-zero check was
+skipped by the team's choice (they coast only; a brake comes only from an explicit console
+command), and F3's stale drop was not exercised (no packet was lost in 582). The rest are
+proposals.
 
 | # | Change | Where | Status |
 |---|---|---|---|
