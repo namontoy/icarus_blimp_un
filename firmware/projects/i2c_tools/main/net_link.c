@@ -11,19 +11,28 @@
  * state, deliberately independent of each other:
  *
  *   - this file's link timeout (CONFIG_NET_LINK_TIMEOUT_MS): if the motors
- *     were last commanded over the air and no valid packet of any kind
+ *     were last commanded over the air and no MOTOR_SET or MOTOR_STOP
  *     arrives within the window, every motor coasts and the event is logged
  *     once. A dead laptop, a dropped association and a host script stuck in
  *     a breakpoint all look the same from here, and all get the same answer.
+ *     Only motor packets count, since 2026-10-29: a heartbeat comes from its
+ *     own thread on the host and proves the program runs, not that anyone is
+ *     still steering, and another station's packets must not keep this
+ *     one's command alive (docs/link-robustness-review.md, F2).
  *   - the motor driver's own failsafe (CONFIG_MOTOR_FAILSAFE_MS): coasts if
- *     no thrust command of any origin arrives while a motor is driven. It
- *     catches a host that keeps sending heartbeats but has stopped sending
- *     motor commands, which the link timeout alone would miss.
+ *     no thrust command of any origin arrives while a motor is driven. It is
+ *     the backstop for this task itself stopping, and the only timer on a
+ *     motor run from the console.
  *
  * So a host that wants a motor to keep turning sends MOTOR_SET at 20 Hz or
- * so, not once. HEARTBEAT keeps the link alive and the telemetry flowing but
- * drives nothing. Motors set from the USB console are not touched by the
- * link timeout: a 'motor --hold' typed at the desk is deliberate.
+ * so, not once; the repeat is the keep-alive and carries the value, so a lost
+ * packet is repaired by the next one. HEARTBEAT keeps the link alive and the
+ * telemetry flowing but drives nothing. A MOTOR_SET older than the last one
+ * from the same sender (by its sequence number) is dropped and counted, so a
+ * packet the radio delayed past a STOP cannot start the motors again;
+ * MOTOR_STOP is obeyed from anyone, always. Motors set from the USB console
+ * are not touched by the link timeout: a 'motor --hold' typed at the desk is
+ * deliberate.
  *
  * Telemetry keeps flowing for a while after the host goes quiet, so a host
  * that paused still sees that the motors coasted and the link went stale.
@@ -80,6 +89,13 @@ static struct {
     volatile bool      link_motors;   /* standing commands came over the air */
     uint32_t           sensors_seq;   /* the stream's sample last sent       */
     volatile uint32_t  tx_sensors;
+    /* The last accepted MOTOR_SET or MOTOR_STOP: the link timeout runs from
+       it, and the next MOTOR_SET from the same sender must be newer. */
+    volatile int64_t   last_motor_rx_us;
+    struct sockaddr_in motor_from;
+    uint16_t           motor_seq;
+    bool               have_motor;
+    volatile uint32_t  rx_stale;      /* MOTOR_SETs dropped as out of date   */
 } s;
 
 /* The one LOG_CHUNK under construction; the link task alone touches it. */
@@ -103,7 +119,38 @@ static bool packet_ok(uint8_t *buf, int n, size_t expect)
     return link_crc32(buf, (size_t)n) == sent;
 }
 
-static void handle_motor_set(const link_motor_set_t *p)
+static bool same_sender(const struct sockaddr_in *a, const struct sockaddr_in *b)
+{
+    return a->sin_addr.s_addr == b->sin_addr.s_addr && a->sin_port == b->sin_port;
+}
+
+/*
+ * A motor packet from the sender of the last one, within the link timeout,
+ * whose sequence number is not newer: delayed or duplicated by the radio.
+ * Judged per sender and per session, because a host that restarted, or a
+ * second station, starts a count of its own, and a session silent for a
+ * whole timeout is over anyway. The difference is taken as int16_t so the
+ * 16-bit count wraps without a jump; each host numbers all its packets with
+ * one counter, so its motor packets are increasing but not consecutive.
+ */
+static bool motor_packet_stale(uint16_t seq, const struct sockaddr_in *from, int64_t now)
+{
+    if (!s.have_motor || !same_sender(from, &s.motor_from) ||
+        (now - s.last_motor_rx_us) / 1000 >= CONFIG_NET_LINK_TIMEOUT_MS) {
+        return false;
+    }
+    return (int16_t)(uint16_t)(seq - s.motor_seq) <= 0;
+}
+
+static void note_motor_packet(uint16_t seq, const struct sockaddr_in *from, int64_t now)
+{
+    s.motor_from = *from;
+    s.motor_seq = seq;
+    s.have_motor = true;
+    s.last_motor_rx_us = now;
+}
+
+static bool handle_motor_set(const link_motor_set_t *p)
 {
     /* Copy out of the packed struct: the driver takes a float array and the
        compiler is right that a pointer into a packed struct may not be
@@ -116,7 +163,7 @@ static void handle_motor_set(const link_motor_set_t *p)
         /* A NaN out of a host script, or a motor driver that never came
            up. Worth a line each time: it means a command was dropped. */
         ESP_LOGW(TAG, "MOTOR_SET rejected: %s", esp_err_to_name(err));
-        return;
+        return false;
     }
     bool driven = false;
     for (int m = 0; m < MOTOR_COUNT; m++) {
@@ -125,6 +172,7 @@ static void handle_motor_set(const link_motor_set_t *p)
         }
     }
     s.link_motors = driven;
+    return true;
 }
 
 static void handle_motor_stop(const link_motor_stop_t *p)
@@ -269,9 +317,15 @@ static void handle_datagram(uint8_t *buf, int n, const struct sockaddr_in *from,
             s.rx_bad++;
             return;
         }
+        if (motor_packet_stale(h.seq, from, now)) {
+            s.rx_stale++;           /* valid, so still proof of life below */
+            break;
+        }
         link_motor_set_t p;
         memcpy(&p, buf, sizeof(p));
-        handle_motor_set(&p);
+        if (handle_motor_set(&p)) {
+            note_motor_packet(h.seq, from, now);
+        }
         break;
     }
     case LINK_PKT_MOTOR_STOP: {
@@ -281,7 +335,12 @@ static void handle_datagram(uint8_t *buf, int n, const struct sockaddr_in *from,
         }
         link_motor_stop_t p;
         memcpy(&p, buf, sizeof(p));
-        handle_motor_stop(&p);
+        handle_motor_stop(&p);      /* from anyone, whatever its number */
+        if (!motor_packet_stale(h.seq, from, now)) {
+            /* A newer STOP moves the sender's mark past every MOTOR_SET it
+               sent before it, so one the radio delays is dropped. */
+            note_motor_packet(h.seq, from, now);
+        }
         break;
     }
     case LINK_PKT_LOG_CMD: {
@@ -313,7 +372,9 @@ static void check_link_timeout(int64_t now)
     if (!s.link_motors) {
         return;
     }
-    int64_t age_ms = (now - s.last_rx_us) / 1000;
+    /* Motor packets only: see the top of this file. link_motors is set only
+       by an accepted MOTOR_SET, which also set last_motor_rx_us. */
+    int64_t age_ms = (now - s.last_motor_rx_us) / 1000;
     if (age_ms < CONFIG_NET_LINK_TIMEOUT_MS) {
         return;
     }
@@ -321,7 +382,7 @@ static void check_link_timeout(int64_t now)
        also disarms the driver's failsafe, so nothing stays latched. */
     s.link_motors = false;
     motors_coast();
-    ESP_LOGW(TAG, "link lost: no packet for %lld ms, all motors coasting", (long long)age_ms);
+    ESP_LOGW(TAG, "link lost: no motor command for %lld ms, all motors coasting", (long long)age_ms);
 }
 
 /* ------------------------------------------------------------- telemetry */
@@ -478,8 +539,14 @@ void net_link_get_status(net_link_status_t *out)
     out->link_motors = s.link_motors;
     out->rx_ok       = s.rx_ok;
     out->rx_bad      = s.rx_bad;
+    out->rx_stale    = s.rx_stale;
     out->tx          = s.tx;
     out->tx_sensors  = s.tx_sensors;
+    out->have_motor  = s.have_motor;
+    if (s.have_motor) {
+        int64_t age = (esp_timer_get_time() - s.last_motor_rx_us) / 1000;
+        out->motor_age_ms = age < 0 ? 0 : (uint32_t)age;
+    }
     if (s.have_peer) {
         int64_t age = (esp_timer_get_time() - s.last_rx_us) / 1000;
         out->age_ms = age < 0 ? 0 : (uint32_t)age;
@@ -510,9 +577,14 @@ static int do_link_cmd(int argc, char **argv)
         printf("peer %s   %s, last packet %" PRIu32 " ms ago\n", st.peer,
                st.alive ? "alive" : "STALE", st.age_ms);
     }
-    printf("rx ok %" PRIu32 "   rx rejected %" PRIu32 "   tx %" PRIu32
-           " (of which sensors %" PRIu32 ")\n", st.rx_ok, st.rx_bad, st.tx, st.tx_sensors);
-    printf("motors %s\n", st.link_motors ? "driven over the link" : "not driven over the link");
+    printf("rx ok %" PRIu32 "   rx rejected %" PRIu32 "   motor commands out of date %" PRIu32
+           "   tx %" PRIu32 " (of which sensors %" PRIu32 ")\n",
+           st.rx_ok, st.rx_bad, st.rx_stale, st.tx, st.tx_sensors);
+    printf("motors %s", st.link_motors ? "driven over the link" : "not driven over the link");
+    if (st.have_motor) {
+        printf(", last motor command %" PRIu32 " ms ago", st.motor_age_ms);
+    }
+    printf("\n");
     return 0;
 }
 

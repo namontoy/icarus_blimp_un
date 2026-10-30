@@ -75,6 +75,7 @@ python tools/setup_env.py                     # once: .venv with the pinned MuJo
 python tools/verify.py                        # fast checks (~20 s), after any change
 python tools/verify.py --full                 # adds both courses, with and without ToF (~1-2 min)
 python tools/verify.py --firmware             # adds the espfly shell build (ESP-IDF v5.3)
+python tools/verify.py --gui                  # adds the ground station's offscreen tests (~1 min)
 python tools/build.py module <name>           # one module: pid params mixer estimator guidance blimp
 python tools/build.py dll                     # rebuild build/libblimp.{dll,so} after any core/ change
 python tools/sim_sweep.py                     # lap times across seeds 0-4, both courses, none + tof

@@ -61,7 +61,8 @@ packet with the CRC zeroed. Host to blimp: `HEARTBEAT 0x01`, `MOTOR_SET 0x02` (`
 FL RL FR RR), `MOTOR_STOP 0x03` (`u8 brake`). Blimp to host: `TELEMETRY 0x81` (52 B: motor
 readback, failsafe, link flags, counters, heap) and `SENSORS 0x82` (76 B, SI units, valid bits).
 `net_link.c` applies `MOTOR_SET` straight to `motors_set_all()`, coasts the motors itself on
-link loss (500 ms without any packet) when they were last commanded over the air, and sends the
+link loss (500 ms without any packet; without a motor packet since 2026-10-29,
+`docs/link-robustness-review.md`) when they were last commanded over the air, and sends the
 stream's latest sample once per telemetry tick. The ground station (`software/ground_station/`)
 and `mock_blimp.py` speak exactly these five packets; the ground station has been the PyQt6
 window since 2026-10-27 (`blimp_bridge.py`, its side of the link, did not change).

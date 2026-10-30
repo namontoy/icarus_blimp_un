@@ -43,6 +43,21 @@ rail): `docs/motor-setpoint-ownership.md`. Fixed the same day on branch `motor-o
 the trace plot repaints in 3 ms instead of a second (cached paths, per-column decimation, a 1 px
 pen). Checked offscreen; T1 on the bench is the confirmation.
 
+**2026-10-29, the link and the window reviewed.** Four reviewers and the team settled how the
+window and the link may affect the motors: `docs/link-robustness-review.md`. The ground station
+changed on branch `link-robustness`: a change leaves at once and the repeat holds 20 Hz on
+Windows (it ran at 15.7), STOP can no longer be overtaken by a command read before it, a short
+Wi-Fi drop zeroes the motors and resumes them ramped, a long one or a blimp reboot releases them
+and latches, pad B latches, `--race` makes the window a monitor whose one motor command is STOP,
+pauses of the motor stream are reported, and `tools/verify.py --gui` runs the offscreen tests.
+Checked offscreen only. The firmware changed with it, with the team's agreement (§5 there):
+the link timeout counts motor packets only (a heartbeat or another station's packets kept a
+command alive before), an out-of-date `MOTOR_SET` is dropped, `MOTOR_STOP` is obeyed from anyone,
+an unchanged command no longer rewrites the PWM, the console over Wi-Fi refuses `motor
+--failsafe` (it could switch the failsafe off), and the brownout and watchdog settings are pinned.
+It builds; it has not run on the board. The other firmware proposals (telemetry to both stations,
+the reset reason and a motor-only age in telemetry, download pacing) wait for namontoy.
+
 **2026-10-28, PID tuning plan and its instruments (branch `pid-tuning`).**
 `docs/pid-tuning-plan.md`: what the three loops' gains depend on (two plant numbers, a bandwidth
 choice, and the thrust map in series with all of them), the methods taken (model-based placement

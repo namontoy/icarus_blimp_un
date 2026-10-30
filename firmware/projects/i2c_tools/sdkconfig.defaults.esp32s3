@@ -27,3 +27,20 @@ CONFIG_SPIRAM_TYPE_AUTO=y
 CONFIG_SPIRAM_SPEED_80M=y
 CONFIG_SPIRAM_USE_CAPS_ALLOC=y
 CONFIG_SPIRAM_IGNORE_NOTFOUND=y
+
+# Brownout detector and watchdogs, pinned 2026-10-29 at the values the
+# generated sdkconfig already held (ESP-IDF v5.5.5's own defaults), so a fresh
+# set-target cannot move them unnoticed (docs/link-robustness-review.md, F8).
+# The brownout detector resets the chip on a supply sag, the highest of its
+# levels; motors_init() runs first after any reset, but the DRV8833 inputs
+# float until it does. For the same reason the task watchdog only warns: a
+# panic reboot is one more floating-input window, so it waits for the scope
+# check of those inputs through a reset (the review's section 6).
+CONFIG_ESP_BROWNOUT_DET=y
+CONFIG_ESP_BROWNOUT_DET_LVL_SEL_7=y
+CONFIG_ESP_INT_WDT=y
+CONFIG_ESP_INT_WDT_TIMEOUT_MS=800
+CONFIG_ESP_TASK_WDT_EN=y
+CONFIG_ESP_TASK_WDT_INIT=y
+# CONFIG_ESP_TASK_WDT_PANIC is not set
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=5

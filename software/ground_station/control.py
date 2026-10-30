@@ -27,7 +27,11 @@ bridge directly) disarms and coasts; a pad that disappears while it was
 driving is a STOP; arming needs
 telemetry from the blimp and the sticks at rest, so the motors never jump.
 Only one source drives at a time: arming here switches the Flight page's
-"Motors enabled" off, and the other way round (app.py).
+"Motors enabled" off, and the other way round (app.py). Leaving the page
+does not disarm: the pad keeps driving while another page is in view (the
+team's choice of 2026-10-29: looking at a plot must not change the motors),
+and the header's Drive pill and STOP stay in view on every page. With
+--race the page cannot arm at all: no manual control during the race.
 """
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QButtonGroup, QComboBox, QGridLayout, QSizePolicy, QSpinBox, QWidget
@@ -224,6 +228,9 @@ class ControlPage(QWidget):
         self.arm_sw = Switch('Manual control')
         self.arm_sw.setToolTip('arm: the sticks drive the motors · off: coast (A / B on the pad)')
         self.arm_sw.toggled.connect(self._arm_toggled)
+        if self.station.race:
+            self.arm_sw.setEnabled(False)
+            self.arm_sw.setToolTip('race mode: no manual control')
         self.limit_in = QSpinBox()
         self.limit_in.setRange(5, 100)
         self.limit_in.setSingleStep(5)
@@ -400,6 +407,9 @@ class ControlPage(QWidget):
         stick off centre (the motors would jump)."""
         if self.armed:
             return True
+        if self.station.race:
+            self.station.log('warn', 'control: race mode, no manual control')
+            return False
         if not self.alive:
             self.station.log('warn', 'control: no telemetry from the blimp, not arming')
             return False

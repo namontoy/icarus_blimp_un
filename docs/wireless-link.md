@@ -126,12 +126,19 @@ A `MOTOR_SET` is a standing command **only while it keeps arriving**. Two timers
 standing state, independently:
 
 - **Link timeout** (`NET_LINK_TIMEOUT_MS`, 500 ms): if the motors were last commanded over the
-  air and no valid packet of any kind arrives in the window, every motor coasts and the event
-  is logged once on USB. Motors set from the USB console are not touched: a `motor --hold`
-  typed at the desk is deliberate.
+  air and no `MOTOR_SET` or `MOTOR_STOP` arrives in the window, every motor coasts and the event
+  is logged once on USB. Until 2026-10-29 any valid packet counted, so a host whose heartbeat
+  thread outlived its motor stream, or a second station, kept a command alive for the failsafe
+  to end; motor packets only now (`docs/link-robustness-review.md`, F2). Motors set from the USB
+  console are not touched: a `motor --hold` typed at the desk is deliberate.
 - **Motor failsafe** (`MOTOR_FAILSAFE_MS`, 1000 ms, unchanged): coasts if no thrust command of
-  any origin arrives while a motor is driven. It catches a host that keeps sending heartbeats
-  but has stopped sending motor commands, which the link timeout alone would miss.
+  any origin arrives while a motor is driven. It is the backstop for the link task itself
+  stopping, and the one timer on a motor run from the console, which is why the console over
+  UDP refuses `motor --failsafe` and, with the failsafe off, `--hold` (F4).
+- **Out-of-date packets** (2026-10-29, F3): a `MOTOR_SET` whose sequence number is not newer
+  than the last motor packet's from the same sender, within the timeout, is dropped and counted
+  (`motor commands out of date` in `link`), so one the radio delays past a STOP cannot restart
+  the motors. `MOTOR_STOP` is obeyed from anyone, whatever its number.
 
 So `blimp_link.py motor` streams `MOTOR_SET` at 20 Hz and sends `MOTOR_STOP` three times at the
 end or on Ctrl+C. Its `--limit` (0.3 by default) refuses larger commands unless raised on

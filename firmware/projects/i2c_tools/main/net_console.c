@@ -30,6 +30,9 @@
  * flight the USB cable is not there.
  *
  * Anyone on the access point can run commands. The WPA2 key is the gate.
+ * One thing is refused over the air: switching the motor failsafe off, which
+ * would leave a console-driven motor with no timer (cmd_motor.c asks
+ * net_console_is_caller()).
  */
 #include <stdio.h>
 #include <string.h>
@@ -69,6 +72,7 @@ typedef struct {
 } console_ctx_t;
 
 static console_ctx_t s_ctx;
+static TaskHandle_t  s_task;    /* the task that runs the commands, for net_console_is_caller() */
 
 static void console_flush(console_ctx_t *ctx)
 {
@@ -175,7 +179,7 @@ esp_err_t net_console_start(void)
     s_ctx.sock = sock;
 
     if (xTaskCreate(console_task, "net_console", CONSOLE_TASK_STACK, &s_ctx,
-                    CONSOLE_TASK_PRIO, NULL) != pdPASS) {
+                    CONSOLE_TASK_PRIO, &s_task) != pdPASS) {
         ESP_LOGE(TAG, "could not start the console task");
         close(sock);
         s_ctx.sock = 0;
@@ -183,4 +187,12 @@ esp_err_t net_console_start(void)
     }
     ESP_LOGI(TAG, "console over UDP on port %d", CONFIG_NET_CONSOLE_PORT);
     return ESP_OK;
+}
+
+/* Commands run on this console's own task, so the task is the caller: unlike
+   a flag set around esp_console_run(), it cannot be fooled by a line typed on
+   USB at the same moment. */
+bool net_console_is_caller(void)
+{
+    return s_task != NULL && xTaskGetCurrentTaskHandle() == s_task;
 }

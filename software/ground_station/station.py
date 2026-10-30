@@ -65,11 +65,16 @@ class Station(QObject):
     cap = pyqtSignal(dict)                  # the capture: {phase, info, progress, file, error}
     cap_data = pyqtSignal(dict)             # a capture downloaded and decoded: {header, records, rows, summary, file}
 
-    def __init__(self, demo, blimp_host, wifi_opts=None, parent=None):
-        """wifi_opts: Wifi()'s keyword arguments, or None for no radio control."""
+    def __init__(self, demo, blimp_host, wifi_opts=None, parent=None, race=False, ports=None):
+        """wifi_opts: Wifi()'s keyword arguments, or None for no radio control.
+        race: monitoring only, the window sends no motor command but STOP
+        (blimp_bridge.py). ports: (link, console), the blimp's by default; the
+        tests give the demo blimp free ones."""
         super().__init__(parent)
         self.demo = demo
+        self.race = race
         self.blimp_host = blimp_host
+        self._ports = ports or (bl.LINK_PORT, bl.CONSOLE_PORT)
         self._wifi_opts = None if demo else wifi_opts   # the demo blimp is on localhost: no radio to join
         self.radio = None
         self.blimp = None
@@ -90,10 +95,11 @@ class Station(QObject):
     def start(self):
         if self._wifi_opts is not None:
             self.radio = Wifi(**self._wifi_opts)
+        port, console_port = self._ports
         if self.demo:
-            self.blimp = DemoBlimp(self.log, self._packet)
+            self.blimp = DemoBlimp(self.log, self._packet, port=port, console_port=console_port, race=self.race)
         else:
-            self.blimp = BlimpBridge(self.blimp_host, 7200, 7201, self.log, self._packet)
+            self.blimp = BlimpBridge(self.blimp_host, port, console_port, self.log, self._packet, race=self.race)
         self.blimp.start()
         self.camera = make_camera(self.demo, self._cam_frame, self._cam_row, self.cam_status.emit, self.log)
         self.camera.start()
@@ -102,6 +108,8 @@ class Station(QObject):
         threading.Thread(target=self._cap_loop, daemon=True, name='capture').start()
         self.log('info', 'ground station up: %s' % ('demo blimp and demo camera' if self.demo else
                                                     'blimp at %s' % self.blimp_host))
+        if self.race:
+            self.log('info', 'race mode: monitoring only; STOP is the one command this window sends to the motors')
         if self.radio is not None and self.radio.error:
             self.log('warn', 'wifi: %s' % self.radio.error)
         self.cam_status.emit(self.camera.status())
@@ -125,7 +133,8 @@ class Station(QObject):
         self.alive = bool(snap['alive'])
         self.tel.emit({'alive': snap['alive'], 'age_s': snap['age_s'], 'rx': snap['rx'], 'bad': snap['bad'],
                        'streaming': snap['streaming'], 'standing': snap['standing'], 'tripped': snap['tripped'],
-                       'tel': snap['tel']})
+                       'link_lost': snap['link_lost'], 'ramp': snap['ramp'], 'race': snap['race'],
+                       'gap_max_s': snap['gap_max_s'], 'tel': snap['tel']})
         self._ticks += 1
         if self.radio is not None and self._ticks % WIFI_TICKS == 0:
             st = self.wifi_status()
@@ -164,10 +173,12 @@ class Station(QObject):
     def _pad_press(self, button):
         """The gamepad reader's thread, on a press edge. B is STOP straight to
         the bridge, so it reaches the blimp even while the GUI thread is
-        busy; the Control page sees the same press on its own tick and does
-        the window's part (disarm, the flash)."""
+        busy. It latches: a window that was frozen through the press would
+        otherwise send its armed command again when it thaws. The window sees
+        the latch in the next tick's snapshot and does its part (disarm, the
+        flash), and its STOP clears the latch."""
         if button == 'b' and self.blimp is not None and not self._closed:
-            self.blimp.stop(False)
+            self.blimp.stop(False, latch=True)
 
     # --------------------------------------------------------------- camera
 
@@ -195,6 +206,11 @@ class Station(QObject):
 
     def wifi_action(self, action):
         """The join itself runs on its own thread: it blocks for up to half a minute."""
+        if self.blimp is not None and self.blimp.standing:
+            # Leaving or rejoining drops the link the motors run on, for longer
+            # than the bridge's resume window.
+            self.log('warn', 'wifi: not while a motor command stands; STOP first')
+            return
         if self.radio is None:
             self.log('warn', 'wifi: demo mode has no radio to join' if self.demo else 'wifi: no radio control')
             return
@@ -220,6 +236,13 @@ class Station(QObject):
     # -------------------------------------------------------------- console
 
     def console(self, line):
+        if self.race and line.split()[:1] == ['motor']:
+            # The console's motor command drives the motors with no link timer
+            # at all; the firmware refuses it in the autonomous modes only from
+            # increment 3 on, so the window refuses it here meanwhile.
+            self.con_text.emit('> %s\n[race mode: motor commands are refused here; STOP is the only one]\n' % line)
+            self.con_end.emit()
+            return
         self._console_q.append(line)
         self._console_ev.set()
 

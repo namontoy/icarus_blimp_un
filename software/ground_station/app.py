@@ -12,9 +12,14 @@ armed; the window only sends changes, STOP (the button, Esc, or Space when
 no text field has focus; it also switches the motors off) and, from the
 station's tick, a 100 ms ping that proves this thread alive. Closing the
 window stops the motors first. Behind that, the bridge's watchdog releases
-the motors if the window stops responding for 3 s (and the window STOPs
-itself when it comes back: on_tel), and the blimp coasts on its own timers
-if the link stops. docs/motor-setpoint-ownership.md has the history.
+the motors if the window stops responding for 3 s, a Wi-Fi drop zeroes them
+and resumes them ramped if the link returns within 3 s, a blimp reboot
+releases them, and B on the pad stops them from the pad's own thread; each
+of those latches the bridge, and the window STOPs itself when it sees the
+latch (on_tel). --race makes the window a monitor: no motor command but
+STOP. The header's Drive pill says which of these holds.
+docs/motor-setpoint-ownership.md and docs/link-robustness-review.md have the
+history.
 """
 import argparse
 import signal
@@ -69,6 +74,8 @@ class Header(QWidget):
         self.wifi_note.setMaximumWidth(300)
         self.wifi_note.setMinimumWidth(60)
         self.pills = {
+            'drive': Pill('Drive', 'what drives the motors: the Flight page, the Control page or nothing; '
+                                   'RACE: this window only watches, STOP is its one command'),
             'wifi': Pill('Wi-Fi', "this computer's connection to the blimp's access point"),
             'link': Pill('Link', 'UDP link to the blimp: age of the last packet'),
             'fs': Pill('Failsafe', 'motor driver failsafe on the blimp'),
@@ -153,6 +160,22 @@ class Header(QWidget):
             self.pills['fs'].set('idle', '—')
             self.pills['sta'].set('idle', '—')
 
+    def set_drive(self, race, m, flight, control):
+        """The Drive pill: the window's own view of who drives (flight,
+        control) over the bridge's (m: link lost, resuming)."""
+        if race:
+            self.pills['drive'].set('demo', 'RACE')
+        elif m.get('standing') and m.get('link_lost'):
+            self.pills['drive'].set('crit', 'LINK LOST')
+        elif m.get('standing') and m.get('ramp', 1.0) < 1.0:
+            self.pills['drive'].set('warn', 'RESUMING')
+        elif control:
+            self.pills['drive'].set('live', 'CONTROL')
+        elif flight:
+            self.pills['drive'].set('live', 'FLIGHT')
+        else:
+            self.pills['drive'].set('idle', 'OFF')
+
     def on_cam_status(self, st):
         if not st.get('source') or st['source'] == 'none':
             self.pills['cam'].set('idle', 'NONE')
@@ -199,7 +222,7 @@ class MainWindow(QMainWindow):
     def __init__(self, station, settings):
         super().__init__()
         self.station, self.settings = station, settings
-        self.setWindowTitle('Icarus Ground Station')
+        self.setWindowTitle('Icarus Ground Station' + (' · race' if station.race else ''))
         self.tel_at, self.alive = 0.0, False
         self.wifi = None
         self._compact = None
@@ -292,13 +315,15 @@ class MainWindow(QMainWindow):
 
     def on_tel(self, m):
         if m.get('tripped'):
-            # The bridge's watchdog released the motors while this thread was
-            # stuck. Make it the operator's STOP: the controls go off, the
+            # The bridge latched: its watchdog, a long outage or a reboot
+            # released the motors, or B on the pad stopped them from the pad's
+            # thread. Make it the operator's STOP: the controls go off, the
             # latch clears (blimp_bridge.py), the button flashes.
             self.stop()
         was_alive = self.alive
         self.tel_at, self.alive = time.monotonic(), bool(m.get('alive'))
         self.header.on_tel(m)
+        self.header.set_drive(self.station.race, m, self.motors.enabled, self.control.armed)
         self.motors.on_tel(m)
         self.control.on_tel(m)
         self.sensors.on_tel_alive(self.alive)
@@ -471,6 +496,9 @@ def parse_args(argv=None):
                          'the Steam Deck shows it')
     ap.add_argument('--page', choices=('flight', 'control', 'bench'), default=None,
                     help='open on this page instead of the remembered one')
+    ap.add_argument('--race', action='store_true',
+                    help='race mode: the window only watches; no motor command leaves it but STOP (the race is '
+                         'autonomous, and no manual control is allowed during it)')
     return ap.parse_args(argv)
 
 
@@ -479,12 +507,14 @@ def wifi_opts(args):
             'blimp_ip': args.blimp}
 
 
-def build(args, app, settings=None):
+def build(args, app, settings=None, ports=None):
     """The station and its window, not yet started: main(), screens.py and the
     tests share this. settings: a QSettings to use instead of the real one, so
-    a script's run leaves the operator's window as it was."""
+    a script's run leaves the operator's window as it was. ports: (link,
+    console) for the demo blimp, so a test does not collide with a mock
+    already on the default ones."""
     T.apply(app)
-    station = Station(args.demo, args.blimp, wifi_opts(args))
+    station = Station(args.demo, args.blimp, wifi_opts(args), race=args.race, ports=ports)
     win = MainWindow(station, settings if settings is not None else QSettings('Icarus', 'GroundStation'))
     if args.mode:
         win.control.set_mode(args.mode, save=True)

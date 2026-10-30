@@ -80,6 +80,7 @@
 #include "sdkconfig.h"
 #include "soc/soc_caps.h"
 #include "cmd_motor.h"
+#include "net_console.h"
 
 static const char *TAG = "cmd_motor";
 
@@ -127,6 +128,11 @@ static int               s_freq_hz;
 static motor_decay_t     s_decay = MOTOR_DECAY_SLOW;
 static float             s_deadband = CONFIG_MOTOR_DEADBAND_PERMILLE / 1000.0f;
 static float             s_cmd[MOTOR_COUNT];
+/* The throttle each pin pair was last written for by motor_write(), so
+   motors_set_all() can leave a bridge alone when its command has not changed.
+   NAN after anything that writes the pins some other way (coast, brake, the
+   failsafe, init): NAN equals nothing, so the next command always lands. */
+static float             s_out[MOTOR_COUNT];
 static SemaphoreHandle_t s_lock;
 
 static esp_timer_handle_t s_fs_timer;
@@ -220,6 +226,7 @@ static void motor_write(motor_id_t m, float throttle)
     ledc_set_duty(LEDC_LOW_SPEED_MODE, p->ch_in2, d2);
     ledc_update_duty(LEDC_LOW_SPEED_MODE, p->ch_in1);
     ledc_update_duty(LEDC_LOW_SPEED_MODE, p->ch_in2);
+    s_out[m] = throttle;
 }
 
 /* Both inputs to the same level on every motor: 0 coasts, full brakes. */
@@ -231,6 +238,7 @@ static void motor_write_all_static(uint32_t duty)
         ledc_update_duty(LEDC_LOW_SPEED_MODE, s_pins[m].ch_in1);
         ledc_update_duty(LEDC_LOW_SPEED_MODE, s_pins[m].ch_in2);
         s_cmd[m] = 0.0f;
+        s_out[m] = NAN;     /* a brake is "0" in s_cmd but not on the pins */
     }
 }
 
@@ -333,6 +341,9 @@ esp_err_t motors_init(void)
     s_lock = xSemaphoreCreateMutex();
     if (s_lock == NULL) {
         return ESP_ERR_NO_MEM;
+    }
+    for (int m = 0; m < MOTOR_COUNT; m++) {
+        s_out[m] = NAN;
     }
 
     /*
@@ -521,7 +532,13 @@ esp_err_t motors_set_all(const float throttle[MOTOR_COUNT])
 
     /* One lock for the whole set, so a reader of s_cmd never sees half of a
        four-motor mix applied. The four pin pairs still reach the hardware a
-       few microseconds apart, which is far inside one PWM period. */
+       few microseconds apart, which is far inside one PWM period.
+       A bridge whose command has not changed is not written again. The link
+       repeats an unchanged command 20 times a second as its keep-alive
+       (net_link.c); rewriting the same duties changes nothing on the pins,
+       since the LEDC only latches a duty at the next period, so it was work
+       for nothing on the link task. The failsafe is fed either way: a repeat
+       is still a command. */
     xSemaphoreTake(s_lock, portMAX_DELAY);
     for (int m = 0; m < MOTOR_COUNT; m++) {
         float t = throttle[m];
@@ -531,7 +548,9 @@ esp_err_t motors_set_all(const float throttle[MOTOR_COUNT])
             t = -1.0f;
         }
         s_cmd[m] = t;
-        motor_write((motor_id_t)m, t);
+        if (t != s_out[m]) {
+            motor_write((motor_id_t)m, t);
+        }
     }
     xSemaphoreGive(s_lock);
 
@@ -732,6 +751,21 @@ static int do_motor_cmd(int argc, char **argv)
     esp_err_t err = motors_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "motor driver not available: %s", esp_err_to_name(err));
+        return 1;
+    }
+
+    /* Over the air the failsafe is the one timer a console-driven motor has:
+       the link timeout watches MOTOR_SET, not this console (net_link.c). So
+       it is changed at the desk only, and --hold over the air needs it on.
+       Before 2026-10-29 'motor --failsafe 0' and then '--hold' over UDP ran
+       a motor with no timer at all (docs/link-robustness-review.md, F4). */
+    const bool remote = net_console_is_caller();
+    if (remote && motor_args.failsafe->count) {
+        printf("--failsafe is refused over the air; change it on the USB console\n");
+        return 1;
+    }
+    if (remote && motor_args.hold->count && s_fs_timeout_ms <= 0) {
+        printf("--hold is refused over the air while the failsafe is off\n");
         return 1;
     }
 

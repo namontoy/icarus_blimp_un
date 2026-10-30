@@ -124,7 +124,9 @@ class MotorsPanel(Panel):
     cut the motors. STOP zeroes the sliders and switches the motors off.
     The limit clamps every slider."""
     HINT = ('Enable, then move a slider. The setpoint stands until you change it or STOP; a window that stops '
-            'responding for 3 s releases the motors, and the blimp coasts on its own timers if the link drops.')
+            'responding for 3 s releases the motors. If the Wi-Fi drops the blimp coasts, and the setpoint comes '
+            'back, ramped over 1 s, if the link returns within 3 s.')
+    RACE_HINT = 'Race mode: this window only watches. STOP is the one command it sends to the motors.'
 
     def __init__(self, station):
         # The value is the PWM duty as a signed fraction: 0.003 is 0.3 %. That
@@ -206,10 +208,13 @@ class MotorsPanel(Panel):
         for w in (self.enable, lim, zero):
             controls.add(w)
         self.lay.addWidget(controls)
-        self.hint = label(self.HINT, 12, color=T.FAINT, wrap=True)
+        self.hint = label(self.RACE_HINT if station.race else self.HINT, 12, color=T.FAINT, wrap=True)
         self.lay.addSpacing(10)
         self.lay.addWidget(self.hint)
         self.lay.addStretch(1)
+        if station.race:
+            self.enable.setEnabled(False)
+            self.enable.setToolTip('race mode: no manual control')
 
     # setpoints out
 
@@ -235,6 +240,9 @@ class MotorsPanel(Panel):
             self.stop_all()
 
     def set_enabled(self, on):
+        if on and self.station.race:
+            self.station.log('warn', 'race mode: the motors stay off from this window')
+            on = False
         self.enabled = on
         self.enable.blockSignals(True)
         self.enable.setChecked(on)

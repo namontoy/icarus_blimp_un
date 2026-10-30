@@ -4,6 +4,7 @@
     python tools/verify.py              fast suite   (~15 s)  run this often
     python tools/verify.py --full       full suite   (~2 min) run before flying
     python tools/verify.py --firmware   also build the ESP32-S3 firmware
+    python tools/verify.py --gui        also the ground station's offscreen tests (~1 min)
     python tools/verify.py --all        everything
 
 Exit code 0 means every check passed. Non-zero means at least one failed, and
@@ -43,6 +44,14 @@ WHAT EACH SUITE COVERS:
   firmware (adds)
     9. idf.py build for the ESP32-S3    via tools/idf_build.bat, which handles
                                         the four documented Windows/ESP-IDF traps
+
+  gui (adds)
+   10. the ground station, offscreen    software/ground_station/tests/: the
+                                        bridge's motor rules, the window with
+                                        its GUI thread blocked, the Control
+                                        page. Run it after any change to the
+                                        bridge, the station or the pages that
+                                        drive motors (docs/link-robustness-review.md)
 """
 from __future__ import annotations
 
@@ -103,13 +112,14 @@ def main(argv: list[str] | None = None) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--full", action="store_true", help="add the long simulation matrix")
     ap.add_argument("--firmware", action="store_true", help="also build the ESP32-S3 firmware")
-    ap.add_argument("--all", action="store_true", help="--full and --firmware")
+    ap.add_argument("--gui", action="store_true", help="also the ground station's offscreen tests")
+    ap.add_argument("--all", action="store_true", help="--full, --firmware and --gui")
     ap.add_argument("--verbose", "-v", action="store_true", help="show output of passing steps too")
     ap.add_argument("--keep-going", action="store_true",
                     help="run every step even after one fails (default: stop at the first failure)")
     ns = ap.parse_args(argv if argv is not None else sys.argv[1:])
     if ns.all:
-        ns.full = ns.firmware = True
+        ns.full = ns.firmware = ns.gui = True
 
     vp = venv_python()
     if vp is None:
@@ -126,6 +136,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  host python  {host}")
     print(f"  sim python   {sim}")
     suite = "all" if (ns.full and ns.firmware) else "full" if ns.full else "firmware+fast" if ns.firmware else "fast"
+    if ns.gui and suite != "all":
+        suite += "+gui"
     print(f"  suite        {suite}")
     print()
 
@@ -165,6 +177,17 @@ def main(argv: list[str] | None = None) -> int:
     if gate():
         ok &= r.step("skills in sync (.agents from .claude)",
                      [host, "tools/sync_skills.py", "--check"])
+
+    if ns.gui:
+        # The venv interpreter: it has PyQt6. The tests give the demo blimp free
+        # ports and Qt its offscreen platform, so a running station is left alone.
+        print(f"{DIM}ground station (offscreen){OFF}")
+        for label, script in (("the bridge's motor rules", "test_bridge.py"),
+                              ("the window, GUI thread blocked", "test_window.py"),
+                              ("the Control page", "test_control.py")):
+            if not gate():
+                break
+            ok &= r.step(label, [sim, f"software/ground_station/tests/{script}"])
 
     if ns.full:
         print(f"{DIM}simulation matrix{OFF}")

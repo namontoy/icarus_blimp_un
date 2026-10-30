@@ -27,8 +27,11 @@ typedef struct {
     bool     link_motors;   /* standing motor commands came over the link   */
     char     peer[24];      /* "a.b.c.d:port" of the last valid sender      */
     uint32_t age_ms;        /* since the last valid packet                  */
+    bool     have_motor;    /* a MOTOR_SET or MOTOR_STOP has been accepted  */
+    uint32_t motor_age_ms;  /* since the last one: the link timeout's clock */
     uint32_t rx_ok;
     uint32_t rx_bad;
+    uint32_t rx_stale;      /* MOTOR_SETs dropped as older than the last    */
     uint32_t tx;            /* every packet sent, telemetry and sensors     */
     uint32_t tx_sensors;    /* SENSORS packets among them                   */
 } net_link_status_t;

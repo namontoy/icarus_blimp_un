@@ -55,6 +55,14 @@ class MockBlimp:
         self.last_rx = 0.0
         self.rx_ok = self.rx_bad = self.tx_seq = 0
         self.lost_logged = False
+        # net_link.c since 2026-10-29: the link timeout runs from the last
+        # accepted motor packet, and a MOTOR_SET not newer than the last one
+        # from the same sender, within the timeout, is dropped and counted.
+        self.last_motor_rx = 0.0
+        self.motor_from = None
+        self.motor_seq = 0
+        self.rx_stale = 0
+        self.radio_on = True            # tests: False is the Wi-Fi gone both ways (reboot() is the other fault)
         # A toy airframe for the sensor packet: heading turns with the front
         # pair's difference, height rises with the rear pair, and the IMU sees
         # gravity plus motor vibration. Enough for a GUI to show motion; not a
@@ -90,6 +98,20 @@ class MockBlimp:
             self.last_thrust_cmd = time.monotonic()
             self.tripped = False
 
+    def reboot(self):
+        """Tests: a reset as the ground sees it. Motors off, the clock and the
+        packet counters from zero, and no peer until a packet names one."""
+        with self.lock:
+            self.motor = [0.0] * 4
+            self.tripped = False
+        self.link_motors = False
+        self.rx_ok = self.rx_bad = self.rx_stale = 0
+        self.t0 = time.monotonic()
+        self.peer = None
+        self.last_rx = 0.0
+        self.motor_from = None
+        self.last_motor_rx = 0.0
+
     def failsafe_state(self):
         if not self.failsafe_on:
             return 0
@@ -113,7 +135,7 @@ class MockBlimp:
 
     def handle(self, data, addr, now):
         try:
-            ptype, _, body = bl.unpack(data)
+            ptype, seq, body = bl.unpack(data)
         except ValueError:
             self.rx_bad += 1
             return
@@ -121,13 +143,18 @@ class MockBlimp:
             pass
         elif ptype == bl.PKT_MOTOR_SET and len(body) == bl._MOTOR_SET.size:
             cmds = bl._MOTOR_SET.unpack(body)
-            if self.set_all(cmds):
+            if self.motor_stale(seq, addr, now):
+                self.rx_stale += 1
+            elif self.set_all(cmds):
                 self.link_motors = any(cmds)
+                self.note_motor(seq, addr, now)
             else:
                 self.log('W MOTOR_SET rejected: ESP_ERR_INVALID_ARG')
         elif ptype == bl.PKT_MOTOR_STOP and len(body) == bl._MOTOR_STOP.size:
             self.coast()
             self.link_motors = False
+            if not self.motor_stale(seq, addr, now):
+                self.note_motor(seq, addr, now)
         elif ptype == bl.PKT_LOG_CMD and len(body) == bl._LOG_CMD.size:
             self.log_cmd(body, addr)
         else:
@@ -137,12 +164,23 @@ class MockBlimp:
         self.last_rx = now
         self.rx_ok += 1
 
+    def motor_stale(self, seq, addr, now):
+        """net_link.c's motor_packet_stale(): same sender, within the timeout,
+        and a sequence number not newer (16-bit, signed difference)."""
+        if self.motor_from != addr or now - self.last_motor_rx >= LINK_TIMEOUT_S:
+            return False
+        d = (seq - self.motor_seq) & 0xFFFF
+        return d == 0 or d >= 0x8000
+
+    def note_motor(self, seq, addr, now):
+        self.motor_from, self.motor_seq, self.last_motor_rx = addr, seq, now
+
     def link_timeout(self, now):
-        if self.link_motors and now - self.last_rx > LINK_TIMEOUT_S:
+        if self.link_motors and now - self.last_motor_rx > LINK_TIMEOUT_S:
             self.link_motors = False
             self.coast()
-            self.log('W link lost: no packet for %d ms, all motors coasting'
-                     % int((now - self.last_rx) * 1000))
+            self.log('W link lost: no motor command for %d ms, all motors coasting'
+                     % int((now - self.last_motor_rx) * 1000))
 
     def telemetry(self, now):
         if self.peer is None or now - self.last_rx > LINK_TIMEOUT_S * PEER_HOLD_MULT:
@@ -299,15 +337,16 @@ class MockBlimp:
                 # sent found no listener (the client closed). Not an error.
                 data = None
             now = time.monotonic()
-            if data:
+            if data and self.radio_on:
                 self.handle(data, addr, now)
             self.link_timeout(now)
             self.failsafe_tick(now)
             self.step(now)
             self.capture_tick(now)
             if now >= next_tx:
-                self.telemetry(now)
-                self.sensors(now)
+                if self.radio_on:
+                    self.telemetry(now)
+                    self.sensors(now)
                 next_tx += period
                 if next_tx < now:
                     next_tx = now + period
@@ -336,7 +375,8 @@ class MockBlimp:
             return ('access point UP\nSSID ICARUS-MOCK00   channel 1   WPA2   up to 2 station(s)\n'
                     'address 127.0.0.1   UDP link port 7200, console port 7201\n1 station(s) associated\n')
         if line == 'link':
-            return 'UDP port 7200   telemetry 20 Hz   timeout 500 ms\nrx ok %d   rx rejected %d\n' % (self.rx_ok, self.rx_bad)
+            return ('UDP port 7200   telemetry 20 Hz   timeout 500 ms\nrx ok %d   rx rejected %d   '
+                    'motor commands out of date %d\n' % (self.rx_ok, self.rx_bad, self.rx_stale))
         if line == 'slow':                       # exercises streamed output
             out = []
             for i in range(5):

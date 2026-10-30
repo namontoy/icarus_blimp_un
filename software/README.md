@@ -19,8 +19,9 @@ python software/link_check.py --download 60 --timers      # latency, loss, the b
 `MOTOR_SET` with a new value to its echo in the telemetry, the loss as the blimp counts our
 packets, the longest the blimp waited for one of ours (`link_age_ms`; it coasts at 500), the
 telemetry and sensor rates and gaps, the same figures during a capture download, and the two
-firmware timeouts (motors coast about 1 s after the last `MOTOR_SET` with heartbeats on, the
-link falls 0.5 s after the last packet).
+firmware timeouts (motors coast 0.5 s after the last `MOTOR_SET` even with heartbeats on, since
+the link timeout counts motor packets only from 2026-10-29; the link falls 0.5 s after the last
+packet).
 
 `mock_blimp.py` serves the same protocol on localhost for development without hardware
 (`--host 127.0.0.1` on the commands above). Protocol, safety timers and the bring-up

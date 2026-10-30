@@ -17,7 +17,11 @@ docs/wireless-link.md):
   age on the blimp  telemetry carries link_age_ms, how long the blimp had been
                     waiting for a packet of ours when it sent that telemetry.
                     Its maximum is the worst gap in our stream as the blimp
-                    saw it; the link timeout coasts the motors at 500 ms.
+                    saw it; the link timeout coasts the motors at 500 ms. It
+                    counts any packet, the 10 Hz heartbeat included, so it is
+                    a lower bound on the wait for a MOTOR_SET until the
+                    firmware reports a motor-only age
+                    (docs/link-robustness-review.md, F6).
   rates and gaps    telemetry and sensor packets per second, and the longest
                     silence between telemetry packets, as this side sees them.
 
@@ -29,8 +33,10 @@ sends with a command standing. The duty is tiny (--duty 0.10, stepping by
 fetched while the stream continues, which is the operator's download-with-
 motors-on case; the figures are reported for the hold and for the download
 separately. --timers ends by stopping the MOTOR_SET while the heartbeat goes
-on (the motor failsafe should coast within about 1 s) and then stopping
-everything (link_alive should fall within 500 ms). Standard library only.
+on (the link timeout counts motor packets only since 2026-10-29, so the
+motors should coast within about 0.5 s; older firmware coasted on the 1 s
+driver failsafe) and then stopping everything (link_alive should fall within
+500 ms). Standard library only.
 """
 import argparse
 import os
@@ -181,7 +187,8 @@ def timers(link, stream, meter):
     dt = time.monotonic() - t0
     with meter.lock:
         d = meter.latest
-    lines.append('MOTOR_SET stopped, heartbeat on: motors at zero after %.2f s, failsafe %s (the motor failsafe is 1 s)'
+    lines.append('MOTOR_SET stopped, heartbeat on: motors at zero after %.2f s, failsafe %s (the link timeout, '
+                 'motor packets only, is 0.5 s; firmware before 2026-10-29 left it to the 1 s failsafe)'
                  % (dt, d['failsafe'] if d else '?') if dt < 3.0 else
                  'MOTOR_SET stopped, heartbeat on: the motors did NOT stop within 3 s')
     link.heartbeat = lambda: None               # no more heartbeats; the receive thread stays, and the blimp

@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include <stdbool.h>
 #include "esp_err.h"
 
 #ifdef __cplusplus
@@ -17,6 +18,13 @@ extern "C" {
  * register_*() call, so the first datagram can already be 'help'.
  */
 esp_err_t net_console_start(void);
+
+/**
+ * True when called from a command that this console is running, i.e. one
+ * that came over the air. A command uses it to refuse what is safe only at
+ * the desk (cmd_motor.c: switching the motor failsafe off).
+ */
+bool net_console_is_caller(void);
 
 #ifdef __cplusplus
 }

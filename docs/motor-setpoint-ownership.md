@@ -220,3 +220,12 @@ confirmation, and T2 to T4 are still worth their sessions.
 **For the operator** nothing changes in the hands: the Motors and Control hints now say that a
 command stands until changed and that a window frozen for 3 s releases the motors. What was traded:
 a frozen window keeps the motors going for up to 3 s instead of 0.5 s, as §5 accepted.
+
+## 8. After this (2026-10-29)
+
+The review in `docs/link-robustness-review.md` kept option A's ownership and settled the rest.
+The repeat stays, because it carries the value and repairs a lost packet, while a heartbeat only
+proves that the program runs; the "send only on change" moved to the blimp (its F1: write the PWM
+only when a value changes) and motor liveness is to count motor packets only (F2). Option C is
+not adopted as written; option D is the conditional slew of its §3.3. Its §4 lists that day's
+ground station changes, and its §6 the bench measurements this document's T1 to T4 became.
