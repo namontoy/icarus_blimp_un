@@ -119,12 +119,16 @@ writes its ranges and modes at every run and reads them back (§12).
 
 | Thruster | IN1 | IN2 | Driver |
 |---|---|---|---|
-| FL (front left) | GPIO13 | GPIO12 | #1, IN1/IN2 |
-| RL (rear left) | GPIO11 | GPIO10 | #1, IN3/IN4 |
-| FR (front right) | GPIO9 | GPIO8 | #2, IN1/IN2 |
-| RR (rear right) | GPIO7 | GPIO14 | #2, IN3/IN4 |
+| FL (front left) | GPIO10 | GPIO11 | #1, IN4/IN3 |
+| RL (rear left) | GPIO12 | GPIO13 | #1, IN2/IN1 |
+| FR (front right) | GPIO14 | GPIO7 | #2, IN4/IN3 |
+| RR (rear right) | GPIO8 | GPIO9 | #2, IN2/IN1 |
 
-These are the Kconfig defaults (§9). nSLEEP is assumed to be tied high in
+These are the Kconfig defaults (§9) since the remount of 2026-10-29, which put each front motor
+where its rear neighbour was on the same driver and reversed all four; before it, FL was GPIO13/12
+(#1, IN1/IN2), RL 11/10, FR 9/8 and RR 7/14. A build directory made before that date keeps the
+old pins in its `sdkconfig`: set them in menuconfig, or delete it and run `set-target esp32s3`.
+The boot log's `motor_XX on GPIO a/b` lines and `motor --status` show what a build really uses. nSLEEP is assumed to be tied high in
 hardware (`CONFIG_MOTOR_NSLEEP_GPIO = -1`). Each driver runs one side of the
 blimp, so a driver fault costs a whole side.
 

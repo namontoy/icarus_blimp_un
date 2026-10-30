@@ -5,10 +5,10 @@
  * in total. As wired:
  *
  *                      +-----------------+
- *     step-up 5V ----->| VM         OUT1 |---- motor_FL
+ *     step-up 5V ----->| VM         OUT1 |---- motor_RL
  *            GND ----->| GND        OUT2 |---'
  *        GPIO 13 ----->| IN1             |
- *        GPIO 12 ----->| IN2        OUT3 |---- motor_RL
+ *        GPIO 12 ----->| IN2        OUT3 |---- motor_FL
  *        GPIO 11 ----->| IN3        OUT4 |---'
  *        GPIO 10 ----->| IN4             |
  *                      |         nSLEEP  |<--- 3V3 (or a GPIO, see Kconfig)
@@ -16,14 +16,19 @@
  *                      +-----------------+  DRV8833 #1  (the left side)
  *
  *                      +-----------------+
- *        GPIO  9 ----->| IN1        OUT1 |---- motor_FR
+ *        GPIO  9 ----->| IN1        OUT1 |---- motor_RR
  *        GPIO  8 ----->| IN2        OUT2 |---'
- *        GPIO  7 ----->| IN3        OUT3 |---- motor_RR
+ *        GPIO  7 ----->| IN3        OUT3 |---- motor_FR
  *        GPIO 14 ----->| IN4        OUT4 |---'
  *                      +-----------------+  DRV8833 #2  (the right side)
  *
  * IN1/IN2 are the datasheet's AIN1/AIN2 and IN3/IN4 its BIN1/BIN2; breakout
- * boards relabel them, the silicon does not care.
+ * boards relabel them, the silicon does not care. Since the remount of
+ * 2026-10-29 each motor's own IN1 is the second line of its pair (FL's IN1
+ * is driver #1 IN4, RL's is IN2, FR's is driver #2 IN4, RR's is IN2): that
+ * swap is what reversed all four. Before it, FL and RL were the other way
+ * round on driver #1, FR and RR on driver #2, each with IN1 first. The
+ * numbers are Kconfig's (MOTOR_*_IN*_GPIO); this drawing follows them.
  *
  * The split falls along the airframe rather than across it: driver #1 carries
  * the whole left side, driver #2 the whole right. Worth knowing before it
@@ -111,13 +116,13 @@ typedef struct {
 
 /* Order matches motor_id_t and the array taken by motors_set_all(). */
 static const motor_pins_t s_pins[MOTOR_COUNT] = {
-    { "FL", "#1 IN1/IN2", CONFIG_MOTOR_FL_IN1_GPIO, CONFIG_MOTOR_FL_IN2_GPIO,
+    { "FL", "#1 IN4/IN3", CONFIG_MOTOR_FL_IN1_GPIO, CONFIG_MOTOR_FL_IN2_GPIO,
       LEDC_CHANNEL_0, LEDC_CHANNEL_1 },
-    { "RL", "#1 IN3/IN4", CONFIG_MOTOR_RL_IN1_GPIO, CONFIG_MOTOR_RL_IN2_GPIO,
+    { "RL", "#1 IN2/IN1", CONFIG_MOTOR_RL_IN1_GPIO, CONFIG_MOTOR_RL_IN2_GPIO,
       LEDC_CHANNEL_2, LEDC_CHANNEL_3 },
-    { "FR", "#2 IN1/IN2", CONFIG_MOTOR_FR_IN1_GPIO, CONFIG_MOTOR_FR_IN2_GPIO,
+    { "FR", "#2 IN4/IN3", CONFIG_MOTOR_FR_IN1_GPIO, CONFIG_MOTOR_FR_IN2_GPIO,
       LEDC_CHANNEL_4, LEDC_CHANNEL_5 },
-    { "RR", "#2 IN3/IN4", CONFIG_MOTOR_RR_IN1_GPIO, CONFIG_MOTOR_RR_IN2_GPIO,
+    { "RR", "#2 IN2/IN1", CONFIG_MOTOR_RR_IN1_GPIO, CONFIG_MOTOR_RR_IN2_GPIO,
       LEDC_CHANNEL_6, LEDC_CHANNEL_7 },
 };
 

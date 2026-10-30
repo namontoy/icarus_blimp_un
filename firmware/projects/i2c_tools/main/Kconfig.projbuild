@@ -45,42 +45,49 @@ menu "Motor driver (DRV8833)"
     # counts as "forward" is set by how the motor leads and prop are fitted -
     # correct a backwards thruster by swapping its pair here, not by negating
     # the command upstream, so that the sign lives in one place.
+    #
+    # Remounted 2026-10-29: the motor on driver #1's OUT1/OUT2 is now the rear
+    # left one and the one on OUT3/OUT4 the front left (driver #2 the same on
+    # the right), and every motor turned the wrong way. So each motor took the
+    # other pair of its driver, with IN1 and IN2 swapped to reverse it. Before:
+    # FL 13/12, RL 11/10, FR 9/8, RR 7/14. An existing sdkconfig keeps the
+    # numbers it has: set them in menuconfig, or delete it and run set-target.
 
     config MOTOR_FL_IN1_GPIO
-        int "motor_FL - driver #1 IN1 GPIO"
-        range 0 48
-        default 13
-    config MOTOR_FL_IN2_GPIO
-        int "motor_FL - driver #1 IN2 GPIO"
-        range 0 48
-        default 12
-
-    config MOTOR_RL_IN1_GPIO
-        int "motor_RL - driver #1 IN3 GPIO"
-        range 0 48
-        default 11
-    config MOTOR_RL_IN2_GPIO
-        int "motor_RL - driver #1 IN4 GPIO"
+        int "motor_FL IN1 - driver #1 IN4 GPIO"
         range 0 48
         default 10
+    config MOTOR_FL_IN2_GPIO
+        int "motor_FL IN2 - driver #1 IN3 GPIO"
+        range 0 48
+        default 11
+
+    config MOTOR_RL_IN1_GPIO
+        int "motor_RL IN1 - driver #1 IN2 GPIO"
+        range 0 48
+        default 12
+    config MOTOR_RL_IN2_GPIO
+        int "motor_RL IN2 - driver #1 IN1 GPIO"
+        range 0 48
+        default 13
 
     config MOTOR_FR_IN1_GPIO
-        int "motor_FR - driver #2 IN1 GPIO"
-        range 0 48
-        default 9
-    config MOTOR_FR_IN2_GPIO
-        int "motor_FR - driver #2 IN2 GPIO"
-        range 0 48
-        default 8
-
-    config MOTOR_RR_IN1_GPIO
-        int "motor_RR - driver #2 IN3 GPIO"
-        range 0 48
-        default 7
-    config MOTOR_RR_IN2_GPIO
-        int "motor_RR - driver #2 IN4 GPIO"
+        int "motor_FR IN1 - driver #2 IN4 GPIO"
         range 0 48
         default 14
+    config MOTOR_FR_IN2_GPIO
+        int "motor_FR IN2 - driver #2 IN3 GPIO"
+        range 0 48
+        default 7
+
+    config MOTOR_RR_IN1_GPIO
+        int "motor_RR IN1 - driver #2 IN2 GPIO"
+        range 0 48
+        default 8
+    config MOTOR_RR_IN2_GPIO
+        int "motor_RR IN2 - driver #2 IN1 GPIO"
+        range 0 48
+        default 9
 
     config MOTOR_NSLEEP_GPIO
         int "nSLEEP GPIO, or -1 if strapped high in hardware"

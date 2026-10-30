@@ -58,6 +58,19 @@ an unchanged command no longer rewrites the PWM, the console over Wi-Fi refuses 
 It builds; it has not run on the board. The other firmware proposals (telemetry to both stations,
 the reset reason and a motor-only age in telemetry, download pacing) wait for namontoy.
 
+**2026-10-29, motors remounted.** After the gondola was rebuilt the motor on each driver's
+first output pair sat where its rear neighbour used to, and all four turned the wrong way. Fixed
+in the pin map, as Kconfig's motor menu prescribes, not by negating commands: FL is driver #1
+IN4/IN3 (GPIO 10/11), RL #1 IN2/IN1 (12/13), FR #2 IN4/IN3 (14/7), RR #2 IN2/IN1 (8/9); the
+table and the old values are in `firmware/projects/i2c_tools/README.md` §2. Two consequences to
+mind. A build directory made before this keeps the old pins in its `sdkconfig` (the Kconfig
+defaults reach only a fresh one): set them in menuconfig, or delete it and run `set-target`; the
+boot log's `motor_XX on GPIO a/b` lines show what a build uses. And the 2026-10-28 scale data
+(`docs/history/pid-bench-2026-10-28/`) names its motors as they were wired then: whatever motor
+now answers to a name, its curve and its "forward" may be another's, so redo the PID runbook's
+hand sign check of each pair, and check which physical motors the scale measured, before using
+`thrust-map.json`. Not yet checked on the bench.
+
 **2026-10-28, PID tuning plan and its instruments (branch `pid-tuning`).**
 `docs/pid-tuning-plan.md`: what the three loops' gains depend on (two plant numbers, a bandwidth
 choice, and the thrust map in series with all of them), the methods taken (model-based placement
