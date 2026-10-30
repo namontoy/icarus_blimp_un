@@ -1,16 +1,7 @@
 # Python tools in software/.
 #
-# The blimp's own ground station (software/ground_station) keeps its pins in its own file,
-# included here so one `pip install -r software/requirements.txt` covers both tools. It
-# pins the same PyQt6 as the list below, so the repeat is harmless; installing it is the
-# same pip line on every OS (software/ground_station/README.md, "Installing").
+# blimp_link.py, mock_blimp.py, blimp_log.py, link_check.py and the PID instruments
+# (thrust_map.py, step_test.py, step_response.py) need only the standard library. The
+# ground station needs PyQt6, pinned in its own file, included here so one
+# `pip install -r software/requirements.txt` covers everything in this folder.
 -r ground_station/requirements.txt
-
-# Below: the esp-drone bench tools (drone_gui.py, motor_diag.py). Tested with Python 3.10.
-# Same versions as the original PC2 virtualenv; scipy is the version resolved on the laptop.
-numpy==1.26.4
-scipy==1.15.3
-PyQt6==6.11.0
-pyqtgraph==0.14.0
-# esp-drone-aware cflib fork (UDP link with keep-alive), pinned to the commit PC2 used.
-cflib @ git+https://github.com/leeebo/crazyflie-lib-python.git@a430283a3b608db7c0b3227aa37d7120858c25ef

@@ -24,9 +24,9 @@ so the repo now has a host side and two chips:
 | `firmware/projects/optflow_cam/` | ESP32-CAM (AI-Thinker, original ESP32) | Downward optical flow. It prints CSV over UART to a laptop. |
 | `firmware/projects/espfly/` | XIAO ESP32-S3 on the ESP-FLY board | DroneUN's previous flight shell for the previous board: an `esp_timer`-driven control task around `blimp_step()`, an ESP-NOW link and `net/protocol.h`. Not built here; kept as the reference for the S3-Zero control task until that supersedes it (ESP-IDF v5.3, `tools\idf_build.bat`). |
 | `firmware/projects/blink/` | — | Stock ESP-IDF example, kept as a toolchain smoke test. |
-| `software/` | host | `blimp_link.py` is the ground tool for this repo's firmware (standard library only; `mock_blimp.py` fakes the firmware on localhost, capture included; `blimp_log.py` decodes captures; `thrust_map.py`, `step_test.py` and `step_response.py` are the bench instruments of `docs/pid-tuning-plan.md`). The other Python tools were imported from a **separate quadcopter project (esp-drone)**: they speak CRTP-over-UDP to esp-drone firmware, **not** to anything in this repo. See `docs/esp-drone-tools-report.md` §8 for what would need to change to use them here. |
+| `software/` | host | `blimp_link.py` is the ground tool for this repo's firmware (standard library only; `mock_blimp.py` fakes the firmware on localhost, capture included; `blimp_log.py` decodes captures; `thrust_map.py`, `step_test.py` and `step_response.py` are the bench instruments of `docs/pid-tuning-plan.md`). The esp-drone bench tools that were here until 2026-10-30 (`drone_gui.py`, `drone_dynamics.py`, `motor_diag.py`, `SETUP.md`) spoke CRTP over UDP to a different quadcopter's firmware, never to this repo's; the ground station replaced them. They are in git history (`git show dab8786:software/drone_gui.py`) and `docs/esp-drone-tools-report.md` describes them. |
 
-The two chips are not linked yet. `docs/inter-board-link-plan.md` (untracked draft) proposes UART links. `docs/sensor-fusion-plan.md` is a proposal (`blimp_ins`) that is **not implemented**. `hardware/` and `external/` are empty placeholders (`external/` is where a read-only esp-drone clone goes, gitignored); `scripts/` holds `idf.bat`. The top-level `README.md` is the project front page, from DroneUN.
+The two chips are not linked yet. `docs/inter-board-link-plan.md` (a draft) proposes UART links. `docs/sensor-fusion-plan.md` is a proposal (`blimp_ins`) that is **not implemented**. `hardware/` and `external/` are empty placeholders (`external/` is where a read-only esp-drone clone goes, gitignored); `scripts/` holds `idf.bat`. The top-level `README.md` is the project front page, from DroneUN.
 
 ## Building firmware (ESP-IDF v5.5.5)
 
@@ -57,8 +57,6 @@ $IDF_PY -C firmware/projects/optflow_cam -p /dev/ttyUSB0 flash
 
 The controller and the simulator are checked with `python tools/verify.py` (about 20 s: the `core/` unit tests including the Rule 13 thrust sweep, the DLL build, the skill sync, and a simulator smoke test); `--full` adds both courses, and `--gui` the ground station's offscreen tests (`software/ground_station/tests/`, about 1 min; run it after any change to the bridge, the station or the pages that drive motors). Run it after any change under `core/`, `sim/` or `tools/`. It needs clang on `PATH` and the `.venv` from `python tools/setup_env.py`. On Linux, run `setup_env.py` with a Python 3.12 interpreter (the `.venv` inherits its version); the verify and sweep scripts then run with any Python 3 and pick up `.venv` themselves. A Linux run gives different per-seed lap times from a Windows run (AGENTS.md, Commands), so compare sweeps, not single seeds, across the two.
 
-The `pytest_*.py` files under `firmware/projects/` are Espressif's stock example tests for other hardware (a CCS811 and an LED). They are not this project's tests.
-
 The real automated test is the optical-flow matcher, run on the host with no hardware:
 
 ```bash
@@ -70,15 +68,15 @@ Everything else is verified on the bench through the S3 console (`help` lists co
 
 ## Python tools (`software/`)
 
-Use the conda env described in `software/SETUP.md`: `blimp-tools`, Python 3.10, with `PYTHONNOUSERSITE=1` set **before** any `pip install`, because user-site packages have already broken this env once. Checks that need no hardware:
+Any Python 3.9 or newer: everything in `software/` is standard library except the ground station, which needs PyQt6 (`pip install -r software/requirements.txt`; the repo's `.venv` has it). With conda, set `PYTHONNOUSERSITE=1` **before** any `pip install`: user-site packages broke a conda env here once (2026-10-13). Checks that need no hardware:
 
 ```bash
-python software/drone_dynamics.py      # self-check
-python software/motor_diag.py --help
-QT_QPA_PLATFORM=offscreen python -c "import sys; sys.path.insert(0, 'software'); import drone_gui"
+python software/blimp_link.py selftest     # the packet codec
+python software/thrust_map.py --selftest   # step_response.py has one too; step_test.py a dry run
+python tools/verify.py --gui               # the ground station, offscreen
 ```
 
-The GUI labels are in Spanish. `optflow_cam/host/flow_monitor.py` is a separate serial viewer/logger and needs `pyserial`.
+`optflow_cam/host/flow_monitor.py` is a separate serial viewer/logger and needs `pyserial`.
 
 `software/ground_station/` is the GUI: one native PyQt6 process (`pip install -r software/ground_station/requirements.txt`) whose `station.py` bridges `blimp_link.py`, this computer's Wi-Fi and a demo mode to the window through Qt signals. It talks only to the S3, over Wi-Fi: the cameras are wired to the S3, and their data has no link packet yet, so the camera panel runs on demo data only; the widgets are custom-painted with QPainter (no pyqtgraph). `python -m software.ground_station --demo` runs it with no hardware; design in `docs/ground-station-plan.md` (signal table in §4) and `docs/ground-station-native-plan.md`. The window has three pages under the header: Flight, Control (`control.py`, 2026-10-28: flying by hand with surge, yaw and heave from the keyboard or a gamepad, mixed on the ground into the four duties as the firmware's MANUAL mode expects; PC and Steam Deck input modes, `--mode`; `gamepad.py` reads XInput on Windows and the kernel's event devices on Linux; on a Steam Deck the station runs from Gaming mode as a non-Steam game through `steamdeck.sh`, because in Desktop mode Steam Input never feeds its virtual pad, checked 2026-10-29; the "Go autonomous" button waits for `MODE_SET`) and Bench (`bench.py`, 2026-10-27: the capture and a trace viewer, written to `captures/`); the console dock serves all three. One source drives the motors at a time: arming the Control page switches the Flight page's "Motors enabled" off and the other way round. The bridge's thread owns the standing motor command (`blimp_bridge.py`, 2026-10-28): the pages send changes, the station's tick pings it every 100 ms, and 3 s without a ping releases the motors and latches until the window STOPs; a long repaint can no longer cut the motors (`docs/motor-setpoint-ownership.md`). Since 2026-10-29 (`docs/link-robustness-review.md`) a change goes out at once and the repeat holds 20 Hz on Windows too, a STOP is never overtaken, a Wi-Fi drop zeroes the motors and resumes them ramped if the link returns within 3 s (a longer drop or a blimp reboot releases and latches), B on the pad latches, `--race` makes the window a monitor whose one motor command is STOP, and the header's Drive pill shows which holds. The station emits every SENSORS packet to the window (`sen`, from the receive callback) and the link state at 10 Hz (`tel`). The window's identity is the university's palette with McLaren-style type (Titillium Web and IBM Plex Mono, bundled in `fonts/`); keep new UI inside `theme.py`'s tokens. Any script that builds the window must end with `app.teardown(station, win)` before the interpreter exits, or PyQt's exit cleanup segfaults (see its docstring).
 

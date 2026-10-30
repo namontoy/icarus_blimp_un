@@ -1,76 +1,78 @@
-local/
+# What git leaves alone in this repo, by kind. Regrouped 2026-10-30 from icarus_blimp_un's list
+# and the one DroneUN brought with it on 2026-10-27; every rule of the two is kept, except the
+# cflib cache of the esp-drone tools, which left the repo that day.
 
-# ESP-IDF build output and resolved dependencies
+# --- Build outputs -------------------------------------------------------------------------
+
+# ESP-IDF, for every firmware project, and its resolved dependencies. Persistent configuration
+# goes in sdkconfig.defaults* and Kconfig.projbuild; sdkconfig is generated per computer.
 build/
 managed_components/
+dependencies.lock
 sdkconfig
 sdkconfig.old
 # Dated local copies of a generated sdkconfig, kept as a fallback
 sdkconfig_*
-dependencies.lock
 
-# Host test binaries
+# Host-side builds of the camera projects' portable code (firmware/projects/*/host/)
 firmware/projects/*/host/test_flow_match
-
-# Reference papers: published third-party work, 35 MB, re-downloadable.
-# Citations and links are kept in docs/reference/README.md instead.
-docs/reference/*.pdf
-
-# Host sweep binary (build output of bias_sweep.c, via host/Makefile)
 firmware/projects/*/host/bias_sweep
-software/cfcache/
-__pycache__/
+firmware/projects/*/host/test_blob_detect
+firmware/projects/*/host/test_pipeline
+firmware/projects/*/host/test_blob_feat
+firmware/projects/*/host/libblob_detect.so
 
-# Configuracion local de vscode
-.vscode/
-
-# --- From DroneUN (merged 2026-10-27) ---
-
-# Host test/DLL build output (tools/build.py); build/ itself is ignored above
+# tools/build.py's host tests and simulator DLL (build/ itself is above)
 build_tmp/
 
-# Python
-*.pyc
+# MuJoCo and transient logs
+MUJOCO_LOG.TXT
+build_log.txt
 
+# --- Python ----------------------------------------------------------------------------------
+
+__pycache__/
+*.pyc
 # Project-local virtual environment (recreate with: python tools/setup_env.py)
 .venv/
 venv/
-
-# Tool caches
 .ruff_cache/
 .pytest_cache/
 .mypy_cache/
 # clangd index, made beside compile_commands.json
 .cache/
 
-# MuJoCo
-MUJOCO_LOG.TXT
+# --- Data that stays on the computer that made it --------------------------------------------
 
-# Transient logs
-build_log.txt
-
-# Third-party documents: kept locally, not committed (see reference/README.md)
+# Captures fetched from the blimp (blimp_link.py capture, the Bench page)
+captures/
+# Images collected for training the forward camera's detector
+firmware/projects/target_cam/data/
+# Third-party papers and documents: 35 MB, re-downloadable; the citations and links are kept in
+# docs/reference/README.md and reference/README.md instead
+docs/reference/*.pdf
 reference/*.pdf
 reference/*.txt
-
 # Read-only clone of esp-drone for the reuse task (never committed)
 external/esp-drone/
+# Task prompts: kept locally, never committed (decided 2026-10-27)
+docs/prompts/
 
-# Personal scratch space
+# --- Personal ----------------------------------------------------------------------------------
+
+# Per-computer scratch; local/esp-drone-tools/ keeps the esp-drone bench tools on the laptop
+# that used them, after they left the repo (2026-10-30)
+local/
 _scratch/
-
 # Personal Claude Code files (the shared ones are CLAUDE.md and .claude/skills/)
 CLAUDE.local.md
 .claude/settings.local.json
 
-# OS / editor clutter
+# --- Editors and operating systems --------------------------------------------------------------
+
+# Per-computer VS Code and ESP-IDF extension settings (the paths differ between computers)
+.vscode/
 Thumbs.db
 desktop.ini
 .DS_Store
 *.swp
-
-# Captures fetched from the blimp (blimp_link.py capture, the Bench page)
-captures/
-
-# Task prompts: kept locally, never committed (decided 2026-10-27)
-docs/prompts/

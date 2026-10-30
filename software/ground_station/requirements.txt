@@ -1,5 +1,5 @@
 # The blimp's ground station (software/ground_station). Python 3.9 or newer.
-# PyQt6 is the pin the esp-drone tools in software/requirements.txt already use.
+# PyQt6 6.11.0: what the laptop (Windows 11) and the Steam Deck run.
 # Nothing else: the station talks only to the S3, over Wi-Fi, with the standard
 # library's sockets; the cameras are wired to the S3, never to this computer.
 #

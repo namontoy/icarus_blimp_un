@@ -12,7 +12,8 @@ computer would send from to reach 192.168.4.1 is a 192.168.4.x one only once
 it is on the blimp's network. That check is also language-independent, where
 parsing netsh's localised output would not be.
 
-Linux uses nmcli the way software/drone_gui.py does: scan for the strongest
+Linux uses nmcli the way the esp-drone GUI did (drone_gui.py, out of the repo
+since 2026-10-30, in its history): scan for the strongest
 SSID with the prefix, connect with the password, then turn autoconnect off
 so the laptop does not keep jumping back to the blimp after the session.
 

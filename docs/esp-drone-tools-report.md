@@ -1,5 +1,9 @@
 # ESP-Drone bench tools: merged technical report
 
+> **2026-10-30:** the three programs left the repo. They talk only to esp-drone firmware, and the
+> blimp's ground station (`software/ground_station/`) replaced them. Read them from git history,
+> e.g. `git show dab8786:software/drone_gui.py`; this report stays as their record.
+
 Merged from two Claude Code sessions on the second PC (Linux Mint, `~/github/esp-drone`, fork `github.com/namontoy/esp-drone`). It documents the three Python programs in `test_scripts/` (`drone_gui.py`, `drone_dynamics.py`, `motor_diag.py`), the Wi-Fi protocol they use, and what was learned along the way. The Wi-Fi passphrase is deliberately not reproduced anywhere in this document.
 
 ---

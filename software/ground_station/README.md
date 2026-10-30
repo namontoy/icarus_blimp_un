@@ -24,11 +24,10 @@ motors first. Window size, dock height, tab and collapsed state are kept by Qt's
 
 ## Installing
 
-Python 3.9 or newer (3.12 on the Windows laptop; the 3.10 conda environment of
-`software/SETUP.md` also works) and the repo cloned with the `s3-wireless-link` branch
-checked out. Everything the ground station needs is pinned in
-`software/ground_station/requirements.txt`; the esp-drone tools' `software/requirements.txt`
-includes it, so one `pip install -r` of either file covers it. Install into the Python you will
+Python 3.9 or newer (3.12 on the Windows laptop, 3.13 on the Steam Deck) and the repo
+cloned. Everything the ground station needs is pinned in
+`software/ground_station/requirements.txt`; `software/requirements.txt` includes it, so one
+`pip install -r` of either file covers it. Install into the Python you will
 run with: inside a virtual environment, `python` is that environment's interpreter. The PyQt6
 wheel carries Qt itself, so there is nothing to install from the system on any OS, and the
 fonts (Titillium Web, IBM Plex Mono, both OFL) ship in `fonts/`.
@@ -55,7 +54,6 @@ python3 -m pip install -r software/ground_station/requirements.txt
 python3 -m software.ground_station
 ```
 
-- The `blimp-tools` conda environment of `SETUP.md` already has PyQt6, which is all it needs.
 - The Wi-Fi button needs NetworkManager (`nmcli`) managing the Wi-Fi interface, which a
   desktop install has. It scans for the strongest `ICARUS-…`, joins with the key, then turns
   autoconnect off so the laptop does not keep going back to the blimp. A local session is
