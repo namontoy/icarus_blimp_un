@@ -8,6 +8,22 @@ watches the spin, records a capture and always ends with 'hold off'.
         --param yaw.kp=0.0008 yaw.kd=0.0008 --deadband 10
     python software/hold_test.py --steps 0 --dwell 20 --go            # hold where it points, 20 s
     python software/hold_test.py --follow --dwell 60 --go --surge 0.5 # turn toward the camera's balloon
+    python software/hold_test.py --altitude --steps 1.3 1.6 1.3 --dwell 30 --go   # height steps, m
+
+--altitude runs 'hold altitude' instead (the plan's C1): the steps are
+heights above the floor in metres, the yaw is left free, and the report is
+in metres from the capture's ToF. With --heading DEG it also holds that heading
+throughout (the plan's C3, both loops); the other way round, --hold-alt M
+holds a height during heading steps. It kills from here above --max-alt
+(default the highest height + 0.5 m), as well as on --max-rate. On a thread
+from above, the thread is a floor: the vehicle cannot sink below where it
+hangs, so put every step above that height.
+
+Whenever a height is held, the run ends with a landing (--no-land skips
+it): the setpoint ramps down at --land-rate to 0.2 m, the lowest 'hold
+altitude' takes, and the motors stop once the ToF reads it there, so the
+vehicle drops its last ~0.13 m instead of falling from the last step on its
+trim (4.8 g heavy reached the floor at about 0.5 m/s from 1 m, 2026-10-31).
 
 --follow runs 'hold follow' instead of the steps: core/ turns the gondola
 toward the forward camera's balloon (each new sighting sets the heading to
@@ -49,6 +65,20 @@ import blimp_link as bl  # noqa: E402
 import blimp_log  # noqa: E402
 
 LEAD_S = 2.0          # zero-thrust baseline in the capture before the hold arms
+# A setpoint's window in the capture is placed from this computer's clock, so
+# it can be a tick off the blimp's: one record of the next setpoint inside it
+# read as a 30 deg overshoot (2026-10-31, T2). Trimmed at both ends.
+EDGE_S = 0.1
+LAND_ALT_M = 0.2      # the landing's last setpoint: HOLD_ALT_MIN_M in ctl_task.c
+LAND_WAIT_S = 4.0     # at that setpoint before the motors stop, if the ToF never reads it
+
+
+def landing_s(args):
+    """Seconds the landing adds after the schedule (0 without one)."""
+    sp0 = args.steps[-1] if args.altitude else args.hold_alt
+    if sp0 is None or not args.land:
+        return 0.0
+    return max(0.0, sp0 - LAND_ALT_M) / args.land_rate + LAND_WAIT_S
 
 
 def plan(steps, dwell, follow=False):
@@ -74,12 +104,17 @@ def hold_line(text):
     o = re.search(r'throttle FL ([\d.]+) RL ([\d.]+) FR ([\d.]+) RR ([\d.]+)', text)
     f = re.search(r'FOLLOWING the target, last seen at ([-+\d.]+) deg, error ([-+\d.]+) deg', text)
     cam = re.search(r'camera: target at bearing ([-+\d.]+) deg', text)
+    alt = re.search(r'altitude: estimate ([-+\d.]+) m \(([^)]*)\)(?:; held at ([-+\d.]+) m)?', text)
     mode = re.search(r'mode (\w+)', text)
     parts = [mode.group(1) if mode else '?']
     if m:
         parts.append('hdg %+6.1f  rate %+6.1f' % (float(m.group(1)), float(m.group(2))))
         if m.group(3):
             parts.append('sp %+6.1f  err %+6.1f' % (float(m.group(3)), float(m.group(4))))
+    if alt and alt.group(3):
+        h, sp = float(alt.group(1)), float(alt.group(3))
+        parts.append('alt %5.2f  sp %5.2f  err %+5.2f%s' % (h, sp, sp - h,
+                                                          '' if alt.group(2) == 'ToF' else ' (no ToF)'))
     if f:
         parts.append('seen at %+6.1f  err %+6.1f' % (float(f.group(1)), float(f.group(2))))
     elif 'FOLLOWING, nothing seen yet' in text:
@@ -97,7 +132,7 @@ def metrics(rows, marks):
     the capture's hold columns (blimp_log.py)."""
     out = []
     for k, (t0, t1, sp) in enumerate(marks):
-        seg = [r for r in rows if t0 <= r['t_s'] < t1 and not math.isnan(r['hold_err_rad'])]
+        seg = [r for r in rows if t0 + EDGE_S <= r['t_s'] < t1 - EDGE_S and not math.isnan(r['hold_err_rad'])]
         if len(seg) < 10:
             out.append({'setpoint_deg': sp, 'note': 'too few records'})
             continue
@@ -112,11 +147,41 @@ def metrics(rows, marks):
                 settle = seg[i]['t_s'] - t0
                 break
         tail = [e for r, e in zip(seg, err) if r['t_s'] >= t1 - 2.0]
-        mean = sum(tail) / len(tail)
-        std = math.sqrt(sum((e - mean) ** 2 for e in tail) / len(tail))
+        # a kill ends the capture early: no last 2 s, so no final error
+        mean = sum(tail) / len(tail) if tail else float('nan')
+        std = math.sqrt(sum((e - mean) ** 2 for e in tail) / len(tail)) if tail else float('nan')
         peak = max(max(abs(r['throttle_%s' % m]) for m in blimp_log.MOTORS) for r in seg)
         out.append({'setpoint_deg': sp, 'start_error_deg': e0, 'overshoot_deg': over, 'settle_s': settle,
                     'final_error_deg': mean, 'final_std_deg': std, 'peak_throttle': peak})
+    return out
+
+
+def altitude_metrics(rows, marks, band_m=0.05):
+    """Per height setpoint, from the capture's ToF (slant range; the tilt on
+    a thread is a few degrees, under 1 % of the height): overshoot past it in
+    m, time into a +-band_m band and staying, the final error (mean, std) over
+    the last 2 s, the peak throttle. Records with a ToF status are left out."""
+    out = []
+    for t0, t1, sp in marks:
+        seg = [r for r in rows if t0 + EDGE_S <= r['t_s'] < t1 - EDGE_S and r['mode'] != 'MANUAL'
+               and r['tof_status'] == 0]
+        if len(seg) < 10:
+            out.append({'setpoint_m': sp, 'note': 'too few records'})
+            continue
+        err = [sp - r['tof_mm'] / 1000.0 for r in seg]
+        e0 = err[0]
+        over = max((-e if e0 > 0 else e) for e in err) if abs(e0) > 0.02 else float('nan')
+        settle = float('nan')
+        for i in range(len(err)):
+            if all(abs(e) <= band_m for e in err[i:]):
+                settle = seg[i]['t_s'] - t0
+                break
+        tail = [e for r, e in zip(seg, err) if r['t_s'] >= t1 - 2.0]
+        mean = sum(tail) / len(tail) if tail else float('nan')
+        std = math.sqrt(sum((e - mean) ** 2 for e in tail) / len(tail)) if tail else float('nan')
+        peak = max(max(abs(r['throttle_%s' % m]) for m in blimp_log.MOTORS) for r in seg)
+        out.append({'setpoint_m': sp, 'start_error_m': e0, 'overshoot_m': over, 'settle_s': settle,
+                    'final_error_m': mean, 'final_std_m': std, 'peak_throttle': peak})
     return out
 
 
@@ -148,14 +213,27 @@ def follow_metrics(rows, t0, t1):
 def run(args):
     marks = plan(args.steps, args.dwell, args.follow)
     total = marks[-1][1]
-    cap_s = int(math.ceil(LEAD_S + total)) + 3
+    alt_held = args.altitude or args.hold_alt is not None
+    cap_s = int(math.ceil(LEAD_S + total + landing_s(args))) + 3
     if args.follow:
         print('target follow, %.0f s, capture of %d s: the gondola turns toward the forward camera\'s balloon'
               % (total, cap_s))
+    elif args.altitude:
+        print('altitude hold, %d setpoints, %.0f s, capture of %d s, kill above %.2f m:'
+              % (len(marks), total, cap_s, args.max_alt))
+        for t0, t1, h in marks:
+            print('  %6.1f .. %6.1f s  altitude %5.2f m' % (t0, t1, h))
+        if args.heading is not None:
+            print('heading held throughout at %+.1f deg' % args.heading)
     else:
         print('heading hold, %d setpoints, %.0f s, capture of %d s:' % (len(marks), total, cap_s))
         for t0, t1, h in marks:
             print('  %6.1f .. %6.1f s  heading %+6.1f deg' % (t0, t1, h))
+        if args.hold_alt is not None:
+            print('altitude held throughout at %.2f m, kill above %.2f m' % (args.hold_alt, args.max_alt))
+    if landing_s(args):
+        print('then a landing: %.2f m/s down to %.2f m, motors off there (about %.0f s)'
+              % (args.land_rate, LAND_ALT_M, landing_s(args)))
     if args.param:
         print('param before the start: %s' % ' '.join(args.param))
     if args.deadband is not None:
@@ -228,7 +306,20 @@ def run(args):
 
         k = -1
         next_poll = 0.0
-        max_seen = 0.0
+        max_seen = [0.0]
+
+        def tripped():
+            """The kills on the 50 Hz SENSORS stream: the reason, or None."""
+            s = link.sensors
+            if s and s['imu_valid']:
+                rate = max(abs(g) for g in s['gyro'])
+                max_seen[0] = max(max_seen[0], rate)
+                if rate > args.max_rate:
+                    return '|gyro| %.0f deg/s over --max-rate %.0f' % (rate, args.max_rate)
+            if alt_held and s and s['tof_valid'] and s['tof_status'] == 0 and s['tof_mm'] / 1000.0 > args.max_alt:
+                return 'ToF %.2f m over --max-alt %.2f' % (s['tof_mm'] / 1000.0, args.max_alt)
+            return None
+
         while True:
             now = time.monotonic()
             el = now - t_hold if t_hold is not None else 0.0
@@ -237,7 +328,8 @@ def run(args):
                 break
             if want != k:
                 k = want
-                cmd = 'hold follow' if marks[k][2] is None else 'hold heading %g' % marks[k][2]
+                cmd = ('hold follow' if marks[k][2] is None else
+                       'hold %s %g' % ('altitude' if args.altitude else 'heading', marks[k][2]))
                 reply = console(con, cmd)
                 if t_hold is None:
                     t_hold = time.monotonic()
@@ -245,26 +337,70 @@ def run(args):
                 log('%6.1f s  %s: %s' % (time.monotonic() - t_hold, cmd, reply.strip().splitlines()[-1]))
                 if 'refused' in reply:
                     sys.exit('the firmware refused the hold:\n' + reply)
+                if k == 0 and args.altitude and args.heading is not None:
+                    reply = console(con, 'hold heading %g' % args.heading)
+                    log('%6.1f s  hold heading %g: %s' % (time.monotonic() - t_hold, args.heading,
+                                                         reply.strip().splitlines()[-1]))
+                    if 'refused' in reply:
+                        sys.exit('the firmware refused the heading:\n' + reply)
+                if k == 0 and args.hold_alt is not None:
+                    reply = console(con, 'hold altitude %g' % args.hold_alt)
+                    log('%6.1f s  hold altitude %g: %s' % (time.monotonic() - t_hold, args.hold_alt,
+                                                          reply.strip().splitlines()[-1]))
+                    if 'refused' in reply:
+                        sys.exit('the firmware refused the altitude:\n' + reply)
                 if k == 0 and args.surge:
                     reply = console(con, 'hold surge %g' % args.surge)
                     log('%6.1f s  hold surge %g: %s' % (time.monotonic() - t_hold, args.surge,
                                                        reply.strip().splitlines()[-1]))
                     if 'refused' in reply:
                         sys.exit('the firmware refused the surge:\n' + reply)
-            s = link.sensors
-            if s and s['imu_valid']:
-                rate = max(abs(g) for g in s['gyro'])
-                max_seen = max(max_seen, rate)
-                if rate > args.max_rate:
-                    killed = True
-                    console(con, 'hold kill')
-                    log('%6.1f s  KILLED: |gyro| %.0f deg/s over --max-rate %.0f' % (el, rate, args.max_rate))
-                    break
+            why = tripped()
+            if why:
+                killed = True
+                console(con, 'hold kill')
+                log('%6.1f s  KILLED: %s' % (el, why))
+                break
             if now >= next_poll:
                 log('%6.1f s  %s' % (el, hold_line(console(con, 'hold'))))
                 next_poll = now + args.poll
             time.sleep(0.02)
-        log('peak |gyro| seen from here: %.0f deg/s' % max_seen)
+
+        # the landing: the height setpoint ramps down to LAND_ALT_M, and the
+        # motors stop once the ToF reads it there (or LAND_WAIT_S after the
+        # ramp ends), so the vehicle is not dropped from the last step
+        if started and not killed and landing_s(args):
+            sp0 = args.steps[-1] if args.altitude else args.hold_alt
+            ramp_s = max(0.0, sp0 - LAND_ALT_M) / args.land_rate
+            t_land = time.monotonic()
+            next_cmd = 0.0
+            log('%6.1f s  landing: %.2f m down to %.2f m at %.2f m/s'
+                % (t_land - t_hold, sp0, LAND_ALT_M, args.land_rate))
+            while True:
+                now = time.monotonic()
+                el = now - t_hold
+                if now >= next_cmd:
+                    sp = max(LAND_ALT_M, sp0 - args.land_rate * (now - t_land))
+                    console(con, 'hold altitude %.2f' % sp)
+                    next_cmd = now + 0.25
+                why = tripped()
+                if why:
+                    killed = True
+                    console(con, 'hold kill')
+                    log('%6.1f s  KILLED: %s' % (el, why))
+                    break
+                s = link.sensors
+                low = (s and s['tof_valid'] and s['tof_status'] == 0
+                       and s['tof_mm'] / 1000.0 <= LAND_ALT_M + 0.03)
+                if now - t_land >= ramp_s and (low or now - t_land >= ramp_s + LAND_WAIT_S):
+                    log('%6.1f s  landed: ToF %s, motors off' % (
+                        el, '%.2f m' % (s['tof_mm'] / 1000.0) if s and s['tof_valid'] else 'not reading'))
+                    break
+                if now >= next_poll:
+                    log('%6.1f s  %s' % (el, hold_line(console(con, 'hold'))))
+                    next_poll = now + args.poll
+                time.sleep(0.02)
+        log('peak |gyro| seen from here: %.0f deg/s' % max_seen[0])
     except KeyboardInterrupt:
         log('Ctrl-C')
     finally:
@@ -289,7 +425,7 @@ def run(args):
     if not data:
         sys.exit('no capture')
 
-    path = args.out or bl.capture_path('hold-heading', args.folder)
+    path = args.out or bl.capture_path('hold-altitude' if args.altitude else 'hold-heading', args.folder)
     os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
     blimp_log.write_file(path, info['raw'], data)
     h, records = blimp_log.decode(info['raw'], data)
@@ -307,18 +443,57 @@ def run(args):
                      res['abs_error_mean_deg'], res['abs_error_p90_deg'], res['peak_rate_dps'],
                      res['peak_throttle']))
         res = [res]
+    elif args.altitude:
+        res = altitude_metrics(rows, marks_cap)
+        for r in res:
+            if 'note' in r:
+                print('  %5.2f m: %s' % (r['setpoint_m'], r['note']))
+                continue
+            print('  %5.2f m: from %+5.2f, overshoot %5.2f m, inside 5 cm after %4.1f s, final %+5.2f +- %.2f m, '
+                  'peak throttle %.2f' % (r['setpoint_m'], r['start_error_m'], r['overshoot_m'], r['settle_s'],
+                                          r['final_error_m'], r['final_std_m'], r['peak_throttle']))
+        if args.heading is not None:
+            # the heading loop's error over the whole run, past its first 5 s
+            err = [abs(math.degrees(r['hold_err_rad'])) for r in rows
+                   if marks_cap[0][0] + 5.0 <= r['t_s'] < marks_cap[-1][1] - EDGE_S
+                   and not math.isnan(r['hold_err_rad'])]
+            if err:
+                hd = {'abs_error_rms_deg': math.sqrt(sum(e * e for e in err) / len(err)),
+                      'abs_error_max_deg': max(err)}
+                print('  heading %+.1f deg: |error| rms %.1f deg, max %.1f deg'
+                      % (args.heading, hd['abs_error_rms_deg'], hd['abs_error_max_deg']))
+                res.append(dict(hd, heading_deg=args.heading))
     else:
         res = metrics(rows, marks_cap)
-    for r in ([] if args.follow else res):
+    for r in ([] if args.follow or args.altitude else res):
         if 'note' in r:
             print('  %+6.1f deg: %s' % (r['setpoint_deg'], r['note']))
             continue
         print('  %+6.1f deg: from %+6.1f, overshoot %5.1f deg, inside 5 deg after %4.1f s, final %+5.1f +- %.1f deg, '
               'peak throttle %.2f' % (r['setpoint_deg'], r['start_error_deg'], r['overshoot_deg'], r['settle_s'],
                                       r['final_error_deg'], r['final_std_deg'], r['peak_throttle']))
+    if args.hold_alt is not None:
+        # what each heading step did to the height (the plan's C3 coupling);
+        # the first setpoint's window from 15 s on, past the climb off the floor
+        for k, (t0, t1, sp) in enumerate(marks_cap):
+            alt = [r['tof_mm'] / 1000.0 for r in rows
+                   if t0 + (15.0 if k == 0 else EDGE_S) <= r['t_s'] < t1 - EDGE_S
+                   and r['tof_status'] == 0 and r['mode'] != 'MANUAL']
+            if not alt:
+                continue
+            mean = sum(alt) / len(alt)
+            dev = max(abs(a - args.hold_alt) for a in alt)
+            print('  %+6.1f deg: altitude %.2f m mean, %.2f .. %.2f, |off| up to %.2f m'
+                  % (sp, mean, min(alt), max(alt), dev))
+            res[k]['altitude_mean_m'] = mean
+            res[k]['altitude_max_off_m'] = dev
     meta = {'file': os.path.basename(path), 'saved': time.strftime('%Y-%m-%d %H:%M:%S'), 'source': 'hold_test',
             'notes': args.notes, 'header': h, 'records': len(records), 'params': params,
-            'test': {'follow': args.follow, 'steps_deg': None if args.follow else args.steps,
+            'test': {'follow': args.follow, 'altitude': args.altitude,
+                     'steps_deg': None if args.follow or args.altitude else args.steps,
+                     'steps_m': args.steps if args.altitude else None, 'max_alt_m': args.max_alt,
+                     'heading_deg': args.heading, 'hold_alt_m': args.hold_alt,
+                     'land_rate_mps': args.land_rate if landing_s(args) else None,
                      'dwell_s': args.dwell, 'hold_start_in_capture_s': offset,
                      'param': args.param, 'deadband_pct': args.deadband, 'max_duty_pct': args.max_duty,
                      'surge_gf': args.surge, 'max_rate_dps': args.max_rate,
@@ -336,10 +511,23 @@ def main(argv=None):
     ap.add_argument('--host', default=bl.BLIMP_IP)
     ap.add_argument('--port', type=int, default=bl.LINK_PORT)
     ap.add_argument('--console-port', type=int, default=bl.CONSOLE_PORT)
-    ap.add_argument('--steps', type=float, nargs='+', default=[0.0], help='heading setpoints, deg (default 0)')
+    ap.add_argument('--steps', type=float, nargs='+', default=[0.0],
+                    help='heading setpoints, deg (default 0); with --altitude, heights in m')
     ap.add_argument('--follow', action='store_true',
                     help="'hold follow' for --dwell s instead of the steps: turn toward the forward camera's "
                          "balloon (check the sign first with cam_watch.py)")
+    ap.add_argument('--altitude', action='store_true',
+                    help="'hold altitude' steps instead of heading steps (the plan's C1); --steps in m")
+    ap.add_argument('--max-alt', type=float,
+                    help='with --altitude, kill above this ToF height, m (default the highest step + 0.5)')
+    ap.add_argument('--heading', type=float,
+                    help='with --altitude, also hold this heading throughout, deg (the plan\'s C3)')
+    ap.add_argument('--hold-alt', type=float,
+                    help='with heading steps, also hold this height throughout, m (the plan\'s C3)')
+    ap.add_argument('--no-land', dest='land', action='store_false',
+                    help='end without the landing ramp (the motors stop where the vehicle is)')
+    ap.add_argument('--land-rate', type=float, default=0.1,
+                    help='the landing ramp, m/s (default %(default)s)')
     ap.add_argument('--dwell', type=float, default=8.0, help='s at each setpoint (default %(default)s)')
     ap.add_argument('--param', nargs='*', default=[], metavar='NAME=VALUE', help="'param' sets before the start")
     ap.add_argument('--deadband', type=float, help="'motor --deadband' before the start, percent")
@@ -356,8 +544,31 @@ def main(argv=None):
     ap.add_argument('--notes', default='')
     ap.add_argument('--go', action='store_true', help='really run it (PROPS ON)')
     args = ap.parse_args(argv)
-    if any(not math.isfinite(h) or abs(h) > 180 for h in args.steps):
+    if args.altitude:
+        if args.follow:
+            sys.exit('--altitude and --follow are separate runs')
+        # the firmware's own range (HOLD_ALT_MIN_M .. HOLD_ALT_MAX_M in ctl_task.c)
+        if any(not math.isfinite(h) or not 0.2 <= h <= 3.0 for h in args.steps):
+            sys.exit('heights are 0.2 .. 3.0 m')
+        if args.max_alt is None:
+            args.max_alt = max(args.steps) + 0.5
+        if args.heading is not None and (not math.isfinite(args.heading) or abs(args.heading) > 180):
+            sys.exit('--heading is -180 .. 180 deg')
+        if args.hold_alt is not None:
+            sys.exit('--hold-alt goes with heading steps; with --altitude the heights are --steps')
+    elif args.heading is not None:
+        sys.exit('--heading goes with --altitude; heading steps are --steps')
+    elif any(not math.isfinite(h) or abs(h) > 180 for h in args.steps):
         sys.exit('headings are -180 .. 180 deg')
+    if args.hold_alt is not None:
+        if args.follow:
+            sys.exit('--hold-alt and --follow are separate runs')
+        if not math.isfinite(args.hold_alt) or not 0.2 <= args.hold_alt <= 3.0:
+            sys.exit('--hold-alt is 0.2 .. 3.0 m')
+        if args.max_alt is None:
+            args.max_alt = args.hold_alt + 0.5
+    if not math.isfinite(args.land_rate) or not 0.02 <= args.land_rate <= 0.5:
+        sys.exit('--land-rate is 0.02 .. 0.5 m/s')
     if args.dwell <= 0 or args.dwell * (1 if args.follow else len(args.steps)) > 300:
         sys.exit('--dwell must be > 0 and the whole run under 300 s (the capture buffer)')
     if not math.isfinite(args.surge) or not 0.0 <= args.surge <= 30.0:
