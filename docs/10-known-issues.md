@@ -55,8 +55,8 @@ the mock; on the board, `software/param_check.py --reboot` passed 13 of 13 the s
 puts `blimp_step()` in the loop. Found on the way: the closed-loop tests C1–C4 step a setpoint
 that `blimp_step()` cannot take today (a `core/` change, noted in the plan's increment 3).
 
-**2026-10-30, the bench hold (branch `control-inc3`; built and host-tested, not yet run on the
-board).** `core/` 0.2.0 takes a commanded heading, altitude or surge in place of guidance
+**2026-10-30, the bench hold (branch `control-inc3`; run on the rope rig the same evening, B1–B3
+in `docs/history/rig-2026-10-30.md`).** `core/` 0.2.0 takes a commanded heading, altitude or surge in place of guidance
 (`blimp_hold_t`), and the S3's control task runs `blimp_step()` every tick, arming it only on the
 `hold` console command, with any STOP latching KILLED until `hold off`;
 `software/hold_test.py` steps the heading from the ground. The motor map (`motormap`) keeps each
@@ -89,6 +89,24 @@ asked for 0.26 gf. Reproduced on the host through the DLL. Fixed the same day: t
 validator and the mixer keep it at most half of `motor_max_thrust_n`), the motor driver has a
 duty ceiling (`motor --max-duty`, the team's 30 %, default 100), and `param` accepts a
 `motor_max_thrust_n` down to 0.2 gf, the thrust at that ceiling being about 1 gf.
+
+**2026-10-30, the hold on the rope rig, and two `core/` bugs it exposed (`core/` 0.2.1; the
+firmware with it built, not yet flashed).** With the deadband param the hold turned the gondola
+30° and back, the right motor pushing the right way (B1). The front motors lag (about 80–100 ms
+to start pushing, about 0.2 s of push after a cut, while coasting), so with one front motor at a
+time the light gondola went into a 0.88 s cycle; a constant 0.5 gf of surge (`hold surge`, both
+motors turning) removed it, and with `front_deadband_n` at 0.01 gf the hold sat within about 1°
+at 0° (B3). Two bugs, each reproduced by new checks in `test_blimp.c` and fixed:
+- **The arming tick steered on the pre-arm heading**: `blimp_step()` latched the yaw origin
+  after the estimator had written the tick's state, so the first armed tick saw the old heading
+  (one tick at the torque cap from −125°). `blimp.c` now refreshes the state after the zero
+  (`blimp_estimator_output()`).
+- **A ground packet a few ms newer than the tick read as 71 minutes of silence**: the S3 stamps
+  packets on its link task, and `core/`'s unsigned link age wrapped, dropping one tick in 70–150
+  into failsafe (zero output, every PID reset, guidance in FAILSAFE). A packet up to 100 ms
+  ahead of the tick is now fresh. The simulator stamps both with the same time and never hit it.
+The sweep after the fix completes the same loops with the same failsafe counts; the sensorless
+rows are identical run for run and the ToF rows' best laps moved (the table below).
 
 **2026-10-29, the link and the window reviewed.** Four reviewers and the team settled how the
 window and the link may affect the motors: `docs/link-robustness-review.md`. The ground station
@@ -160,12 +178,16 @@ Seed 0 is one draw of the sensor noise. Across seeds 0-4 (same settings):
 
 ```
                      NO altitude sensor                downward ToF
-course 1              6/15 loops, best 19.0-78.7 s     15/15 loops, best 21.6-24.0 s
-course 2              8/15 loops, best 25.9-113.4 s    15/15 loops, best 23.0-24.2 s
+course 1              6/15 loops, best 19.0-78.7 s     15/15 loops, best 22.6-25.4 s
+course 2              8/15 loops, best 25.9-113.4 s    15/15 loops, best 20.5-25.6 s
 failsafe tripped     in 10 of 10 runs                  in 0 of 10 runs
 ```
 
-Measured 2026-10-22 after the simulated camera was narrowed from 90 x 70 to the
+Measured 2026-10-30 with `core/` 0.2.1 (0.78 m envelope, 220 s). The 2026-10-22 table
+had the same loops and failsafes, with the ToF rows' best laps at 21.6-24.0 s and
+23.0-24.2 s; 0.2.1's arming tick reports the altitude the estimator was just zeroed
+to, and the closed loop amplifies that one tick into a different draw of laps. That
+2026-10-22 table was measured after the simulated camera was narrowed from 90 x 70 to the
 lens the team actually owns (58 x 45 degrees, section 2). With the old camera the
 sensorless rows were 12/15 (best 20.0-48.3 s) and 7/15 (33.7-56.9 s); the ToF rows
 did not move. With the ToF sensor the vehicle completes both courses in simulation;

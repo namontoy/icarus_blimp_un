@@ -699,5 +699,97 @@ int main(void)
         CHECK_NEAR(out.thrust_fl + out.thrust_fr + out.thrust_rl + out.thrust_rr, 0.0f, 1e-9);
     }
 
+    TEST_GROUP("bench hold: the arming tick steers on the new origin");
+    {
+        /* Converge without arming, then turn the estimate to 2 rad (no
+         * magnetometer in these samples, so nothing pulls it back). The
+         * tick that arms latches that heading as 0, so a hold on heading 0
+         * must ask for nothing on that very tick; on the S3 it asked for the
+         * torque cap from the pre-arm heading (2026-10-30). */
+        blimp_t b;
+        blimp_init(&b);
+        uint32_t t_us = 0;
+        blimp_actuators_t out = {0};
+        blimp_input_t in = {0};
+        for (int i = 0; i < 200 && blimp_estimator_converging(&b.est); i++) {
+            t_us += 1000000u;
+            in.imu = stationary_imu(t_us);
+            in.t_us = t_us;
+            blimp_notify_link(&b, t_us);
+            blimp_step(&b, &in, &out);
+        }
+        CHECK(!blimp_estimator_converging(&b.est));
+        CHECK(!b.armed);
+        b.est.q[0] = cosf(1.0f);
+        b.est.q[1] = 0.0f;
+        b.est.q[2] = 0.0f;
+        b.est.q[3] = sinf(1.0f);
+
+        blimp_hold_t h = {0};
+        h.active = true;
+        h.heading_held = true;
+        h.heading_rad = 0.0f;
+        t_us += 20000u;
+        in.imu = stationary_imu(t_us);
+        in.arm_request = true;
+        in.t_us = t_us;
+        in.hold = h;
+        blimp_notify_link(&b, t_us);
+        blimp_step(&b, &in, &out);
+        CHECK(b.armed);
+        CHECK_NEAR(b.state.yaw, 0.0f, 1e-4);
+        CHECK_NEAR(b.demand.tz, 0.0f, 1e-4);
+        CHECK_NEAR(out.thrust_fl + out.thrust_fr, 0.0f, 1e-9);
+        CHECK(state_violations(&b.state) == 0);
+    }
+
+    TEST_GROUP("link watchdog: a packet stamped just after the tick is fresh");
+    {
+        /* The S3 stamps packets on its link task and the tick on its own;
+         * a packet landing between the two is a few ms newer than the tick.
+         * That must count as a fresh link, not wrap to ~71 min of silence
+         * (2026-10-30: one tick in ~150 fell into failsafe). */
+        blimp_t b;
+        uint32_t t_us = force_arm(&b);
+        blimp_actuators_t out = {0};
+        blimp_input_t in = {0};
+        blimp_hold_t h = {0};
+        h.active = true;
+        h.heading_held = true;
+        h.heading_rad = 0.5f;
+        int failsafe_ticks = 0;
+        for (int i = 0; i < 50; i++) {
+            t_us += 20000u;
+            in.imu = stationary_imu(t_us);
+            in.arm_request = true;
+            in.t_us = t_us;
+            in.hold = h;
+            blimp_notify_link(&b, t_us + 3000u);
+            blimp_step(&b, &in, &out);
+            failsafe_ticks += (b.guid.state == BLIMP_GUID_FAILSAFE);
+        }
+        CHECK(failsafe_ticks == 0);
+        CHECK(out.thrust_fr > out.thrust_fl);
+
+        /* Across the clock's wrap, the same. */
+        t_us = 0xFFFFFFFFu - 10000u;
+        in.imu = stationary_imu(t_us);
+        in.t_us = t_us;
+        blimp_notify_link(&b, t_us + 15000u);   /* wraps to 4999 */
+        blimp_step(&b, &in, &out);
+        CHECK(b.guid.state != BLIMP_GUID_FAILSAFE);
+
+        /* Seconds ahead is a broken clock, not a race: stale. */
+        blimp_t c;
+        t_us = force_arm(&c);
+        t_us += 20000u;
+        in.imu = stationary_imu(t_us);
+        in.t_us = t_us;
+        blimp_notify_link(&c, t_us + 5000000u);
+        blimp_step(&c, &in, &out);
+        CHECK(c.guid.state == BLIMP_GUID_FAILSAFE);
+        CHECK_NEAR(out.thrust_fl + out.thrust_fr + out.thrust_rl + out.thrust_rr, 0.0f, 1e-9);
+    }
+
     TEST_REPORT();
 }

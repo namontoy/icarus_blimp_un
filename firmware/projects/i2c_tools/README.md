@@ -515,7 +515,8 @@ every value as it found it.
 
 ### `hold`: the controller on a commanded heading (the bench hold)
 
-Built 2026-10-30 (branch `control-inc3`), not yet run on the board. The
+Built 2026-10-30 (branch `control-inc3`), first run on the rope rig the same
+evening (`docs/history/rig-2026-10-30.md`). The
 control task runs `core/`'s `blimp_step()` every tick; this command arms it
 on setpoints given here instead of guidance's (`blimp_hold_t`,
 `core/include/blimp/blimp.h`), for the closed-loop tests of

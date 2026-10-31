@@ -115,6 +115,9 @@ def run(args):
         print('motor deadband before the start: %.1f %%' % args.deadband)
     if args.max_duty is not None:
         print('motor duty ceiling before the start: %.0f %%' % args.max_duty)
+    if args.surge:
+        print('surge held throughout: %.2f gf (both front motors at about %.2f gf; yaw differs around it)'
+              % (args.surge, args.surge / 2))
     if not args.go:
         print('dry run. PROPS ON for the real thing: the gondola on its swivel, nothing near the props, '
               'STOP within reach; then add --go')
@@ -195,6 +198,12 @@ def run(args):
                                                       reply.strip().splitlines()[-1]))
                 if 'refused' in reply:
                     sys.exit('the firmware refused the hold:\n' + reply)
+                if k == 0 and args.surge:
+                    reply = console(con, 'hold surge %g' % args.surge)
+                    log('%6.1f s  hold surge %g: %s' % (time.monotonic() - t_hold, args.surge,
+                                                       reply.strip().splitlines()[-1]))
+                    if 'refused' in reply:
+                        sys.exit('the firmware refused the surge:\n' + reply)
             s = link.sensors
             if s and s['imu_valid']:
                 rate = max(abs(g) for g in s['gyro'])
@@ -251,7 +260,8 @@ def run(args):
     meta = {'file': os.path.basename(path), 'saved': time.strftime('%Y-%m-%d %H:%M:%S'), 'source': 'hold_test',
             'notes': args.notes, 'header': h, 'records': len(records), 'params': params,
             'test': {'steps_deg': args.steps, 'dwell_s': args.dwell, 'hold_start_in_capture_s': offset,
-                     'param': args.param, 'deadband_pct': args.deadband, 'max_rate_dps': args.max_rate,
+                     'param': args.param, 'deadband_pct': args.deadband, 'max_duty_pct': args.max_duty,
+                     'surge_gf': args.surge, 'max_rate_dps': args.max_rate,
                      'killed_from_ground': killed, 'telemetry_before': tel0, 'log': lines},
             'metrics': res}
     side = os.path.splitext(path)[0] + '.json'
@@ -271,6 +281,9 @@ def main(argv=None):
     ap.add_argument('--param', nargs='*', default=[], metavar='NAME=VALUE', help="'param' sets before the start")
     ap.add_argument('--deadband', type=float, help="'motor --deadband' before the start, percent")
     ap.add_argument('--max-duty', type=float, help="'motor --max-duty' before the start, percent (the team: 30)")
+    ap.add_argument('--surge', type=float, default=0.0,
+                    help="'hold surge' for the whole run, gf (default 0): keeps both front motors turning, so "
+                         "a yaw correction speeds one up and slows the other instead of starting one from rest")
     ap.add_argument('--max-rate', type=float, default=120.0, help='kill above this |gyro|, deg/s (default %(default)s)')
     ap.add_argument('--poll', type=float, default=1.0, help="s between 'hold' status lines (default %(default)s)")
     ap.add_argument('--wait', type=float, default=90.0,
@@ -284,6 +297,8 @@ def main(argv=None):
         sys.exit('headings are -180 .. 180 deg')
     if args.dwell <= 0 or args.dwell * len(args.steps) > 300:
         sys.exit('--dwell must be > 0 and the whole run under 300 s (the capture buffer)')
+    if not math.isfinite(args.surge) or not 0.0 <= args.surge <= 30.0:
+        sys.exit("--surge is 0 .. 30 gf (the firmware's 'hold surge' range)")
     return run(args)
 
 

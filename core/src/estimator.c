@@ -323,6 +323,19 @@ void blimp_estimator_zero(blimp_estimator_t *e, const blimp_imu_sample_t *s)
     e->stationary_s = 0.0f;
 }
 
+void blimp_estimator_output(const blimp_estimator_t *e, const blimp_imu_sample_t *s,
+                            blimp_state_t *out)
+{
+    if (!out) {
+        return;
+    }
+    *out = (blimp_state_t){0};
+    if (!e || !s) {
+        return;   /* the same all-zero state update() reports for these */
+    }
+    write_state(e, s, out);
+}
+
 bool blimp_estimator_converging(const blimp_estimator_t *e)
 {
     if (!e) {

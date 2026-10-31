@@ -54,6 +54,14 @@ void blimp_estimator_zero(blimp_estimator_t *e, const blimp_imu_sample_t *s);
 void blimp_estimator_update(blimp_estimator_t *e, const blimp_params_t *p,
                             const blimp_imu_sample_t *s, blimp_state_t *out);
 
+/* Writes the estimator's current state into out without advancing it: what
+ * update() would have reported for sample s. blimp.c calls it right after a
+ * zero(), so the tick that arms steers on the new origin rather than on the
+ * state update() produced a moment before it (the S3's bench hold armed with
+ * one tick at the torque cap from a -125 deg pre-arm heading, 2026-10-30). */
+void blimp_estimator_output(const blimp_estimator_t *e, const blimp_imu_sample_t *s,
+                            blimp_state_t *out);
+
 /* ALTITUDE VALIDITY IS A WINDOW, NOT A PER-TICK FLAG. state.altitude_valid
  * stays true for BLIMP_EST_ALT_STALE_S after the last absolute fix (ToF,
  * baro, or the vision-derived fix blimp.c injects as range_alt when a

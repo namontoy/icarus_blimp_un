@@ -227,7 +227,7 @@ Pass: the Rule 13 sweep still passes; no sustained oscillation on either loop at
 the lap-time tables updated with the settings stated.
 
 **C1–C4, closed loop on the vehicle.** Run on the bench hold (control-loop plan, increment 3's
-slice, built 2026-10-30 on `control-inc3`, not yet run on the board): `blimp_step()` on the S3
+slice, built 2026-10-30 on `control-inc3`, first run on the rope rig that evening): `blimp_step()` on the S3
 with `core/`'s `blimp_hold_t` setpoints, started by the `hold` console command, killed by any
 STOP. `python software/hold_test.py --steps 0 90 0 -90 0 --dwell 10 --go` steps the heading
 from the ground, keeps the link alive that the hold needs, kills it from the ground above
@@ -236,7 +236,12 @@ slots) and prints overshoot, settling and the final error per step. A gain chang
 line, not a flash, since 2026-10-30. On the rope rig without the envelope the same loop runs on
 about 1/60 of the yaw inertia (2026-10-30: about 1.4e-4 kg·m², from the yaw kick of one surge
 motor at 0.2 duty), so its gains there check the loop's signs, latch and delay, not the flight
-values.
+values. What the rig gave on 2026-10-30 (`docs/history/rig-2026-10-30.md`, B1–B3): the signs
+end to end; the front motors' lag (about 80–100 ms to start pushing, about 0.2 s of push after a
+cut); a 0.88 s limit cycle with one front motor at a time, gone with a 0.5 gf `hold surge` that
+keeps both turning; and with `front_deadband_n` at 0.01 gf a hold within about 1°. For C2 on
+the blimp: hold some surge during heading steps, keep the cut-off small, and expect a steady
+offset from P alone (the rope's twist on the rig; mismatched motors in flight).
 - C1, altitude alone, yaw held by the Y1 thread: setpoint steps 1.2 → 1.7 → 1.2 m. Pass: 95 %
   within 4 s, overshoot under 0.1 m, holds within ±0.05 m for 30 s, no limit cycle; the sink
   side slower, as H2 predicts.

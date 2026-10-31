@@ -31,12 +31,12 @@ race courses, and the analysis behind the design.
 
 Five runs per cell (sensor-noise seeds 0–4), 0.78 m envelope, camera field of view 58 × 45°
 (the measured OV2640 lens, see [docs/10](docs/10-known-issues.md)), up to 3 loops within 220 s
-of simulated time per run:
+of simulated time per run; `core/` 0.2.1, Windows, 2026-10-30:
 
 | Course | Current board (no altitude sensor) | With a downward ToF sensor |
 |---|---|---|
-| 1 · rectangle | 6 of 15 loops completed · best laps 19.0–78.7 s | 15 of 15 loops completed · best laps 21.6–24.0 s |
-| 2 · figure-eight | 8 of 15 loops completed · best laps 25.9–113.4 s | 15 of 15 loops completed · best laps 23.0–24.2 s |
+| 1 · rectangle | 6 of 15 loops completed · best laps 19.0–78.7 s | 15 of 15 loops completed · best laps 22.6–25.4 s |
+| 2 · figure-eight | 8 of 15 loops completed · best laps 25.9–113.4 s | 15 of 15 loops completed · best laps 20.5–25.6 s |
 
 Without an altitude reference the vehicle went into failsafe in all 10 runs; with the ToF sensor,
 in none, and every loop finished. With the earlier, optimistic 90 × 70° camera the sensorless

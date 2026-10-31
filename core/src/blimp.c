@@ -144,6 +144,13 @@
  * rate, 2 s is already several hundred missed ticks. */
 #define BLIMP_CTRL_MAX_DT_S   2.0f
 
+/* How far a link packet's time may run ahead of the tick's own t_us and
+ * still count as fresh (step 4). The race it covers is a few milliseconds
+ * (a packet arriving during the tick); 100 ms is generous for that and far
+ * below link_timeout_s, so a clock that is really wrong still trips the
+ * watchdog. */
+#define BLIMP_LINK_AHEAD_MAX_US   100000u
+
 /* The literal contract: on any early return, *out must be the trivially
  * safe, Rule-13-legal, all-zero command. See decision 4 above for why this
  * is a plain zero wrench rather than an active hold controller. */
@@ -193,7 +200,9 @@ const char *blimp_version(void)
      * rule 6 bans time-of-day/non-determinism, and this must be identical
      * for identical source. Bump the number when this file's behaviour
      * changes in a way worth distinguishing in a flight log. */
-    return "blimp-core-0.2.0";   /* 0.2.0: the bench hold (blimp_hold_t) */
+    return "blimp-core-0.2.1";   /* 0.2.1: a link packet newer than the tick is
+                                  * fresh; the arming tick steers on the new
+                                  * origin. 0.2.0: the bench hold. */
 }
 
 /* Resets every control-loop PID. Used whenever the next tick's error signal
@@ -377,6 +386,10 @@ void blimp_step(blimp_t *b, const blimp_input_t *in, blimp_actuators_t *out)
              * origin at the instant PREPARE begins, using THIS tick's
              * sample - not a stale one from many ticks ago. */
             blimp_estimator_zero(&b->est, &in->imu);
+            /* b->state came out of update() above, before the zero: refresh
+             * it, or this tick steers on the old origin (one tick at the
+             * yaw torque cap on the S3's bench hold, 2026-10-30). */
+            blimp_estimator_output(&b->est, &imu, &b->state);
             blimp_guidance_arm(&b->guid, in->t_us);
             b->armed = true;
             reset_control_loops(b);
@@ -399,12 +412,18 @@ void blimp_step(blimp_t *b, const blimp_input_t *in, blimp_actuators_t *out)
     }
 
     /* ---- 4. failsafe checks --------------------------------------------- */
-    const uint32_t link_age_us = in->t_us - b->last_cmd_us;   /* wraps like a
-                                                               * clock; fine at
-                                                               * this scale,
-                                                               * see estimator.c
-                                                               * for the same
-                                                               * simplification */
+    /* Unsigned, so the clock's wrap is harmless. A shell that stamps packets
+     * on another task can hand over a packet NEWER than this tick's t_us (it
+     * landed between the tick taking its time and calling notify_link), and
+     * unsigned that difference wrapped to ~71 minutes: the S3's bench hold
+     * fell into failsafe for one tick in about 150, every PID reset
+     * (2026-10-30). A packet up to BLIMP_LINK_AHEAD_MAX_US ahead of the tick
+     * is fresh; anything further ahead is not a race but a broken clock, and
+     * stays stale. */
+    uint32_t link_age_us = in->t_us - b->last_cmd_us;
+    if (b->last_cmd_us - in->t_us <= BLIMP_LINK_AHEAD_MAX_US) {
+        link_age_us = 0u;
+    }
     const float link_age_s = (float)link_age_us * 1.0e-6f;
     const bool link_stale = !isfinite(link_age_s) ||
                             link_age_s > b->params.link_timeout_s;

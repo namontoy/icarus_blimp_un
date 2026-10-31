@@ -46,9 +46,9 @@ CLAUDE.md, and others). Keep it tool-neutral; tool-specific notes belong in that
   the link); plan and increments in `docs/control-loop-plan.md`, esp-drone reuse in
   `docs/reuse_log.md`. Since 2026-10-30 it compiles `core/` as a component, the `param` console
   command (`main/cmd_param.c`) reads and sets `blimp_params_t` live, in RAM, and (branch
-  `control-inc3`, not yet run on the board) the task calls `blimp_step()` every tick and drives
-  the motors in the bench hold (`hold`, `software/hold_test.py`), through the motor map
-  (`motormap`).
+  `control-inc3`, first run on the rope rig 2026-10-30) the task calls `blimp_step()` every tick
+  and drives the motors in the bench hold (`hold`, `software/hold_test.py`), through the motor
+  map (`motormap`).
 - `firmware/projects/espfly/`: the previous board's shell. `main/main.c` is only an RTOS shell
   around `blimp_step()` (the esp_timer loop pattern); not part of day-to-day builds.
 - `firmware/projects/optflow_cam/`: ESP32-CAM optical-flow experiment. `blink/`: toolchain test.

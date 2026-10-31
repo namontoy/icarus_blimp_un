@@ -50,14 +50,17 @@ The closed-loop tests (C1–C4) run on the firmware's bench hold (`hold`, branch
 
 ```
 python software/hold_test.py --steps 0 30 0 -30 0 --dwell 8      # prints the plan; --go runs it
-python software/hold_test.py --steps 0 30 0 --go --max-duty 30 --deadband 10 \
-    --param front_half_span_m=0.12 motor_max_thrust_n=0.0098 front_deadband_n=0.0005 \
-            yaw.out_max=0.00118 yaw.out_min=-0.00118 yaw.kp=0.0006 yaw.kd=0.0006   # the rope rig
+python software/hold_test.py --steps 0 30 0 --go --max-duty 30 --deadband 10 --surge 0.5 \
+    --param front_half_span_m=0.12 motor_max_thrust_n=0.0098 front_deadband_n=0.0001 \
+            yaw.out_max=0.00118 yaw.out_min=-0.00118 yaw.kp=0.0006 yaw.kd=0.0006   # the rope rig, B3
 ```
 
 `hold_test.py` keeps the link alive that the hold needs, steps the heading, kills the hold from
 the ground when the gyro passes `--max-rate`, and always ends with `hold off`; it saves the
-capture with overshoot, settling and the final error per step in its `.json`.
+capture with overshoot, settling and the final error per step in its `.json`. `--surge` holds a
+constant forward push for the whole run, so both front motors keep turning and a yaw correction
+speeds one up and slows the other: on the rope rig that removed the limit cycle that one motor
+at a time produced (`docs/history/rig-2026-10-30.md`).
 
 ## The ground station: `ground_station/`
 
