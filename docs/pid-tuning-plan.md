@@ -257,6 +257,30 @@ offset from P alone (the rope's twist on the rig; mismatched motors in flight).
 Each gets a capture; the fits of C1 and C2 (the tool's `--axis` on the setpoint column once
 increment 3 fills it) give the closed-loop time constant to compare with τ_c.
 
+**F1–F2, the balloon follow on the rope rig** (built 2026-10-30: `core/` 0.3.0's
+`blimp_hold_t.target_held`, the S3's `cam` link and `hold follow`; not yet run). The forward
+ESP32-CAM runs namontoy's `target_cam`; its UART0 goes to the S3's GPIO6/GPIO2 (the wiring table
+in the firmware README, `cam`). Yaw only: the camera, its rows, the bearing's sign and the yaw
+loop on a moving target, which the rig can check without the envelope.
+- F0, the link, motors off: `cam` on the console shows about 12 rows/s, rows rejected near
+  zero, and a detection with a red balloon in view (`cam --raw` shows the raw lines if not).
+- F1, the sign, motors off: `python software/cam_watch.py`; the balloon about 1.5 m ahead of the
+  nose, then to the blimp's own left (the side of the motor named FR): the bearing goes + and
+  the line says LEFT; to the right, − and RIGHT. Wrong side: `cam --sign 1` until the next
+  boot, and `CONFIG_CAM_FWD_BEARING_SIGN` for good. Note the distance at which the detection
+  drops.
+- F2, the follow: B3's settings with `--follow`, e.g. `hold_test.py --follow --dwell 60 --go
+  --surge 0.5 --max-duty 30 --deadband 10 --param front_half_span_m=0.12
+  motor_max_thrust_n=0.0098 front_deadband_n=0.0001 yaw.out_max=0.00118
+  yaw.out_min=-0.00118 yaw.kp=0.0006 yaw.kd=0.0006`. Hands off the gondola for the 60 s
+  stillness count; then one person moves the balloon slowly, about 10°/s, side to side within
+  ±30° of the nose, pauses, and takes it out of view once (the gondola should stop where it was
+  last seen). Pass: it turns toward the balloon on the first sighting, the |error| while in
+  view stays mostly under 5° at that pace, no sustained oscillation, and the gyro never reaches
+  `--max-rate`. The camera's delay (a frame of 80 ms plus processing and the UART) is not
+  compensated in `core/`; if F2 oscillates where B3 did not, lower `yaw.kp` before anything
+  else.
+
 **R1, relay autotune (optional).** Only if Y1 fits poorly: a relay mode on the S3 that switches the
 front differential between ±d around the heading setpoint on the tether, logging the limit cycle
 into a capture; Ku and Tu from it, gains from Tyreus–Luyben, checked against C2.

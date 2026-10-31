@@ -7,6 +7,13 @@ watches the spin, records a capture and always ends with 'hold off'.
     python software/hold_test.py --steps 0 30 0 -30 0 --dwell 8 --go \\
         --param yaw.kp=0.0008 yaw.kd=0.0008 --deadband 10
     python software/hold_test.py --steps 0 --dwell 20 --go            # hold where it points, 20 s
+    python software/hold_test.py --follow --dwell 60 --go --surge 0.5 # turn toward the camera's balloon
+
+--follow runs 'hold follow' instead of the steps: core/ turns the gondola
+toward the forward camera's balloon (each new sighting sets the heading to
+yaw + bearing) and holds where it was last seen; the report gives the
+camera's row rate, how often the balloon was in view and the error while it
+was. Check the bearing's sign first, motors off: software/cam_watch.py.
 
 A heading is in degrees, + counter-clockwise seen from above, from where the
 nose points when the hold arms (core/'s estimator latches the yaw origin
@@ -44,8 +51,11 @@ import blimp_log  # noqa: E402
 LEAD_S = 2.0          # zero-thrust baseline in the capture before the hold arms
 
 
-def plan(steps, dwell):
-    """[(t0, t1, heading_deg)] from the moment the hold starts."""
+def plan(steps, dwell, follow=False):
+    """[(t0, t1, heading_deg)] from the moment the hold starts; with follow,
+    one phase whose setpoint is None (the camera's target)."""
+    if follow:
+        return [(0.0, dwell, None)]
     return [(k * dwell, (k + 1) * dwell, h) for k, h in enumerate(steps)]
 
 
@@ -62,12 +72,20 @@ def hold_line(text):
     m = re.search(r'heading: estimate ([-+\d.]+) deg.*?rate ([-+\d.]+) deg/s(?:; held at ([-+\d.]+) deg, '
                   r'error ([-+\d.]+) deg)?', text)
     o = re.search(r'throttle FL ([\d.]+) RL ([\d.]+) FR ([\d.]+) RR ([\d.]+)', text)
+    f = re.search(r'FOLLOWING the target, last seen at ([-+\d.]+) deg, error ([-+\d.]+) deg', text)
+    cam = re.search(r'camera: target at bearing ([-+\d.]+) deg', text)
     mode = re.search(r'mode (\w+)', text)
     parts = [mode.group(1) if mode else '?']
     if m:
         parts.append('hdg %+6.1f  rate %+6.1f' % (float(m.group(1)), float(m.group(2))))
         if m.group(3):
             parts.append('sp %+6.1f  err %+6.1f' % (float(m.group(3)), float(m.group(4))))
+    if f:
+        parts.append('seen at %+6.1f  err %+6.1f' % (float(f.group(1)), float(f.group(2))))
+    elif 'FOLLOWING, nothing seen yet' in text:
+        parts.append('nothing seen yet')
+    if 'FOLLOWING' in text:
+        parts.append('cam %+6.1f' % float(cam.group(1)) if cam else 'cam  none ')
     if o:
         parts.append('FL %.3f RL %.3f FR %.3f RR %.3f' % tuple(float(v) for v in o.groups()))
     return '  '.join(parts)
@@ -102,13 +120,42 @@ def metrics(rows, marks):
     return out
 
 
+def follow_metrics(rows, t0, t1):
+    """The follow phase: how many camera rows the loop saw and how many had
+    the balloon, and the yaw error core/ steered on (to where the balloon was
+    last seen) while it was in view: the capture's cam0 and hold columns."""
+    seg = [r for r in rows if t0 <= r['t_s'] < t1 and r['mode'] != 'MANUAL']
+    if len(seg) < 10:
+        return {'note': 'too few records'}
+    frames = detected = 0
+    prev = None
+    for r in seg:
+        if r['cam0_seq'] != prev:
+            frames += 1
+            detected += 1 if r['cam0_detected'] else 0
+            prev = r['cam0_seq']
+    seen = [abs(math.degrees(r['hold_err_rad'])) for r in seg if r['cam0_detected']]
+    seen.sort()
+    dur = seg[-1]['t_s'] - seg[0]['t_s']
+    return {'seconds': dur, 'camera_rows_per_s': frames / dur if dur > 0 else float('nan'),
+            'rows_with_balloon_pct': 100.0 * detected / frames if frames else float('nan'),
+            'abs_error_mean_deg': sum(seen) / len(seen) if seen else float('nan'),
+            'abs_error_p90_deg': seen[int(0.9 * (len(seen) - 1))] if seen else float('nan'),
+            'peak_rate_dps': max(abs(r['gyro_z_dps']) for r in seg),
+            'peak_throttle': max(max(abs(r['throttle_%s' % m]) for m in blimp_log.MOTORS) for r in seg)}
+
+
 def run(args):
-    marks = plan(args.steps, args.dwell)
+    marks = plan(args.steps, args.dwell, args.follow)
     total = marks[-1][1]
     cap_s = int(math.ceil(LEAD_S + total)) + 3
-    print('heading hold, %d setpoints, %.0f s, capture of %d s:' % (len(marks), total, cap_s))
-    for t0, t1, h in marks:
-        print('  %6.1f .. %6.1f s  heading %+6.1f deg' % (t0, t1, h))
+    if args.follow:
+        print('target follow, %.0f s, capture of %d s: the gondola turns toward the forward camera\'s balloon'
+              % (total, cap_s))
+    else:
+        print('heading hold, %d setpoints, %.0f s, capture of %d s:' % (len(marks), total, cap_s))
+        for t0, t1, h in marks:
+            print('  %6.1f .. %6.1f s  heading %+6.1f deg' % (t0, t1, h))
     if args.param:
         print('param before the start: %s' % ' '.join(args.param))
     if args.deadband is not None:
@@ -190,12 +237,12 @@ def run(args):
                 break
             if want != k:
                 k = want
-                reply = console(con, 'hold heading %g' % marks[k][2])
+                cmd = 'hold follow' if marks[k][2] is None else 'hold heading %g' % marks[k][2]
+                reply = console(con, cmd)
                 if t_hold is None:
                     t_hold = time.monotonic()
                     started = 'refused' not in reply
-                log('%6.1f s  hold heading %+g: %s' % (time.monotonic() - t_hold, marks[k][2],
-                                                      reply.strip().splitlines()[-1]))
+                log('%6.1f s  %s: %s' % (time.monotonic() - t_hold, cmd, reply.strip().splitlines()[-1]))
                 if 'refused' in reply:
                     sys.exit('the firmware refused the hold:\n' + reply)
                 if k == 0 and args.surge:
@@ -249,8 +296,20 @@ def run(args):
     rows = blimp_log.to_units(h, records)
     offset = (t_hold - t_cap) if started else LEAD_S
     marks_cap = [(t0 + offset, t1 + offset, sp) for t0, t1, sp in marks]
-    res = metrics(rows, marks_cap)
-    for r in res:
+    if args.follow:
+        res = follow_metrics(rows, marks_cap[0][0], marks_cap[0][1])
+        if 'note' in res:
+            print('  follow: %s' % res['note'])
+        else:
+            print('  follow, %.0f s: camera %.1f rows/s, balloon in %.0f %% of them; |error| while in view '
+                  'mean %.1f deg, 90 %% under %.1f deg; peak rate %.0f deg/s, peak throttle %.2f'
+                  % (res['seconds'], res['camera_rows_per_s'], res['rows_with_balloon_pct'],
+                     res['abs_error_mean_deg'], res['abs_error_p90_deg'], res['peak_rate_dps'],
+                     res['peak_throttle']))
+        res = [res]
+    else:
+        res = metrics(rows, marks_cap)
+    for r in ([] if args.follow else res):
         if 'note' in r:
             print('  %+6.1f deg: %s' % (r['setpoint_deg'], r['note']))
             continue
@@ -259,7 +318,8 @@ def run(args):
                                       r['final_error_deg'], r['final_std_deg'], r['peak_throttle']))
     meta = {'file': os.path.basename(path), 'saved': time.strftime('%Y-%m-%d %H:%M:%S'), 'source': 'hold_test',
             'notes': args.notes, 'header': h, 'records': len(records), 'params': params,
-            'test': {'steps_deg': args.steps, 'dwell_s': args.dwell, 'hold_start_in_capture_s': offset,
+            'test': {'follow': args.follow, 'steps_deg': None if args.follow else args.steps,
+                     'dwell_s': args.dwell, 'hold_start_in_capture_s': offset,
                      'param': args.param, 'deadband_pct': args.deadband, 'max_duty_pct': args.max_duty,
                      'surge_gf': args.surge, 'max_rate_dps': args.max_rate,
                      'killed_from_ground': killed, 'telemetry_before': tel0, 'log': lines},
@@ -277,6 +337,9 @@ def main(argv=None):
     ap.add_argument('--port', type=int, default=bl.LINK_PORT)
     ap.add_argument('--console-port', type=int, default=bl.CONSOLE_PORT)
     ap.add_argument('--steps', type=float, nargs='+', default=[0.0], help='heading setpoints, deg (default 0)')
+    ap.add_argument('--follow', action='store_true',
+                    help="'hold follow' for --dwell s instead of the steps: turn toward the forward camera's "
+                         "balloon (check the sign first with cam_watch.py)")
     ap.add_argument('--dwell', type=float, default=8.0, help='s at each setpoint (default %(default)s)')
     ap.add_argument('--param', nargs='*', default=[], metavar='NAME=VALUE', help="'param' sets before the start")
     ap.add_argument('--deadband', type=float, help="'motor --deadband' before the start, percent")
@@ -295,7 +358,7 @@ def main(argv=None):
     args = ap.parse_args(argv)
     if any(not math.isfinite(h) or abs(h) > 180 for h in args.steps):
         sys.exit('headings are -180 .. 180 deg')
-    if args.dwell <= 0 or args.dwell * len(args.steps) > 300:
+    if args.dwell <= 0 or args.dwell * (1 if args.follow else len(args.steps)) > 300:
         sys.exit('--dwell must be > 0 and the whole run under 300 s (the capture buffer)')
     if not math.isfinite(args.surge) or not 0.0 <= args.surge <= 30.0:
         sys.exit("--surge is 0 .. 30 gf (the firmware's 'hold surge' range)")

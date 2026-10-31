@@ -743,6 +743,113 @@ int main(void)
         CHECK(state_violations(&b.state) == 0);
     }
 
+    TEST_GROUP("bench hold: following a target");
+    {
+        blimp_t b;
+        uint32_t t_us = force_arm(&b);
+        blimp_actuators_t out = {0};
+        blimp_input_t in = {0};
+        blimp_hold_t h = {0};
+        h.active = true;
+        h.target_held = true;
+
+        /* No sighting yet: the yaw axis outputs nothing. */
+        t_us += 20000u;
+        in.imu = stationary_imu(t_us);
+        in.arm_request = true;
+        in.t_us = t_us;
+        in.hold = h;
+        blimp_notify_link(&b, t_us);
+        blimp_step(&b, &in, &out);
+        CHECK(!b.follow_valid);
+        CHECK_NEAR(out.thrust_fl + out.thrust_fr, 0.0f, 1e-9);
+
+        /* A sighting 0.4 rad to the left: turn CCW, the right motor harder. */
+        in.target.visible = true;
+        in.target.bearing_rad = 0.4f;
+        in.target.t_us = 1000u;
+        for (int i = 0; i < 3; i++) {
+            t_us += 20000u;
+            in.imu = stationary_imu(t_us);
+            in.t_us = t_us;
+            blimp_notify_link(&b, t_us);
+            blimp_step(&b, &in, &out);
+        }
+        CHECK(b.follow_valid);
+        CHECK_NEAR(b.demand.tz, 0.4f, 1e-3);
+        CHECK(out.thrust_fr > out.thrust_fl);
+        CHECK(actuator_violations(&out) == 0);
+
+        /* The vehicle has turned 0.3 rad toward it, and the camera has not
+         * sent a new frame (same t_us): the heading stays where the target
+         * was seen, so the error is 0.1, not the stale bearing's 0.4. */
+        b.est.q[0] = cosf(0.15f);
+        b.est.q[1] = 0.0f;
+        b.est.q[2] = 0.0f;
+        b.est.q[3] = sinf(0.15f);
+        t_us += 20000u;
+        in.imu = stationary_imu(t_us);
+        in.t_us = t_us;
+        blimp_notify_link(&b, t_us);
+        blimp_step(&b, &in, &out);
+        CHECK_NEAR(b.state.yaw, 0.3f, 1e-3);
+        CHECK_NEAR(b.demand.tz, 0.1f, 1e-3);
+
+        /* A new frame, the target now 0.2 rad to the right of the nose:
+         * the heading moves to 0.3 - 0.2 = 0.1, a turn back CW. */
+        in.target.bearing_rad = -0.2f;
+        in.target.t_us = 2000u;
+        t_us += 20000u;
+        in.imu = stationary_imu(t_us);
+        in.t_us = t_us;
+        blimp_notify_link(&b, t_us);
+        blimp_step(&b, &in, &out);
+        CHECK_NEAR(b.follow_yaw_rad, 0.1f, 1e-3);
+        CHECK_NEAR(b.demand.tz, -0.2f, 1e-3);
+        CHECK(out.thrust_fl > out.thrust_fr);
+
+        /* Lost, and a non-finite bearing: both ignored, the last heading held. */
+        in.target.visible = false;
+        in.target.t_us = 3000u;
+        t_us += 20000u;
+        in.imu = stationary_imu(t_us);
+        in.t_us = t_us;
+        blimp_notify_link(&b, t_us);
+        blimp_step(&b, &in, &out);
+        CHECK_NEAR(b.follow_yaw_rad, 0.1f, 1e-3);
+        in.target.visible = true;
+        in.target.bearing_rad = NAN;
+        in.target.t_us = 4000u;
+        t_us += 20000u;
+        in.imu = stationary_imu(t_us);
+        in.t_us = t_us;
+        blimp_notify_link(&b, t_us);
+        blimp_step(&b, &in, &out);
+        CHECK_NEAR(b.follow_yaw_rad, 0.1f, 1e-3);
+        CHECK(actuator_violations(&out) == 0);
+
+        /* It overrides a held heading; switched off, the heading takes over
+         * and the remembered sighting is dropped. */
+        h.heading_held = true;
+        h.heading_rad = -1.0f;
+        in.hold = h;
+        t_us += 20000u;
+        in.imu = stationary_imu(t_us);
+        in.t_us = t_us;
+        blimp_notify_link(&b, t_us);
+        blimp_step(&b, &in, &out);
+        CHECK_NEAR(b.demand.tz, -0.2f, 1e-3);
+        h.target_held = false;
+        in.hold = h;
+        t_us += 20000u;
+        in.imu = stationary_imu(t_us);
+        in.t_us = t_us;
+        blimp_notify_link(&b, t_us);
+        blimp_step(&b, &in, &out);
+        CHECK(!b.follow_valid);
+        CHECK_NEAR(b.demand.tz, -1.3f, 1e-3);
+    }
+
     TEST_GROUP("link watchdog: a packet stamped just after the tick is fresh");
     {
         /* The S3 stamps packets on its link task and the tick on its own;

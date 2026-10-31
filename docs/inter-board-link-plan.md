@@ -5,6 +5,12 @@
 > unchanged. Pins it does not assign — the downward camera, the PING))) backup
 > altimeter and the MPU-6050 interrupt — are **proposed** in this plan and
 > marked as such. Reconciled against the Cableado on 2026-10-13.
+>
+> **Built for the forward camera, 2026-10-30 (not yet run):** the S3 side as drawn here, UART1
+> with RX on GPIO6 and TX on GPIO2 (`cam_link.c`, the `cam` command). The camera side differs:
+> namontoy's `target_cam` prints its CSV rows on the CAM's **UART0** (U0T GPIO1, U0R GPIO3) at
+> **115200**, not on IO13/IO14 at 921600, so the wires go to U0T/U0R. No binary protocol yet:
+> the S3 parses those rows (`cam_row.c`). The firmware README's `cam` section has the wiring.
 
 ## Context
 

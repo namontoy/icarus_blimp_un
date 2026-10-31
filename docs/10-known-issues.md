@@ -108,6 +108,17 @@ at 0° (B3). Two bugs, each reproduced by new checks in `test_blimp.c` and fixed
 The sweep after the fix completes the same loops with the same failsafe counts; the sensorless
 rows are identical run for run and the ToF rows' best laps moved (the table below).
 
+**2026-10-30, the balloon follow (`core/` 0.3.0; built and host-tested, not yet run).** The
+hold can turn toward the forward camera's target (`blimp_hold_t.target_held`, `hold follow`):
+each new sighting sets the heading to yaw + bearing, held between frames and after the balloon
+is lost. The S3 reads namontoy's `target_cam` rows on UART1 (RX GPIO6, TX GPIO2; `cam_link.c`,
+`cam`), from the camera's UART0 at 115200 rather than the IO13/IO14 the link plan drew. Open
+until the bench: the bearing's sign for this mounting (Kconfig -1, `software/cam_watch.py`
+checks it), the camera's delay (not compensated), and the camera's power on the blimp. The sweep
+with 0.3.0 is identical to 0.2.1's in every cell. The same review made the firmware's stale
+checks signed: a sensor sample stamped by another task just after the tick began read as stale,
+the same wrap as the link watchdog's.
+
 **2026-10-29, the link and the window reviewed.** Four reviewers and the team settled how the
 window and the link may affect the motors: `docs/link-robustness-review.md`. The ground station
 changed on branch `link-robustness`: a change leaves at once and the repeat holds 20 Hz on

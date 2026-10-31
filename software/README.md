@@ -62,6 +62,20 @@ constant forward push for the whole run, so both front motors keep turning and a
 speeds one up and slows the other: on the rope rig that removed the limit cycle that one motor
 at a time produced (`docs/history/rig-2026-10-30.md`).
 
+The balloon follow (F0–F2 in the tuning plan) uses the same tool, after a check with the motors
+off:
+
+```
+python software/cam_watch.py                                       # the camera through the S3, live
+python software/hold_test.py --follow --dwell 60 --go --surge 0.5 ...   # turn toward the balloon
+```
+
+`cam_watch.py` polls the firmware's `cam` (console only, so the ground station may stay open) and
+prints the row rate and, for a balloon in view, the bearing `core/` would steer on and on which
+side of the blimp it is: the sign check before anything turns. `--follow` replaces the heading
+steps with `hold follow` for `--dwell` seconds and reports the camera's row rate, how often the
+balloon was in view and the yaw error while it was.
+
 ## The ground station: `ground_station/`
 
 The GUI for the bench and the arena: motors, sensors, the camera and the console in one

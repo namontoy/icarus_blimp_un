@@ -72,6 +72,7 @@
 #include "capture.h"
 #include "cmd_battery.h"
 #include "cmd_param.h"
+#include "cam_link.h"
 #include "ctl_task.h"
 #include "ctl_types.h"
 #include "net_link.h"
@@ -84,7 +85,18 @@ static const char *TAG = "ctl";
 #define CTL_IMU_STALE_US    100000u
 #define CTL_MAG_STALE_US    250000u
 #define CTL_TOF_STALE_US    250000u
+#define CTL_CAM_STALE_US    300000u     /* about four of the camera's 80 ms frames */
 #define CTL_G_MPS2          9.80665f
+
+/* A sample stamped at `then` (0: never) is no older than max_us at `now`.
+   Signed: the stream, the link and the camera stamp on their own tasks, so a
+   sample can land after the tick took its time and be a few microseconds
+   NEWER than it, which unsigned arithmetic would wrap to 71 minutes of age
+   (core/'s link watchdog fell into failsafe that way, 2026-10-30). */
+static bool fresh_at(uint32_t now, uint32_t then, uint32_t max_us)
+{
+    return then != 0u && (int32_t)(now - then) < (int32_t)max_us;
+}
 
 /* The chip axis (0-2) and sign along each body axis, from Kconfig's
    CTL_IMU_AXES and CTL_MAG_AXES. */
@@ -109,6 +121,10 @@ typedef struct {
     uint8_t           guid_state;
     uint32_t          link_age_ms;
     bool              link_seen;
+    bool              follow_valid;     /* core/ has a sighting to steer on    */
+    float             follow_yaw;       /* rad, where the target was last seen */
+    bool              tgt_visible;      /* this tick's camera row, as handed in */
+    float             tgt_bearing;      /* rad, core/'s sign                   */
 } hold_snap_t;
 
 /* esp_psram_* only links with CONFIG_SPIRAM; a build without it (the
@@ -200,13 +216,22 @@ static struct {
  * Only the four sensor blocks are copied. The battery is already read here,
  * one oneshot conversion per tick as the schedule has it, because it is on
  * the ADC and owes nothing to the stream; its fresh bit is set whenever a
- * calibrated sample came in. The camera fields stay whatever their own
- * producer (none yet) leaves in them.
+ * calibrated sample came in. The forward camera's mailbox (cam_link.c) is
+ * peeked the same way, fresh when its frame_seq moved; the downward camera
+ * has no producer yet.
  */
 static void read_sensors(uint32_t tick, sensors_raw_t *raw)
 {
     (void)tick;
     raw->bat_fresh = battery_sample(&raw->bat_raw, &raw->bat_pin_mv, &raw->bat_mv);
+
+    cam_result_t cam;
+    if (cam_link_latest(&cam)) {
+        raw->cam_fresh[CTL_CAM_FORWARD] = cam.frame_seq != raw->cam[CTL_CAM_FORWARD].frame_seq;
+        raw->cam[CTL_CAM_FORWARD] = cam;
+    } else {
+        raw->cam_fresh[CTL_CAM_FORWARD] = false;
+    }
 
     sensors_raw_t latest;
     if (!sensor_stream_latest_raw(&latest)) {
@@ -295,7 +320,7 @@ static void estimate(const sensors_raw_t *raw, state_est_t *est)
 
     est->t_us = raw->imu_t_us;
     const bool imu_known = raw->imu_t_us != 0 && sc->imu_gyro_dps > 0 && sc->imu_accel_g > 0;
-    const bool imu_ok = imu_known && (uint32_t)(raw->t_us - raw->imu_t_us) < CTL_IMU_STALE_US;
+    const bool imu_ok = imu_known && fresh_at(raw->t_us, raw->imu_t_us, CTL_IMU_STALE_US);
     for (int i = 0; i < 3; i++) {
         chip[i] = (float)raw->gyro[i] * ((float)sc->imu_gyro_dps / 32768.0f) * (BLIMP_PI / 180.0f);
     }
@@ -311,8 +336,7 @@ static void estimate(const sensors_raw_t *raw, state_est_t *est)
         chip[i] = mag_lsb > 0.0f ? (float)raw->mag[i] / mag_lsb * 100.0f : 0.0f;     /* uT */
     }
     remap(&s.mag_axes, chip, est->mag);
-    est->mag_valid = mag_lsb > 0.0f && raw->mag_t_us != 0 &&
-                     (uint32_t)(raw->t_us - raw->mag_t_us) < CTL_MAG_STALE_US;
+    est->mag_valid = mag_lsb > 0.0f && fresh_at(raw->t_us, raw->mag_t_us, CTL_MAG_STALE_US);
 
     est->pressure_pa  = (float)raw->baro_p_dpa * 0.1f;
     est->air_temp_c   = (float)raw->baro_t_cc * 0.01f;
@@ -331,11 +355,22 @@ static void estimate(const sensors_raw_t *raw, state_est_t *est)
     est->roll  = atan2f(ay, az);
     est->pitch = atan2f(-ax, sqrtf(ay * ay + az * az));
     est->range_alt = (float)raw->tof_mm * 0.001f * cosf(est->roll) * cosf(est->pitch);
-    est->range_valid = imu_ok && raw->tof_t_us != 0 && raw->tof_status == 0 && raw->tof_mm > 0 &&
-                       (uint32_t)(raw->t_us - raw->tof_t_us) < CTL_TOF_STALE_US;
+    est->range_valid = imu_ok && raw->tof_status == 0 && raw->tof_mm > 0 &&
+                       fresh_at(raw->t_us, raw->tof_t_us, CTL_TOF_STALE_US);
 
     est->imu_temp_c = (float)raw->imu_temp / 340.0f + 36.53f;      /* MPU-6050 datasheet */
     est->bat_v      = (float)raw->bat_mv * 0.001f;
+
+    /* The forward camera's detection in core/'s convention: target_cam's az
+       is + to the right of the image centre, core/'s bearing + to the left,
+       so the mounting sign is -1 for an upright, unmirrored camera (Kconfig
+       CAM_FWD_BEARING_SIGN, 'cam --sign'). The arrival time is new per row,
+       which is how core/'s target follow tells a new frame from a repeat. */
+    const cam_result_t *cam = &raw->cam[CTL_CAM_FORWARD];
+    est->tgt_visible = cam->detected && fresh_at(raw->t_us, cam->t_us, CTL_CAM_STALE_US);
+    est->tgt_bearing_rad   = (float)cam_link_bearing_sign() * cam->az_deg * (BLIMP_PI / 180.0f);
+    est->tgt_elevation_rad = cam->el_deg * (BLIMP_PI / 180.0f);
+    est->tgt_t_us          = cam->t_us;
 }
 
 /*
@@ -367,6 +402,18 @@ static void control(const state_est_t *est, const setpoint_t *sp, ctrl_out_t *ou
     in.t_us        = s.raw.t_us;
     in.hold        = s.hold;
     in.hold.active = true;
+
+    /* The forward camera's target, for the hold's follow ('hold follow').
+       No range: target_cam's comes from the balloon's apparent size, not
+       checked yet, and core/ turns a visible target WITH a range into an
+       altitude fix (Rule 22: every balloon at 2.0 m) whenever the ToF has no
+       reading; a balloon held up by hand on the bench is not at 2.0 m. */
+    in.target.visible       = est->tgt_visible;
+    in.target.bearing_rad   = est->tgt_bearing_rad;
+    in.target.elevation_rad = est->tgt_elevation_rad;
+    in.target.range_m       = NAN;
+    in.target.confidence    = est->tgt_visible ? 1.0f : 0.0f;
+    in.target.t_us          = est->tgt_t_us;
 
     uint32_t rx_us;
     if (net_link_last_rx(&rx_us)) {
@@ -495,7 +542,12 @@ static void snapshot(void)
     n.guid_state     = (uint8_t)s.b.guid.state;
     uint32_t rx_us;
     n.link_seen   = net_link_last_rx(&rx_us);
-    n.link_age_ms = (uint32_t)(s.raw.t_us - rx_us) / 1000u;
+    const int32_t link_age_us = (int32_t)(s.raw.t_us - rx_us);   /* newer than the tick: 0 */
+    n.link_age_ms = link_age_us > 0 ? (uint32_t)link_age_us / 1000u : 0u;
+    n.follow_valid = s.b.follow_valid;
+    n.follow_yaw   = s.b.follow_yaw_rad;
+    n.tgt_visible  = s.est.tgt_visible;
+    n.tgt_bearing  = s.est.tgt_bearing_rad;
     portENTER_CRITICAL(&s.mux);
     s.snap = n;
     portEXIT_CRITICAL(&s.mux);
@@ -935,6 +987,7 @@ static int do_ctl_cmd(int argc, char **argv)
 #define HOLD_ALT_MAX_M      3.0f
 #define HOLD_SURGE_MAX_GF   30.0f
 #define HOLD_LINK_FRESH_MS  500u
+#define HOLD_CAM_FRESH_MS   500u
 #define HOLD_GF_N           0.00980665f
 #define HOLD_RAD_DEG        (180.0f / BLIMP_PI)
 
@@ -968,11 +1021,23 @@ static void print_hold(void)
            (double)n.still_s);
     printf("heading: estimate %+.1f deg (0 = the nose at arming), rate %+.1f deg/s",
            (double)(n.yaw * HOLD_RAD_DEG), (double)(n.yaw_rate * HOLD_RAD_DEG));
-    if (h.heading_held) {
+    if (h.target_held) {
+        if (n.follow_valid) {
+            printf("; FOLLOWING the target, last seen at %+.1f deg, error %+.1f deg",
+                   (double)(n.follow_yaw * HOLD_RAD_DEG), (double)(n.demand.tz * HOLD_RAD_DEG));
+        } else {
+            printf("; FOLLOWING, nothing seen yet: no yaw output until the first detection");
+        }
+    } else if (h.heading_held) {
         printf("; held at %+.1f deg, error %+.1f deg", (double)(h.heading_rad * HOLD_RAD_DEG),
                (double)(n.demand.tz * HOLD_RAD_DEG));
     } else {
         printf("; not held");
+    }
+    if (n.tgt_visible) {
+        printf("\ncamera: target at bearing %+.1f deg (+ = to the left)", (double)(n.tgt_bearing * HOLD_RAD_DEG));
+    } else {
+        printf("\ncamera: no target ('cam' for the link)");
     }
     printf("\naltitude: estimate %.2f m (%s)", (double)n.altitude,
            n.altitude_valid ? "ToF" : "no source");
@@ -1004,6 +1069,7 @@ static int hold_usage(void)
            "hold heading <deg>|off   hold a heading, + counter-clockwise from above, from the nose at arming\n"
            "hold altitude <m>|off    hold a height above the floor (ToF), %.1f to %.1f m\n"
            "hold surge <gf>|off      a constant forward push, 0 to %.0f gf\n"
+           "hold follow [off]        turn toward the forward camera's target (overrides heading)\n"
            "hold off                 end it: the motors coast and go back to the link and the console\n"
            "hold kill                coast now and latch KILLED, like a STOP from the link\n",
            (double)HOLD_ALT_MIN_M, (double)HOLD_ALT_MAX_M, (double)HOLD_SURGE_MAX_GF);
@@ -1034,14 +1100,19 @@ static int do_hold_cmd(int argc, char **argv)
         printf("all motors coasting%s\n", motors_loop_owns() ? "; the hold is KILLED until 'hold off'" : "");
         return 0;
     }
-    if (argc != 3) {
+    /* 'hold follow' takes no value ('hold follow off' ends it); the rest take one. */
+    const bool follow = strcasecmp(what, "follow") == 0;
+    if (follow ? (argc > 3) : (argc != 3)) {
         return hold_usage();
     }
 
-    const char *val = argv[2];
+    const char *val = argc == 3 ? argv[2] : "on";
     const bool off = strcasecmp(val, "off") == 0;
+    if (follow && !off && strcasecmp(val, "on") != 0) {
+        return hold_usage();
+    }
     float v = 0.0f;
-    if (!off) {
+    if (!off && !follow) {
         char *end = NULL;
         v = strtof(val, &end);
         if (end == val || *end != '\0' || !isfinite(v)) {
@@ -1081,6 +1152,20 @@ static int do_hold_cmd(int argc, char **argv)
             return 1;
         }
         req.surge_n = off ? 0.0f : v * HOLD_GF_N;
+    } else if (follow) {
+        if (!off) {
+            /* Following with no camera would hold nothing: say so now rather
+               than leave a hold that never turns. */
+            cam_link_status_t cs;
+            cam_link_status(&cs);
+            const int32_t age_us = (int32_t)((uint32_t)esp_timer_get_time() - cs.last_row_us);
+            if (cs.last_row_us == 0u || age_us > (int32_t)(HOLD_CAM_FRESH_MS * 1000u)) {
+                printf("refused: no row from the forward camera in the last %u ms; 'cam' shows the link\n",
+                       (unsigned)HOLD_CAM_FRESH_MS);
+                return 1;
+            }
+        }
+        req.target_held = !off;
     } else {
         return hold_usage();
     }
@@ -1117,9 +1202,9 @@ static int do_hold_cmd(int argc, char **argv)
     if (starting) {
         printf("hold starting: armed at the next tick, heading 0 = where the nose points now\n");
     }
-    printf("held: heading %s, altitude %s, surge %.1f gf\n",
+    printf("held: heading %s, altitude %s, surge %.1f gf, follow %s\n",
            req.heading_held ? "on" : "off", req.altitude_held ? "on" : "off",
-           (double)(req.surge_n / HOLD_GF_N));
+           (double)(req.surge_n / HOLD_GF_N), req.target_held ? "on" : "off");
     return 0;
 }
 
@@ -1139,9 +1224,10 @@ void register_ctl(void)
 
     const esp_console_cmd_t hold = {
         .command = "hold",
-        .help = "The bench hold: core/'s loops on a commanded heading, altitude or surge. "
-                "'hold' alone shows the state; 'hold heading 30', 'hold off', 'hold kill'",
-        .hint = "[heading|altitude|surge <value>|off] | off | kill",
+        .help = "The bench hold: core/'s loops on a commanded heading, altitude or surge, or "
+                "turning toward the forward camera's target. 'hold' alone shows the state; "
+                "'hold heading 30', 'hold follow', 'hold off', 'hold kill'",
+        .hint = "[heading|altitude|surge <value>|off] | follow [off] | off | kill",
         .func = &do_hold_cmd,
         .argtable = NULL
     };

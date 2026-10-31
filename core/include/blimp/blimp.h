@@ -37,6 +37,12 @@ typedef struct {
     uint32_t          last_cmd_us;   /* last ground packet, for link timeout */
     uint32_t          last_step_us;
     bool              armed;
+    /* The bench hold's target follow (blimp_hold_t.target_held): the
+     * heading where the target was last seen, set on each new observation
+     * (a new target.t_us) and held between them and after it is lost. */
+    bool              follow_valid;
+    float             follow_yaw_rad;
+    uint32_t          follow_obs_us;
 } blimp_t;
 
 /* Bench hold: setpoints commanded from the ground in place of guidance, for
@@ -52,12 +58,24 @@ typedef struct {
  * A held altitude with no altitude source this tick also outputs nothing,
  * which lets the vehicle sink on its trim (the failsafe posture, blimp.c).
  *
+ * target_held turns the heading toward the target in blimp_input_t.target
+ * instead (the balloon-follow test on the rope rig): each NEW observation
+ * (target.visible with a target.t_us not seen before) sets the heading to
+ * the current yaw plus its bearing, and the yaw loop holds that heading until
+ * the next one. A fixed heading between frames, not the frame's stale
+ * bearing, so a turn under way is not over-driven while the camera catches
+ * up; after the target is lost, the heading where it was last seen. Until
+ * the first observation the yaw axis outputs nothing. It overrides
+ * heading_held.
+ *
  * All-zero (active = false, what `blimp_input_t in = {0}` gives) is a
  * normal run, unchanged. */
 typedef struct {
     bool  active;          /* these setpoints replace guidance this tick     */
     bool  heading_held;    /* yaw loop on heading_rad; else tz = 0           */
     bool  altitude_held;   /* altitude loop on altitude_m; else fz = 0       */
+    bool  target_held;     /* yaw loop toward in->target (above); core 0.3.0,
+                            * in what was the padding byte                   */
     float heading_rad;     /* rad, +CCW from above, relative to the heading
                             * latched at arming (blimp_estimator_zero)       */
     float altitude_m;      /* m above the floor, as the estimator reports it */

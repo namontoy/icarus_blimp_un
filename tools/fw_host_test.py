@@ -2,9 +2,11 @@
 """Host tests for the S3 firmware's portable files: compiled with clang and
 tools/build.py's flags, run on this computer, no ESP-IDF.
 
-Today one: the 'param' command's table (firmware/projects/i2c_tools/main/
-param_table.c) against core/src/params.c, checked by
-firmware/projects/i2c_tools/host/test_param_table.c. tools/verify.py runs this.
+The 'param' command's table (firmware/projects/i2c_tools/main/param_table.c)
+against core/src/params.c, checked by
+firmware/projects/i2c_tools/host/test_param_table.c; and the forward camera's
+row parser (main/cam_row.c, target_cam's CSV), by host/test_cam_row.c.
+tools/verify.py runs this.
 
     python tools/fw_host_test.py
 """
@@ -20,6 +22,7 @@ FW = ROOT / "firmware" / "projects" / "i2c_tools"
 
 TESTS = {
     "param_table": [ROOT / "core" / "src" / "params.c", FW / "main" / "param_table.c"],
+    "cam_row": [FW / "main" / "cam_row.c"],
 }
 
 

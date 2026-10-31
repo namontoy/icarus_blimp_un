@@ -48,7 +48,8 @@ CLAUDE.md, and others). Keep it tool-neutral; tool-specific notes belong in that
   command (`main/cmd_param.c`) reads and sets `blimp_params_t` live, in RAM, and (branch
   `control-inc3`, first run on the rope rig 2026-10-30) the task calls `blimp_step()` every tick
   and drives the motors in the bench hold (`hold`, `software/hold_test.py`), through the motor
-  map (`motormap`).
+  map (`motormap`); it also reads the forward camera's rows on UART1 (`cam`, namontoy's
+  `target_cam` on the CAM) for `hold follow` (built 2026-10-30, not yet run).
 - `firmware/projects/espfly/`: the previous board's shell. `main/main.c` is only an RTOS shell
   around `blimp_step()` (the esp_timer loop pattern); not part of day-to-day builds.
 - `firmware/projects/optflow_cam/`: ESP32-CAM optical-flow experiment. `blink/`: toolchain test.

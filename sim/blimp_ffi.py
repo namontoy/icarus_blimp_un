@@ -284,13 +284,15 @@ class BlimpGuidance(C.Structure):
 
 class BlimpHold(C.Structure):
     """Mirrors blimp/blimp.h: blimp_hold_t — the bench hold's setpoints, in
-    place of guidance's (docs/pid-tuning-plan.md C1-C4). Three bools, one
-    byte of padding, three floats: 16 bytes. All-zero is a normal run."""
+    place of guidance's (docs/pid-tuning-plan.md C1-C4). Four bools (the
+    fourth, target_held, in what was padding until core 0.3.0), three
+    floats: 16 bytes. All-zero is a normal run."""
 
     _fields_ = [
         ("active", C.c_bool),
         ("heading_held", C.c_bool),
         ("altitude_held", C.c_bool),
+        ("target_held", C.c_bool),
         ("heading_rad", C.c_float),
         ("altitude_m", C.c_float),
         ("surge_n", C.c_float),
@@ -328,7 +330,7 @@ _EXPECTED_LAYOUT = {
     "BlimpWaypoint": (12, {"x": 0, "y": 4, "z": 8}),
     "BlimpTargetObs": (32, {"bearing_rad": 0, "elevation_rad": 4, "range_m": 8, "confidence": 12, "hint_yaw_rad": 16, "alt_fix_m": 20, "visible": 24, "hint_valid": 25, "alt_fix_valid": 26, "t_us": 28}),
     "BlimpGuidance": (72, {"state": 0, "wp_index": 4, "wp_count": 8, "loop_index": 12, "loop_count": 16, "state_entry_us": 20, "run_start_us": 24, "last_seen_us": 28, "confirm_timer_s": 32, "search_dir": 36, "miss_count": 40, "timing_active": 44, "last_loop_time_s": 48, "best_loop_time_s": 52, "hint_reached": 56, "blind_climb_s": 60, "alt_err_known": 64, "last_alt_err": 68}),
-    "BlimpHold": (16, {"active": 0, "heading_held": 1, "altitude_held": 2, "heading_rad": 4, "altitude_m": 8, "surge_n": 12}),
+    "BlimpHold": (16, {"active": 0, "heading_held": 1, "altitude_held": 2, "target_held": 3, "heading_rad": 4, "altitude_m": 8, "surge_n": 12}),
     "BlimpInput": (112, {"imu": 0, "target": 56, "contact_detected": 88, "arm_request": 89, "t_us": 92, "hold": 96}),
 }
 

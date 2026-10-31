@@ -149,9 +149,11 @@ motors stay off while the pins float during reset.
 |---|---|
 | 1 | Battery divider, ADC1_CH0 (`BATTERY_ADC_GPIO`; read since 2026-10-29, not yet checked on the bench) |
 | 4, 5 | I2C SDA, SCL |
+| 2 | UART1 TX to the forward camera's U0R (`CAM_FWD_UART_TX_GPIO`; since 2026-10-30, only `cam --tx` writes) |
+| 6 | UART1 RX from the forward camera's U0T (`CAM_FWD_UART_RX_GPIO`; since 2026-10-30) |
 | 7–14 | Motor driver inputs (all eight LEDC channels) |
 | 21 | WS2812 status LED (RMT) |
-| 6 | Reserved for the parked PING))) sensor (not built in) |
+| 38 | Planned for the parked PING))) sensor (not built in; its default was 6 until the camera took it) |
 
 ## 3. Building and flashing (summary)
 
@@ -528,6 +530,8 @@ hold heading 30            hold 30 deg counter-clockwise (from above) of the nos
 hold heading -45           (a negative value is a value, not an option: parsed by hand)
 hold altitude 1.5          hold 1.5 m above the floor on the ToF (0.2 to 3.0)
 hold surge 2               a constant 2 gf forward push (0 to 30)
+hold follow                turn toward the forward camera's balloon (overrides heading; see 'cam')
+hold follow off            stop following
 hold heading off           stop holding that axis (it outputs nothing)
 hold off                   end it: the motors coast and go back to the link and the console
 hold kill                  coast and latch KILLED, as a STOP from the link does
@@ -554,6 +558,56 @@ thrust at the ceiling (about 1 gf at 30 % on the 2026-10-28 scale), and
 its default of 0.5 gf, a constant until 2026-10-30, silenced every
 correction on the rope rig. `hold_test.py --max-duty --deadband --param ...`
 does all of it before the start.
+
+`hold follow` (`core/` 0.3.0, built 2026-10-30, not yet run) hands the
+forward camera's detection to `core/` as its target (`cam` below) and turns
+toward it: each new camera row with the balloon sets the heading to the
+current yaw plus its bearing, and the same yaw loop and gains hold that
+heading until the next row, and after the balloon is lost, where it was last
+seen. Nothing turns until the first detection. Starting is refused without a
+camera row in the last 0.5 s. `hold_test.py --follow --dwell 60` runs it and
+reports the camera's row rate, how often the balloon was in view and the
+yaw error while it was; check the bearing's sign first with
+`software/cam_watch.py`, motors off.
+
+### `cam`: the forward camera's link
+
+The forward ESP32-CAM runs namontoy's `target_cam` (branches `target-cam-*`)
+and prints one CSV row per frame, 12.5 a second, on its UART0 at 115200
+(`main/cam_row.h` has the columns). The S3 reads them on UART1
+(`cam_link.c`), keeps the latest for the control task's read stage, and
+writes to the camera only when someone types `cam --tx`: target_cam takes
+single-letter commands, and a stray `s` turns its rows off.
+
+Wiring (the Cableado's S3 pins, `docs/inter-board-link-plan.md`; on the
+camera, target_cam's UART0 pads, not the IO13/IO14 that plan drew):
+
+| ESP32-CAM | | ESP32-S3-Zero |
+|---|---|---|
+| U0T (GPIO1) | → 470 Ω → | GPIO6 (RX) |
+| U0R (GPIO3) | ← 470 Ω ← | GPIO2 (TX) |
+| GND | — | GND |
+
+U0T/U0R are also the camera's programming port: with the 470 Ω in the S3's
+TX line a programmer on U0R still wins, or unplug that wire to reflash. The
+camera's boot log arrives on the same line and is counted and dropped.
+
+```
+cam                  rows/s, counts, the latest detection and the bearing core/ gets
+cam --raw            the last 8 lines exactly as they arrived (wiring, baud, format)
+cam --tx ?           send a line to the camera and print its '#' replies (? lists its settings)
+cam --sign -1|1      core/'s bearing = sign x the camera's az, until the next boot
+```
+
+target_cam's az is + to the right of the image centre; `core/`'s bearing is
++ to the left (counter-clockwise), so `CONFIG_CAM_FWD_BEARING_SIGN` is -1 for
+an upright, unmirrored camera. A row counts only if it is all numbers, 25
+of them (CSV v1) or 35 ending in 2 (v2), each inside a plausible range
+(`main/cam_row.c`, checked on the host by `host/test_cam_row.c`); a target
+older than 300 ms is not visible to `core/`. The range from the balloon's
+apparent size is not passed on: `core/` would turn a visible target with a
+range into an altitude fix (every balloon at 2.0 m, Rule 22) whenever the
+ToF has no reading.
 
 ### `motormap`: each motor's name, position and sign
 
@@ -845,7 +899,8 @@ i2c_tools/
 ├── components/
 │   └── vl53l1x_uld/          ST VL53L1X ULD 3.5.5 + port onto the shared bus
 ├── host/
-│   └── test_param_table.c    the `param` table on the computer (tools/fw_host_test.py)
+│   ├── test_param_table.c    the `param` table on the computer (tools/fw_host_test.py)
+│   └── test_cam_row.c        target_cam's rows, and what must never read as one
 └── main/
     ├── i2ctools_example_main.c   app_main: boot order, registration, banner
     ├── Kconfig.projbuild         menuconfig settings (§9)
@@ -863,6 +918,8 @@ i2c_tools/
     ├── cmd_battery.c/.h          battery divider on ADC1, sampled by the control task, + `battery`
     ├── param_table.c/.h          every field of core/'s blimp_params_t by name, with its range
     ├── cmd_param.c/.h            the live parameters, their hand-over to the control task, + `param`
+    ├── cam_link.c/.h             the forward camera's rows on UART1 (RX 6, TX 2) + `cam`
+    ├── cam_row.c/.h              target_cam's CSV row, parsed (portable, host-tested)
     ├── cmd_motor.c/.h            DRV8833 ×2, failsafe
     ├── cmd_ping.c/.h             PING))) ultrasonic, PARKED (not in SRCS)
     ├── led_blink.c/.h            WS2812 hue sweep
@@ -872,9 +929,9 @@ i2c_tools/
     └── link_protocol.h           packet layouts, shared with blimp_link.py
 ```
 
-`main/param_table.c` is the one file here with a host test
-(`host/test_param_table.c`, run by `tools/fw_host_test.py`); the rest is
-checked on the bench. The project also compiles `core/` as a component
+`main/param_table.c` and `main/cam_row.c` are the files here with a host
+test (`host/test_*.c`, run by `tools/fw_host_test.py`); the rest is checked
+on the bench. The project also compiles `core/` as a component
 (`EXTRA_COMPONENT_DIRS` in `CMakeLists.txt`) since 2026-10-30.
 
 ## 14. Known issues and caveats

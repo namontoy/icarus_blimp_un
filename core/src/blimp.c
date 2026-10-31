@@ -183,6 +183,9 @@ void blimp_init(blimp_t *b)
     b->last_cmd_us = 0;
     b->last_step_us = 0;
     b->armed       = false;
+    b->follow_valid   = false;
+    b->follow_yaw_rad = 0.0f;
+    b->follow_obs_us  = 0u;
 }
 
 void blimp_notify_link(blimp_t *b, uint32_t t_us)
@@ -200,7 +203,8 @@ const char *blimp_version(void)
      * rule 6 bans time-of-day/non-determinism, and this must be identical
      * for identical source. Bump the number when this file's behaviour
      * changes in a way worth distinguishing in a flight log. */
-    return "blimp-core-0.2.1";   /* 0.2.1: a link packet newer than the tick is
+    return "blimp-core-0.3.0";   /* 0.3.0: the hold follows a target.
+                                  * 0.2.1: a link packet newer than the tick is
                                   * fresh; the arming tick steers on the new
                                   * origin. 0.2.0: the bench hold. */
 }
@@ -256,9 +260,10 @@ static float heading_loop(blimp_t *b, float err_rad, float dt)
  * left it; b->demand carries the errors the loops ran on (decision 1's
  * convention: fz the height error, tz the heading error), fx the commanded
  * surge itself, since no range error exists here. */
-static void hold_wrench(blimp_t *b, const blimp_hold_t *h, float dt,
+static void hold_wrench(blimp_t *b, const blimp_input_t *in, float dt,
                         blimp_wrench_t *w)
 {
+    const blimp_hold_t *h = &in->hold;
     *w = BLIMP_SAFE_WRENCH;
     b->demand = BLIMP_SAFE_WRENCH;
 
@@ -281,7 +286,30 @@ static void hold_wrench(blimp_t *b, const blimp_hold_t *h, float dt,
         blimp_pid_reset(&b->pid_alt);
     }
 
-    if (h->heading_held && isfinite(h->heading_rad)) {
+    /* Target follow (blimp.h): a new observation moves the heading to where
+     * the target is now, yaw + bearing, read against this tick's yaw. The
+     * camera's own delay (exposure to here, ~0.1 s) is not compensated: at
+     * the rig's turn rates that is a degree or two, and the gyro damping
+     * covers the rest. */
+    if (h->target_held) {
+        const blimp_target_obs_t *o = &in->target;
+        if (o->visible && isfinite(o->bearing_rad) &&
+            (!b->follow_valid || o->t_us != b->follow_obs_us)) {
+            const float y = blimp_wrap_pi(b->state.yaw + o->bearing_rad);
+            if (isfinite(y)) {
+                b->follow_yaw_rad = y;
+                b->follow_obs_us  = o->t_us;
+                b->follow_valid   = true;
+            }
+        }
+    } else {
+        b->follow_valid = false;   /* a later follow starts on a fresh sighting */
+    }
+
+    if (h->target_held && b->follow_valid) {
+        b->demand.tz = blimp_wrap_pi(b->follow_yaw_rad - b->state.yaw);
+        w->tz = heading_loop(b, b->demand.tz, dt);
+    } else if (!h->target_held && h->heading_held && isfinite(h->heading_rad)) {
         b->demand.tz = blimp_wrap_pi(h->heading_rad - b->state.yaw);
         w->tz = heading_loop(b, b->demand.tz, dt);
     } else {
@@ -392,6 +420,8 @@ void blimp_step(blimp_t *b, const blimp_input_t *in, blimp_actuators_t *out)
             blimp_estimator_output(&b->est, &imu, &b->state);
             blimp_guidance_arm(&b->guid, in->t_us);
             b->armed = true;
+            /* A heading remembered from before is in the old origin's frame. */
+            b->follow_valid = false;
             reset_control_loops(b);
         }
     } else if (!in->arm_request) {
@@ -473,7 +503,7 @@ void blimp_step(blimp_t *b, const blimp_input_t *in, blimp_actuators_t *out)
     if (in->hold.active) {
         /* ---- 5-6 (bench hold): commanded setpoints through the same loops
          * (blimp.h's blimp_hold_t) instead of guidance's. */
-        hold_wrench(b, &in->hold, dt, &final_wrench);
+        hold_wrench(b, in, dt, &final_wrench);
     } else {
         /* ---- 5. guidance: b->state (+ target, contact) -> b->demand ----- */
         (void)blimp_guidance_step(&b->guid, &b->params, &b->state, &in->target,

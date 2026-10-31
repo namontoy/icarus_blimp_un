@@ -15,7 +15,7 @@
  *
  *     PING))) 5V   ---------------------------- 5V rail
  *     PING))) GND  ---------------------------- GND
- *     PING))) SIG  --- 1.0k ---+--------------- GPIO (default 6)
+ *     PING))) SIG  --- 1.0k ---+--------------- GPIO (default 38)
  *                              |
  *                             1.8k
  *                              |
@@ -42,8 +42,11 @@
 
 static const char *TAG = "cmd_ping";
 
-/* Free on an ESP32-S3-Zero: 4/5 are the I2C bus, 21 the RGB LED, 19/20 USB. */
-#define PING_GPIO_DEFAULT       6
+/* GPIO38, a back pad: the pin docs/inter-board-link-plan.md gives the
+   PING))). It was 6 until 2026-10-30, when 6 became the forward camera's
+   UART receive pin (cam_link.c, the Cableado's assignment); 4/5 are the I2C
+   bus, 7-14 the motors, 21 the RGB LED, 19/20 USB. */
+#define PING_GPIO_DEFAULT       38
 
 /* Datasheet timings (28015 v1.5). */
 #define PING_TRIGGER_US         5       // 2 us min, 5 us typical

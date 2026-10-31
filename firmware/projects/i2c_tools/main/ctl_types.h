@@ -74,12 +74,12 @@ typedef enum {
 /*
  * Two ESP32-CAMs are planned over UART (docs/inter-board-link-plan.md): a
  * forward camera that detects the balloon and a downward one for optical
- * flow. Neither is wired on this branch. The mailboxes exist now so that the
- * loop's contract does not change when they are: a future UART task writes
- * one cam_result_t per frame (12.5 fps, 80 ms) with xQueueOverwrite(), the
- * loop peeks it every tick and marks it fresh when frame_seq moved. Peeking
- * every tick rather than every fourth keeps the latency at one tick, not up
- * to 60 ms.
+ * flow. The forward one is read since 2026-10-30 (cam_link.c: target_cam's
+ * CSV rows on UART1, RX GPIO6); the downward one is not wired. cam_link.c
+ * keeps the latest cam_result_t per frame (12.5 fps, 80 ms) under a lock,
+ * the loop peeks it every tick and marks it fresh when frame_seq moved.
+ * Peeking every tick rather than every fourth keeps the latency at one tick,
+ * not up to 60 ms.
  */
 #define CTL_CAM_COUNT 2
 enum { CTL_CAM_FORWARD = 0, CTL_CAM_DOWN = 1 };
@@ -92,6 +92,11 @@ typedef struct {
     uint16_t width_px;      /* frame size, so a consumer can normalise             */
     uint16_t height_px;
     uint8_t  detected;      /* 1: a target was found in this frame                 */
+    /* The camera's own angles to the detection, from its pinhole model and
+       h-FOV (target_cam: az = atan((cx - W/2) / f), + to the RIGHT of the
+       image centre; el + above it). Its frame, not core/'s: estimate()
+       applies the mounting sign. */
+    float    az_deg, el_deg;
 } cam_result_t;
 
 /* ---------------------------------------------------------- raw sensors */
@@ -176,6 +181,12 @@ typedef struct {
     float    humidity_pct;  /* BME280 only, else 0                           */
     float    imu_temp_c;
     float    bat_v;         /* running average, after the divider            */
+
+    /* -- the forward camera's target, for blimp_target_obs_t -------------- */
+    bool     tgt_visible;      /* a detection in a row younger than the stale limit */
+    float    tgt_bearing_rad;  /* core/'s convention: + counter-clockwise, to the left */
+    float    tgt_elevation_rad;
+    uint32_t tgt_t_us;         /* the row's arrival on the S3: new per frame  */
 } state_est_t;
 
 /* -------------------------------------------------------------- setpoint */

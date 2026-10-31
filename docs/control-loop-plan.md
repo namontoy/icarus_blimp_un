@@ -288,6 +288,9 @@ fresh when the frame sequence number moved.
    **Built 2026-10-30, the bench slice (branch `control-inc3`; run on the rope rig the same
    evening, `docs/history/rig-2026-10-30.md`, which found two `core/` bugs fixed in 0.2.1).** What
    the PID tests need, ahead of the rest of the increment:
+   - `core/` 0.3.0 (same day): `hold follow`, the yaw loop toward the forward camera's target,
+     the S3 reading target_cam's rows on UART1 (`cam`); the camera's mailbox of the read stage
+     filled for the first time. Built, not yet run.
    - `core/` 0.2.0: `blimp_input_t.hold` (`blimp_hold_t`), setpoints for heading, altitude and a
      constant surge in place of guidance's, through the same loops, limits and failsafes; an axis
      not held outputs nothing, the hover feed-forward included. The open item above, answered.

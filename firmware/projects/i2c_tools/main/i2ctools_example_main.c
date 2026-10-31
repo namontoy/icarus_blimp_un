@@ -30,6 +30,7 @@
 #include "cmd_battery.h"
 #include "cmd_param.h"
 #include "motor_map.h"
+#include "cam_link.h"
 
 static const char *TAG = "i2c-tools";
 
@@ -163,6 +164,7 @@ void app_main(void)
     register_capture();
     register_battery();
     register_param();     /* before ctl_task_start(): the loop takes its first set */
+    register_cam();
     register_exit();
 
     /*
@@ -226,6 +228,15 @@ void app_main(void)
     }
 
     /*
+     * The forward camera's rows (cam_link.c: target_cam on UART1, RX GPIO6,
+     * TX GPIO2), peeked by the control task's read stage like the stream.
+     * Not fatal: without it the loop sees no target and 'cam' says why.
+     */
+    if (cam_link_start() != ESP_OK) {
+        ESP_LOGE(TAG, "forward camera link unavailable - no target for 'hold follow'");
+    }
+
+    /*
      * The fixed-rate control task (ctl_task.c) runs on core 1 from here on.
      * In this increment its stages are empty but for two: the read stage
      * peeks the sensor stream's latest sample (the stream still owns the
@@ -265,7 +276,8 @@ void app_main(void)
     printf(" | 17. Try 'param' for the controller's gains, changed live   |\n");
     printf(" | 18. Try 'hold' to run the controller on a set heading      |\n");
     printf(" | 19. Try 'motormap' for each motor's name, place and sign   |\n");
-    printf(" | 20. Type 'exit' or 'quit' to see how to leave the monitor  |\n");
+    printf(" | 20. Try 'cam' for the forward camera's link and target     |\n");
+    printf(" | 21. Type 'exit' or 'quit' to see how to leave the monitor  |\n");
     printf(" |                                                            |\n");
     printf(" ==============================================================\n\n");
 

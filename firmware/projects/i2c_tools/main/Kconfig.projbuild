@@ -360,6 +360,54 @@ menu "Battery monitor (the motor cell's divider)"
 
 endmenu
 
+menu "Forward camera (target_cam over UART)"
+
+    # cam_link.c reads the forward ESP32-CAM's detections: the CSV rows that
+    # namontoy's target_cam firmware prints on the CAM's UART0 (its U0T pad,
+    # GPIO1), 12.5 a second. The S3 pins are the Cableado's
+    # (docs/inter-board-link-plan.md): UART1, RX on GPIO6, TX on GPIO2.
+
+    config CAM_FWD_UART_RX_GPIO
+        int "S3 RX GPIO (from the CAM's U0T)"
+        range 0 48
+        default 6
+        help
+            The camera's rows arrive here. Through 470 ohm in series, per the
+            link plan. -1 is not accepted: without the receive pin there is
+            nothing to do.
+
+    config CAM_FWD_UART_TX_GPIO
+        int "S3 TX GPIO (to the CAM's U0R), or -1 for none"
+        range -1 48
+        default 2
+        help
+            Only 'cam --tx' sends anything, a line typed by a person: the S3
+            never writes to the camera on its own, because target_cam takes
+            single-letter commands ('s' turns its rows off). -1 leaves the
+            pin alone, for a receive-only wiring.
+
+    config CAM_FWD_UART_BAUD
+        int "Baud rate"
+        range 9600 2000000
+        default 115200
+        help
+            target_cam boots at 115200 and keeps it unless its PC viewer
+            switches it (and that switch reverts by itself if the viewer
+            goes quiet).
+
+    config CAM_FWD_BEARING_SIGN
+        int "core/'s bearing = this sign x the camera's az"
+        range -1 1
+        default -1
+        help
+            target_cam's az is + when the balloon is RIGHT of the image
+            centre; core/'s bearing is + counter-clockwise, to the LEFT. -1
+            for a camera mounted upright and not mirrored. Check it on the
+            bench (balloon on the blimp's left: 'cam' must show a + bearing)
+            and change it live with 'cam --sign' until the next boot.
+
+endmenu
+
 menu "Capture (the control loop's records, kept in PSRAM)"
 
     # capture.c stores one 72-byte log record per 20 ms tick of the control
