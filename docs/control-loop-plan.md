@@ -285,7 +285,7 @@ fresh when the frame sequence number moved.
    commanded altitude or heading is a `core/` change (the core-change skill, the ctypes mirror
    in `sim/blimp_ffi.py`), and the firmware then needs a way to send it: `MODE_SET`'s payload
    or a console command. Plan it with this increment.
-   **Built 2026-10-30, the bench slice (branch `control-inc3`; run on the rope rig the same
+   **Built 2026-10-30, the bench slice (branch `control-inc3`, in `pid-tuning` since 2026-10-31; run on the rope rig the same
    evening, `docs/history/rig-2026-10-30.md`, which found two `core/` bugs fixed in 0.2.1).** What
    the PID tests need, ahead of the rest of the increment:
    - `core/` 0.3.0 (same day): `hold follow`, the yaw loop toward the forward camera's target,

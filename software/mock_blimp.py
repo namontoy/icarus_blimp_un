@@ -395,13 +395,18 @@ class MockBlimp:
                     'increment 3)\n' % (int((time.monotonic() - self.t0) * 50), self.param_changes,
                                         self.param_changes))
         if line in ('motor', 'motor --status'):
-            rows = ''.join('%-6s %-12s %-9s %+10.3f %9.1f%%\n' % (n, w, g, c, 100 * abs(c))
-                           for n, w, g, c in zip(bl.MOTOR_ORDER, ('#1 IN1/IN2', '#1 IN3/IN4', '#2 IN1/IN2', '#2 IN3/IN4'),
-                                                 ('13/12', '11/10', '9/8', '7/14'), self.motor))
-            return ('PWM 19999 Hz, 11 bit (2048 steps), slow decay, deadband 0.0%%\n'
+            # The firmware's table since the motor map (2026-10-30), with its
+            # map: the motor named FL sits at core/'s FR position, which is
+            # also how this toy turns (FL harder: counter-clockwise).
+            rows = ''.join('%-6s %-7d %-12s %-9s %-9s %-8s %+7.3f %10.1f%%\n' % (n, k + 1, w, g, p, '+', c, 100 * abs(c))
+                           for k, (n, w, g, p, c) in enumerate(zip(
+                               bl.MOTOR_ORDER, ('#1 IN4/IN3', '#1 IN2/IN1', '#2 IN4/IN3', '#2 IN2/IN1'),
+                               ('10/11', '12/13', '14/7', '8/9'), ('FR', 'RR', 'FL', 'RL'), self.motor)))
+            return ('PWM 19999 Hz, 11 bit (2048 steps), slow decay, deadband 0.0%%, duty ceiling 100%%\n'
                     'failsafe 1000 ms, %s\nnSLEEP not on a GPIO - must be strapped high in hardware\n\n'
-                    '%-6s %-12s %-9s %10s %10s\n%s' % (fs[self.failsafe_state()], 'motor', 'driver',
-                                                       'GPIO', 'command', 'duty', rows))
+                    '%-6s %-7s %-12s %-9s %-9s %-8s %7s %11s\n%s'
+                    % (fs[self.failsafe_state()], 'motor', 'output', 'driver', 'GPIO', 'position', 'sign',
+                       'command', 'duty', rows))
         if line in ('motor -s', 'motor --stop'):
             self.coast()
             self.link_motors = False

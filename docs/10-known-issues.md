@@ -55,7 +55,7 @@ the mock; on the board, `software/param_check.py --reboot` passed 13 of 13 the s
 puts `blimp_step()` in the loop. Found on the way: the closed-loop tests C1–C4 step a setpoint
 that `blimp_step()` cannot take today (a `core/` change, noted in the plan's increment 3).
 
-**2026-10-30, the bench hold (branch `control-inc3`; run on the rope rig the same evening, B1–B3
+**2026-10-30, the bench hold (branch `control-inc3`, in `pid-tuning` since 2026-10-31; run on the rope rig the same evening, B1–B3
 in `docs/history/rig-2026-10-30.md`).** `core/` 0.2.0 takes a commanded heading, altitude or surge in place of guidance
 (`blimp_hold_t`), and the S3's control task runs `blimp_step()` every tick, arming it only on the
 `hold` console command, with any STOP latching KILLED until `hold off`;

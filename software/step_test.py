@@ -3,23 +3,29 @@ schedule streamed from this computer, the capture on the blimp, every step
 fitted, all of it saved beside the capture.
 
     python software/step_test.py yaw                                     # dry run: prints the schedule
-    python software/step_test.py yaw --steps 0.25 0.40 0.55 --mirror --go
-    python software/step_test.py heave --steps 0.40 0.55 0.70 --hold 3 --gap 8 --go
-    python software/step_test.py heave --steps -0.40 -0.55 -0.70 --go    # if the negative command is what pushes up
-    python software/step_test.py yaw --go --thrust-map captures/thrust-map.json --half-span 0.10
+    python software/step_test.py yaw --mirror --go                       # 0.20 0.25 0.30 on FL, then FR
+    python software/step_test.py heave --hold 3 --gap 8 --go
+    python software/step_test.py yaw --go --thrust-map captures/thrust-map.json
     python software/step_test.py --host 127.0.0.1 yaw --go               # against mock_blimp.py
 
-  yaw     the front differential: FL at the amplitude with FR at 0, and with
-          --mirror the same on FR afterwards (the symmetry check of Y1)
+  yaw     the front differential: the motor named FL at the amplitude with FR
+          at 0, and with --mirror the same on FR afterwards (the symmetry
+          check of Y1); on this blimp FL is the right-hand one (the motor map)
   heave   the rear pair: RL = RR = amplitude
 
 An amplitude is signed: a negative one drives the same motors the other
-way, for a vehicle whose propellers push up on a negative command (the
-scale said so for the rear pair on 2026-10-28, docs/history/pid-bench-
-2026-10-28). The fit does not care about the sign; core/'s frame does, and
-the fit says when they disagree. |amplitude| is capped by --limit, 0.75 by
-default: the measured thrust is small (a few gf at 0.3 duty), so the
-amplitudes are larger than blimp_link.py's 0.3 and still under the cap.
+way. On the rope rig (2026-10-30) + lifted on both rear motors and pushed
+forward on both front ones. The fit does not care about the sign; core/'s
+frame does, and the fit says when they disagree. |amplitude| is capped by
+--limit, 0.30 by default: the team's limit is 30 % duty (2026-10-30).
+
+The amplitudes are duties, which they are only while the motor driver runs
+plain: deadband 0 and ceiling 100 %, its state after a boot. hold_test.py
+leaves 10 % and 30 % behind until the next boot, and the thrust map would
+then read every step wrong, so the test reads the driver's state first and
+refuses unless it is plain. It also records the motor map (which name sits
+at which of core/'s positions; cmd_motor.h), which the yaw fit needs: the
+capture logs throttles by name.
 
 The schedule is --lead seconds of zeros for the baseline, then for every
 amplitude a step held --hold seconds and --gap seconds of zeros for the
@@ -40,7 +46,7 @@ each step (the fit removes a straight-line baseline, so a steady sink is
 the equilibrium it needs, and the sink rate it reports is H2's number).
 
 Safety: props on, so without --go this is a dry run; --limit caps the
-amplitude at 0.30 as blimp_link.py does; the stream ends with zeros and
+amplitude at 0.30, the team's limit; the stream ends with zeros and
 MOTOR_STOP three times on Ctrl-C, on any error and at the end; nothing runs
 without telemetry, or while another source holds the motors. Standard
 library only.
@@ -49,6 +55,7 @@ import argparse
 import json
 import math
 import os
+import re
 import sys
 import time
 
@@ -137,6 +144,34 @@ def read_params(host, console_port):
         con.close()
 
 
+def parse_motor_status(text):
+    """The firmware's 'motor' reply: the driver's deadband and duty ceiling,
+    and each motor's position in core/'s frame, from its table
+
+        PWM 20000 Hz, 11 bit (2048 steps), slow decay, deadband 0.0%, duty ceiling 100%
+        motor  output  driver       GPIO      position  sign     command       duty
+        FL     1       #1 IN4/IN3   10/11     FR        +         +0.000       0.0%
+
+    as {'deadband_pct', 'max_duty_pct', 'positions': {name: position}};
+    ValueError for a reply without them (a firmware before the motor map)."""
+    d = re.search(r'deadband ([\d.]+)%, duty ceiling ([\d.]+)%', text)
+    rows = re.findall(r'^(FL|RL|FR|RR)\s+\d\s+#\d\s+\S+\s+\S+\s+(FL|RL|FR|RR)\s+[+-]', text, re.M)
+    if not d or len(rows) != 4 or len({p for _, p in rows}) != 4:
+        raise ValueError("no deadband, ceiling and four positions in 'motor': a firmware without the motor map?")
+    return {'deadband_pct': float(d.group(1)), 'max_duty_pct': float(d.group(2)), 'positions': dict(rows)}
+
+
+def read_motor_status(host, console_port):
+    """parse_motor_status() of the blimp's 'motor', or {'error': why}."""
+    con = bl.BlimpConsole(host, console_port)
+    try:
+        return parse_motor_status(con.run('motor', timeout=5.0, idle=1.0))
+    except (TimeoutError, ConnectionError, ValueError, OSError) as e:
+        return {'error': str(e)}
+    finally:
+        con.close()
+
+
 def run(args):
     if args.axis == 'heave' and args.mirror:
         sys.exit('--mirror is for yaw (FL then FR); heave drives both rear motors')
@@ -166,6 +201,20 @@ def run(args):
             sys.exit('the motors are already driven (%s): one source at a time' % tel0['motor'])
         if tel0['failsafe'] == 'TRIPPED':
             print('note: the motor failsafe is TRIPPED; the first MOTOR_SET clears it')
+        motors = read_motor_status(args.host, args.console_port)
+        if 'error' in motors:
+            if not args.positions:
+                sys.exit("the blimp's motor table could not be read (%s): the yaw fit needs the motor map and the "
+                         "duties need a plain driver. --positions \"FR RR FL RL\" runs without the check"
+                         % motors['error'])
+            print('note: motor table not read (%s); using --positions, the driver unchecked' % motors['error'])
+        elif motors['deadband_pct'] != 0.0 or motors['max_duty_pct'] != 100.0:
+            sys.exit('the motor driver maps commands onto [%g %%, %g %%] (hold_test.py leaves that until a reboot), '
+                     'so the steps would not be duties and the thrust map would read them wrong. Reset it: '
+                     'python software/blimp_link.py console "motor --max-duty 100 --deadband 0"'
+                     % (motors['deadband_pct'], motors['max_duty_pct']))
+        positions = sr.parse_positions(args.positions) if args.positions else motors['positions']
+        print('motor map: %s' % ' '.join('%s at %s' % (n, positions[n]) for n in sr.MOTOR_NAMES))
         cap = bl.CaptureClient(link)
         try:
             info = cap.info()
@@ -212,6 +261,7 @@ def run(args):
             'notes': args.notes, 'header': h, 'records': len(records), 'duration_s': summ['duration_s'],
             'dt_ms': summ['dt_ms'], 'gaps': summ['gaps'], 'exec_us': summ['exec_us'], 'fresh_hz': summ['fresh_hz'],
             'flags_seen': summ['flags_seen'], 'params': params,
+            'motor_positions': positions, 'motor_status': motors,
             'test': {'axis': args.axis, 'steps': args.steps, 'lead_s': args.lead, 'hold_s': args.hold,
                      'gap_s': args.gap, 'mirror': args.mirror, 'rate_hz': args.rate, 'limit': args.limit,
                      'host': args.host, 'schedule': [{'t0': s[0], 't1': s[1], 'cmd': s[2], 'label': s[3]} for s in segs],
@@ -219,18 +269,26 @@ def run(args):
                      'tau_c': args.tau_c, 'thrust_map': args.thrust_map, 'gf_per_unit': args.gf_per_unit,
                      'half_span_m': args.half_span, 'wn': args.wn, 'zeta': args.zeta}}
     if not args.no_fit:
-        rows = blimp_log.to_units(h, records)
-        results = sr.analyse_all(rows, args.axis, args.tau_c)
-        fits, text = [], []
-        for k, r in enumerate(results, 1):
-            n_per_unit = sr.thrust_per_unit(args.axis, r['du'], args.gf_per_unit, tmap)
-            ph = sr.physical(r, n_per_unit, args.half_span, args.wn, args.zeta) if n_per_unit else None
-            text.append('[%d] %s' % (k, sr.report(r, ph)))
-            fits.append(sr.serialisable(r, ph))
-        text.append(sr.summarise(results))
-        print('\n'.join(text))
-        meta['fits'] = fits
-        meta['fit_report'] = text
+        # A fit that fails must not cost the notes: the motor map and the
+        # schedule are what a later step_response.py run needs.
+        try:
+            sr.use_motor_map(positions)
+            rows = blimp_log.to_units(h, records)
+            results = sr.analyse_all(rows, args.axis, args.tau_c)
+            fits, text = [], []
+            for k, r in enumerate(results, 1):
+                n_per_unit = sr.thrust_per_unit(args.axis, r['du'], args.gf_per_unit, tmap)
+                ph = sr.physical(r, n_per_unit, args.half_span, args.wn, args.zeta) if n_per_unit else None
+                text.append('[%d] %s' % (k, sr.report(r, ph)))
+                fits.append(sr.serialisable(r, ph))
+            text.append(sr.summarise(results))
+            print('\n'.join(text))
+            meta['fits'] = fits
+            meta['fit_report'] = text
+        except Exception as e:      # noqa: BLE001 - any failure, reported and kept
+            meta['fit_error'] = '%s: %s' % (type(e).__name__, e)
+            print('the fit failed (%s); the capture and its notes are kept: step_response.py %s --axis %s --all'
+                  % (meta['fit_error'], path, args.axis))
     side = os.path.splitext(path)[0] + '.json'
     with open(side, 'w') as f:
         json.dump(meta, f, indent=2)
@@ -245,13 +303,14 @@ def main(argv=None):
     ap.add_argument('--console-port', type=int, default=bl.CONSOLE_PORT,
                     help="the console, for the 'param' listing in the .json (default %(default)s)")
     ap.add_argument('axis', choices=sorted(sr.AXES))
-    ap.add_argument('--steps', type=float, nargs='+', default=[0.25, 0.40, 0.55],
+    ap.add_argument('--steps', type=float, nargs='+', default=[0.20, 0.25, 0.30],
                     help='amplitudes, per unit duty, signed (default %(default)s)')
     ap.add_argument('--hold', type=float, default=4.0, help='s each step is held (default %(default)s)')
     ap.add_argument('--gap', type=float, default=6.0, help='s of zeros after each step (default %(default)s)')
     ap.add_argument('--lead', type=float, default=2.0, help='s of zeros before the first step')
     ap.add_argument('--mirror', action='store_true', help='yaw: repeat the steps on FR after FL')
-    ap.add_argument('--limit', type=float, default=0.75, help='largest |amplitude| allowed (default %(default)s)')
+    ap.add_argument('--limit', type=float, default=0.30,
+                    help='largest |amplitude| allowed (default %(default)s, the team\'s 30 %% duty)')
     ap.add_argument('--rate', type=float, default=20.0, help='MOTOR_SET per second')
     ap.add_argument('--folder', default='captures')
     ap.add_argument('--out', help='the .bin (default <folder>/step-<axis>-<date>.bin)')
@@ -260,7 +319,9 @@ def main(argv=None):
     ap.add_argument('--tau-c', type=float, default=0.5, help='SIMC closed-loop time constant, s')
     ap.add_argument('--thrust-map', help='thrust_map.py fit JSON, for the fits in core/ units')
     ap.add_argument('--gf-per-unit', type=float, help='one motor\'s thrust per unit duty, gf, instead of the map')
-    ap.add_argument('--half-span', type=float, default=0.10, help='l_f, m (default params.c\'s placeholder)')
+    ap.add_argument('--half-span', type=float, default=0.12, help='l_f, m (default %(default)s, measured 2026-10-30)')
+    ap.add_argument('--positions', help='the motor map in Kconfig\'s form ("FR RR FL RL": where the motors named '
+                                        'FL RL FR RR sit), only if the blimp\'s motor table cannot be read')
     ap.add_argument('--wn', type=float, default=2.0)
     ap.add_argument('--zeta', type=float, default=1.0)
     ap.add_argument('--go', action='store_true', help='really drive the motors (PROPS ON)')

@@ -4,7 +4,8 @@ step, the plant numbers they imply, and the gains the tuning rules give.
     python software/step_response.py captures/step-yaw-<date>.bin --axis yaw --all
     python software/step_response.py captures/step-heave-<date>.bin --axis heave --tau-c 0.6
     python software/step_response.py captures/step-yaw-<date>.bin --axis yaw --all \\
-        --thrust-map captures/thrust-map.json --half-span 0.10
+        --thrust-map captures/thrust-map.json --half-span 0.12
+    python software/step_response.py old-capture.bin --axis yaw --all --positions "FR RR FL RL"
     python software/step_response.py --selftest
 
 Reads the .bin that `blimp_link.py capture download`, the Bench page or
@@ -12,8 +13,16 @@ Reads the .bin that `blimp_link.py capture download`, the Bench page or
 MIN_HOLD_S, and fits the response after each one:
 
   axis   stimulus u (throttle readback, per unit duty)   response y            model
-  yaw    FL - FR, the front differential                  gyro_z_dps           rate: first order plus delay
+  yaw    FL - FR, the front differential, by POSITION     gyro_z_dps           rate: first order plus delay
   heave  (RL + RR) / 2, the rear pair                      tof_mm / 1000, m     position: the integral of that lag
+
+The capture logs each throttle under the motor's NAME, and since the motor
+map (cmd_motor.h, 2026-10-30) a name is not a position: on this blimp the
+motor named FL sits at core/'s FR position, the blimp's right. The yaw
+stimulus is built from positions, so its sign is core/'s: the map comes from
+the capture's .json (step_test.py reads it from the blimp), or from
+--positions in Kconfig's CONFIG_MOTOR_POSITIONS form for a capture without
+one; a capture with neither is read as names = positions, as before the map.
 
 Both are one plant seen through two sensors: a velocity (the yaw rate, the
 climb rate) that answers a thrust step as a first-order lag behind a delay,
@@ -68,9 +77,33 @@ TAU_GRID = [0.02 * 1.12 ** i for i in range(60)]      # 20 ms .. 11 s, geometric
 THETA_MAX_S = 0.6       # command-to-motion delays beyond this are a wiring problem, not a plant
 PRE_S = 1.0             # baseline window before a step, s (shorter if the previous step ends later)
 GF_TO_N = 0.00980665    # BLIMP_GF_TO_N
+MOTOR_NAMES = ('FL', 'RL', 'FR', 'RR')     # motor_id_t order: the wire, the capture, CONFIG_MOTOR_POSITIONS
+
+# core/'s position -> the motor (by name) there; use_motor_map() sets it.
+NAME_AT = {m: m for m in MOTOR_NAMES}
+
+
+def parse_positions(text):
+    """Kconfig's CONFIG_MOTOR_POSITIONS form, the positions of the motors
+    named FL, RL, FR, RR in that order ("FR RR FL RL" on this blimp), as
+    {name: position}; ValueError unless it is a permutation of the four."""
+    pos = text.replace(',', ' ').split()
+    if len(pos) != 4 or sorted(p.upper() for p in pos) != sorted(MOTOR_NAMES):
+        raise ValueError("positions are the four of FL RL FR RR, one each, in FL RL FR RR's order: %r" % text)
+    return dict(zip(MOTOR_NAMES, (p.upper() for p in pos)))
+
+
+def use_motor_map(name_to_pos):
+    """Which motor sits where for the fits that follow ({name: position}, as
+    the .json keeps it); None for names = positions."""
+    NAME_AT.clear()
+    NAME_AT.update({m: m for m in MOTOR_NAMES} if not name_to_pos
+                   else {pos: name for name, pos in name_to_pos.items()})
+
 
 AXES = {
-    'yaw': {'u': lambda r: r['throttle_FL'] - r['throttle_FR'], 'y': lambda r: r['gyro_z_dps'],
+    'yaw': {'u': lambda r: r['throttle_' + NAME_AT['FL']] - r['throttle_' + NAME_AT['FR']],
+            'y': lambda r: r['gyro_z_dps'],
             'model': 'rate', 'y_unit': 'deg/s', 'u_name': 'FL-FR', 'motors': ('FL', 'FR'),
             'J': 'I_z', 'J_unit': 'kg m^2', 'D': 'D_yaw', 'D_unit': 'N m s/rad',
             'gain_units': ('N m/rad', 'N m s/rad'), 'loop': 'yaw', 'drive_unit': 'N m'},
@@ -265,7 +298,8 @@ def physical(r, n_per_unit, half_span, wn, zeta):
     if axis == 'yaw':
         k_vel = p['K'] * math.pi / 180.0            # rad/s per unit duty
         drive = n_per_unit * half_span               # N m per unit duty
-        sign_ok = p['K'] < 0                         # +FL-FR turns the nose right: clockwise, negative yaw in core/
+        sign_ok = p['K'] < 0                         # the left motor harder turns the nose right: clockwise,
+                                                     # negative yaw in core/ (u is by position)
     else:
         k_vel = p['K']                               # m/s per unit duty
         drive = n_per_unit                           # N per unit duty
@@ -477,8 +511,10 @@ def main(argv=None):
     ap.add_argument('--step', type=int, help='fit only step N (1-based)')
     ap.add_argument('--thrust-map', help='thrust_map.py fit JSON: converts the fit to core/ units')
     ap.add_argument('--gf-per-unit', type=float, help='one motor\'s thrust per unit duty, gf, instead of the map')
-    ap.add_argument('--half-span', type=float, default=0.10,
-                    help='l_f, m: the front motors\' half span (default params.c\'s %(default)s placeholder)')
+    ap.add_argument('--half-span', type=float, default=0.12,
+                    help='l_f, m: the front motors\' half span (default %(default)s, measured 2026-10-30)')
+    ap.add_argument('--positions', help='the motor map for a capture whose .json has none, Kconfig\'s form: '
+                                        '"FR RR FL RL" = the positions of the motors named FL RL FR RR')
     ap.add_argument('--wn', type=float, default=2.0, help='placement natural frequency, rad/s (default %(default)s)')
     ap.add_argument('--zeta', type=float, default=1.0, help='placement damping ratio (default %(default)s)')
     ap.add_argument('--json', help='write the results to this file')
@@ -492,6 +528,21 @@ def main(argv=None):
     if args.thrust_map:
         with open(args.thrust_map) as f:
             tmap = json.load(f)
+    name_to_pos = None
+    if args.positions:
+        try:
+            name_to_pos = parse_positions(args.positions)
+        except ValueError as e:
+            ap.error(str(e))
+    else:
+        side = os.path.splitext(args.file)[0] + '.json'
+        if os.path.exists(side):
+            with open(side) as f:
+                name_to_pos = json.load(f).get('motor_positions')
+    if args.axis == 'yaw':
+        print('motor map: %s' % (' '.join('%s at %s' % (n, name_to_pos[n]) for n in MOTOR_NAMES) if name_to_pos
+                                 else 'none recorded: names read as positions (--positions to give one)'))
+    use_motor_map(name_to_pos)
     h, records = blimp_log.read_file(args.file)
     rows = blimp_log.to_units(h, records)
     results = analyse_all(rows, args.axis, args.tau_c)

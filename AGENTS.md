@@ -46,7 +46,7 @@ CLAUDE.md, and others). Keep it tool-neutral; tool-specific notes belong in that
   the link); plan and increments in `docs/control-loop-plan.md`, esp-drone reuse in
   `docs/reuse_log.md`. Since 2026-10-30 it compiles `core/` as a component, the `param` console
   command (`main/cmd_param.c`) reads and sets `blimp_params_t` live, in RAM, and (branch
-  `control-inc3`, first run on the rope rig 2026-10-30) the task calls `blimp_step()` every tick
+  `pid-tuning`, first run on the rope rig 2026-10-30) the task calls `blimp_step()` every tick
   and drives the motors in the bench hold (`hold`, `software/hold_test.py`), through the motor
   map (`motormap`); it also reads the forward camera's rows on UART1 (`cam`, namontoy's
   `target_cam` on the CAM) for `hold follow` (built 2026-10-30, not yet run).

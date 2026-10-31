@@ -46,7 +46,7 @@ python software/step_response.py captures/step-yaw-<date>.bin --axis yaw --all \
 `step_test.py` refuses to start while another source (the ground station) holds the motors and
 stops them on Ctrl-C and on any error; the captures and their `.json` notes go under `captures/`.
 
-The closed-loop tests (C1–C4) run on the firmware's bench hold (`hold`, branch `control-inc3`):
+The closed-loop tests (C1–C4) run on the firmware's bench hold (`hold`, branch `pid-tuning`):
 
 ```
 python software/hold_test.py --steps 0 30 0 -30 0 --dwell 8      # prints the plan; --go runs it

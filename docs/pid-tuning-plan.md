@@ -2,7 +2,8 @@
 
 **Date:** 2026-10-28
 **Branch:** written on `pid-tuning`, merged with `s3-wireless-link` into `master` on
-2026-10-30; the closed-loop tests' firmware (the bench hold) is on `control-inc3` (§4, C1–C4)
+2026-10-30; the closed-loop tests' firmware (the bench hold), built on `control-inc3`, is on
+`pid-tuning` again since 2026-10-31 (§4, C1–C4)
 **Status:** plan, with its instruments written (2026-10-28). Measured so far: the rear pair's
 thrust on a scale (P0, `docs/history/pid-bench-2026-10-28/`); nothing on the vehicle yet. `software/thrust_map.py` (the thrust stand, P0), `software/step_test.py` (the step
 schedules of Y1, Y2, H1 and H2, with the capture and the fits) and `software/step_response.py`
@@ -184,11 +185,13 @@ gyro's from the same capture; expect the timing budget plus one poll. Both bound
 
 **Y1, yaw step, tethered.** Hang the vehicle by a thread from the top of the envelope on the yaw
 axis so it rotates freely; the thread's torsion is small against the envelope's drag and shows as
-a slow drift back, which the baseline absorbs. Steps of the front differential: FL 0.25 then 0.40
-then 0.55 with FR at 0 (the plan first said 0.15 to 0.30; the scale's figures for the rear pair,
-`docs/history/pid-bench-2026-10-28/`, make that under 1 gf, too little to see), each held 4 s,
-6 s apart, then the mirror (FR driven): `step_test.py yaw --mirror --go`, one capture of about
-62 s, every step and every spin-down fitted and summarised at the end. Pass: fit above 90 % or residual
+a slow drift back, which the baseline absorbs. Steps of the front differential: FL 0.20, 0.25
+and 0.30 with FR at 0, inside the team's 30 % duty limit (2026-10-30; the plan had 0.25 to 0.55
+before it), each held 4 s, 6 s apart, then the mirror (FR driven): `step_test.py yaw --mirror
+--go`, one capture of about 62 s, every step and every spin-down fitted and summarised at the
+end. The fit takes the differential by position in `core/`'s frame from the motor map the test
+reads off the blimp (the motor named FL is on the right), so a SIGN line is now a real
+disagreement, not the naming. Pass: fit above 90 % or residual
 under 1.5× noise on at least four of six steps; K within 20 % between amplitudes (the linear
 regime) and between directions (symmetry; a difference is a thrust-line offset to record); θ under
 0.1 s. Produces D_yaw, I_z, and the SIMC rate-loop gains.
@@ -201,13 +204,12 @@ amplitude; record both τ.
 
 **H1, heave step.** The vehicle trimmed and free, in a room with a clear floor under it, the range
 sensor between 0.4 and 1.8 m (inside its reliable range), a person with a hand above the
-envelope. Steps of the rear pair: RL = RR = 0.40, 0.55, 0.70, in the sign that pushes the vehicle
-up: the scale found the negative command the stronger direction on both rear motors (RR 8.5 g
-against 5.0 g at 0.75 duty), so check by hand on the mounted vehicle which sign lifts, and give
-the amplitudes that sign (`step_test.py heave --steps 0.40 0.55 0.70 --hold 3 --gap 8 --go`, or
-`--steps -0.40 -0.55 -0.70`), one capture. With the 6 gf trim and the stronger direction the
-pair gives about 5, 8 and 12 gf, so only the two larger steps climb; the fit does not mind, it
-reads the change of velocity against the sinking baseline. Release the vehicle before the first step and let it sink steadily into each step
+envelope. Steps of the rear pair: RL = RR = 0.20, 0.25, 0.30, inside the 30 % limit, positive:
++ lifted on both rear motors on the rope rig (2026-10-30) (`step_test.py heave --hold 3 --gap 8
+--go`), one capture. At 30 % the pair gives about 2 to 4 gf against the 6 gf trim, so no step
+climbs; the fit does not mind, it reads the change of velocity against the sinking baseline, but
+the same numbers say the altitude loop cannot hold height at that trim and limit (docs/10).
+Release the vehicle before the first step and let it sink steadily into each step
 rather than holding it: the fit removes a straight-line baseline, so the steady sink is the
 equilibrium it needs, and the slope it reports is H2's sink rate. Pass: fit above 90 %;
 K (climb rate per unit duty) within 20 % between amplitudes; θ consistent with L1. Produces D_z,
@@ -227,7 +229,7 @@ Pass: the Rule 13 sweep still passes; no sustained oscillation on either loop at
 the lap-time tables updated with the settings stated.
 
 **C1–C4, closed loop on the vehicle.** Run on the bench hold (control-loop plan, increment 3's
-slice, built 2026-10-30 on `control-inc3`, first run on the rope rig that evening): `blimp_step()` on the S3
+slice, built 2026-10-30, branch `pid-tuning`, first run on the rope rig that evening): `blimp_step()` on the S3
 with `core/`'s `blimp_hold_t` setpoints, started by the `hold` console command, killed by any
 STOP. `python software/hold_test.py --steps 0 90 0 -90 0 --dwell 10 --go` steps the heading
 from the ground, keeps the link alive that the hold needs, kills it from the ground above
@@ -315,8 +317,8 @@ thrust on the front pair is worth a mixer change (a pure yaw torque without surg
 
 ## 7. Bench runbook: the session's commands, in order (2026-10-28)
 
-Before anything: `master` checked out (the tools and the motor remap of 2026-10-29 reached it
-with `s3-wireless-link` on 2026-10-30), the ground
+Before anything: `pid-tuning` checked out (since 2026-10-31 it holds the bench hold, the motor
+map, and the step tools' 30 % limit and motor-map reading) and its firmware on the blimp, the ground
 station **closed** while a tool drives the motors (one client at a time; the tools refuse to
 start while the GUI holds the motors, and the blimp answers whoever sent the last packet), the
 laptop on the blimp's Wi-Fi (`ICARUS-…`, from the system's Wi-Fi menu or the ground station's
@@ -345,9 +347,9 @@ still to be measured, with the stand or the same scale method, at any time: the 
 saved and re-converted from their captures once the map has them.
 
 ```
-python software/thrust_map.py run --motor FL --reverse             # prints the 20 points, drives nothing
-python software/thrust_map.py run --motor FL --reverse --go        # about 5 min per motor
-python software/thrust_map.py run --motor RL --reverse --go        # then FR, then RR
+python software/thrust_map.py run --motor FL --duties 0.10 0.15 0.20 0.25 0.30            # prints the points
+python software/thrust_map.py run --motor FL --duties 0.10 0.15 0.20 0.25 0.30 --go       # then FR the same
+python software/thrust_map.py run --motor RL --reverse --go        # the full sweep, as on 2026-10-28
 python software/thrust_map.py fit captures/thrust-*.csv            # F(u) per motor, Rule 13, captures/thrust-map.json
 ```
 
@@ -380,25 +382,29 @@ free to turn; props on).
 
 ```
 python software/step_test.py yaw --mirror                                            # the schedule, 62 s
-python software/step_test.py yaw --mirror --go --thrust-map docs/history/pid-bench-2026-10-28/thrust-map.json --half-span 0.12
+python software/step_test.py yaw --mirror --go --thrust-map docs/history/pid-bench-2026-10-28/thrust-map.json
 ```
 
-Watch the readback follow each step in the printed lines. At the end every step and every
+The defaults are the 30 % limit's steps (0.20, 0.25, 0.30) and l_f = 0.12 m. The tool reads the
+motor table first: it refuses a driver left at hold_test.py's deadband and ceiling (reset with
+`python software/blimp_link.py console "motor --max-duty 100 --deadband 0"`, or reboot) and
+records the motor map, which the fit uses. Until FL and FR are on the thrust map the fit uses the
+mean of RL's and RR's curves for them (the map's own fallback); re-run `step_response.py` on the
+capture once they are. Watch the readback follow each step in the printed lines. At the end every step and every
 spin-down is fitted and summarised. Pass: four of six steps fit (90 %, or residual under 1.5× the
 noise), K within 20 % across amplitudes and between FL and FR, τ up and τ down within 20 %, θ
-under 0.1 s. A SIGN line means the gyro's z and the front differential disagree with `core/`'s
-frame: not a failure, a fact for increment 3's frame mapping. If the spread is large, repeat
-with `--steps 0.20 0.25 0.30` (the linear regime) and keep both runs.
+under 0.1 s. A SIGN line means the gyro's z and the front differential, by position, disagree
+with `core/`'s frame: a wiring or map fact to chase before the closed loop.
 
 **4. H1 and H2, heave** (trimmed and free, a clear floor, the range sensor between 0.4 and 1.8 m,
 a hand above the envelope; props on).
 
 ```
-python software/step_test.py heave --steps 0.40 0.55 0.70 --hold 3 --gap 8           # the schedule, 35 s
-python software/step_test.py heave --steps 0.40 0.55 0.70 --hold 3 --gap 8 --go --thrust-map docs/history/pid-bench-2026-10-28/thrust-map.json
+python software/step_test.py heave --hold 3 --gap 8                                  # the schedule, 35 s
+python software/step_test.py heave --hold 3 --gap 8 --go --thrust-map docs/history/pid-bench-2026-10-28/thrust-map.json
 ```
 
-With the sign the hand test found lifts (`--steps -0.40 -0.55 -0.70` if negative). Release the
+Positive steps (+ lifted on both rear motors on the rope rig, 2026-10-30). Release the
 vehicle before the first step and let it sink steadily into each step rather than holding it. Pass: fit above 90 %, K within 20 % across the three amplitudes; the baseline slope
 the fit reports is H2's sink rate; θ here is the range sensor's, and L1's delay comes from the
 yaw fits.

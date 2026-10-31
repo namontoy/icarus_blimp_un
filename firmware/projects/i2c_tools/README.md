@@ -58,7 +58,8 @@ written down, but it has not run on hardware.
 | Sensor stream (`sensors`, the `SENSORS` packet) | **Built, not run on hardware** | Written 2026-10-24 on the four drivers above. The ground station decodes the same packet from `software/mock_blimp.py` |
 | PING))) ultrasonic | **Parked, not tested** | Not in the build (§8) |
 | Controller parameters (`param`) | **Measured** 2026-10-30 | `software/param_check.py --reboot`, 13 of 13: the 45-row listing (2959 bytes) arrives whole over the air, a set reaches the loop at its next tick, the refusals hold, core/'s validator clamps on the S3, no overrun or skipped tick during 20 sets, a power cycle returns to params.c (`docs/history/bench-2026-10-30.md`). `blimp_step()` reads them since the bench hold |
-| Bench hold (`hold`), motor map (`motormap`) | **Built, not run on hardware** | 2026-10-30, branch `control-inc3`: `core/` 0.2.0's hold tested on the host (`core/tests/test_blimp.c`), the firmware builds clean. The mounting maps and the map's positions come from the rope-rig session of the same day (`docs/history/rig-2026-10-30.md`) |
+| Bench hold (`hold`), motor map (`motormap`) | **Measured** 2026-10-30, on the rope rig | Branch `pid-tuning`: heading steps of 30° in the hold, the right motor pushing the right way, within about 1° with a 0.5 gf surge (B1–B3, `docs/history/rig-2026-10-30.md`); the mounting maps and the map's positions measured there too. `core/` 0.2.1 fixed two bugs those runs exposed |
+| Forward camera (`cam`), `hold follow` | **Link measured** 2026-10-31; follow not run | target_cam's rows arrive on GPIO6 at 12–13 a second with the camera's IO14 wired to it; its stage 1 did not yet detect the team's balloon in that room, so the follow waits on the detector |
 
 ## 2. Hardware and wiring
 
@@ -417,7 +418,7 @@ woken every 20 ms by an `esp_timer` dispatched from the timer interrupt, running
 the pipeline read sensors, estimate, control, mixer, saturate, PWM, log, with
 the typed records of `ctl_types.h`. The read stage peeks the sensor stream's
 latest sample (the stream still owns the chips) and samples the battery ADC
-(`battery` below); since 2026-10-30 (`control-inc3`) the estimate stage
+(`battery` below); since 2026-10-30 (branch `pid-tuning`) the estimate stage
 converts to SI in `core/`'s body frame through the mounting maps
 (`CONFIG_CTL_IMU_AXES`, `CONFIG_CTL_MAG_AXES`), the control stage runs
 `blimp_step()` every tick, and mixer, saturate and PWM drive the motors only
@@ -517,7 +518,7 @@ every value as it found it.
 
 ### `hold`: the controller on a commanded heading (the bench hold)
 
-Built 2026-10-30 (branch `control-inc3`), first run on the rope rig the same
+Built 2026-10-30 (branch `pid-tuning`), first run on the rope rig the same
 evening (`docs/history/rig-2026-10-30.md`). The
 control task runs `core/`'s `blimp_step()` every tick; this command arms it
 on setpoints given here instead of guidance's (`blimp_hold_t`,
