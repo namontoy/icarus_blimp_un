@@ -246,6 +246,56 @@ int main(void)
         CHECK_MSG(r.fx > 0.0f, "no surge accompanied the yaw floor");
     }
 
+    /* ---- the front deadband is a parameter (2026-10-30) ---------------- */
+    TEST_GROUP("front_deadband_n: the default silences under 0.5 gf, a small one does not");
+    {
+        /* The rope rig's case: 1 gf motors (30 % duty), l_f 0.12 m, and a
+           heading loop asking for 0.26 gf of difference. */
+        blimp_params_t q;
+        blimp_params_defaults(&q);
+        q.motor_max_thrust_n = BLIMP_GF_TO_N(1.0f);
+        q.front_half_span_m  = 0.12f;
+        CHECK(blimp_params_validate(&q));               /* 0.5 gf is half of 1 gf: allowed */
+        const blimp_wrench_t w = {0.0f, 0.0f, 0.0f, 0.12f * BLIMP_GF_TO_N(0.26f)};
+        blimp_actuators_t act;
+        blimp_mixer_apply(&q, &w, &act);
+        CHECK_NEAR(act.thrust_fl + act.thrust_fr, 0.0f, 1e-9);     /* silenced */
+
+        q.front_deadband_n = BLIMP_GF_TO_N(0.05f);
+        CHECK(blimp_params_validate(&q));
+        blimp_mixer_apply(&q, &w, &act);
+        CHECK_NEAR(act.thrust_fr - act.thrust_fl, BLIMP_GF_TO_N(0.26f), 1e-6);
+        CHECK(check_invariants(&q, &act) == 0);
+
+        /* A surge under the deadband is zero too, and above it passes. */
+        const blimp_wrench_t s_small = {BLIMP_GF_TO_N(0.04f), 0.0f, 0.0f, 0.0f};
+        const blimp_wrench_t s_big   = {BLIMP_GF_TO_N(0.40f), 0.0f, 0.0f, 0.0f};
+        blimp_mixer_apply(&q, &s_small, &act);
+        CHECK_NEAR(act.thrust_fl + act.thrust_fr, 0.0f, 1e-9);
+        blimp_mixer_apply(&q, &s_big, &act);
+        CHECK_NEAR(act.thrust_fl + act.thrust_fr, BLIMP_GF_TO_N(0.40f), 1e-6);
+
+        /* Above half a motor's worth it is clamped there by the validator
+           and by the mixer itself (a corrupted value must not silence the
+           front pair); NaN or negative falls back to 0.5 gf. */
+        q.front_deadband_n = 1.0f;
+        CHECK(!blimp_params_validate(&q));
+        CHECK_NEAR(q.front_deadband_n, 0.5f * q.motor_max_thrust_n, 1e-9);
+        q.front_deadband_n = NAN;
+        CHECK(!blimp_params_validate(&q));
+        CHECK_NEAR(q.front_deadband_n, BLIMP_GF_TO_N(0.5f), 1e-9);
+        q.front_deadband_n = -1.0f;
+        CHECK(!blimp_params_validate(&q));
+        CHECK_NEAR(q.front_deadband_n, BLIMP_GF_TO_N(0.5f), 1e-9);
+
+        blimp_params_t raw = q;                          /* unvalidated, straight to the mixer */
+        raw.front_deadband_n = 1.0f;
+        const blimp_wrench_t w_big = {0.0f, 0.0f, 0.0f, 0.12f * BLIMP_GF_TO_N(0.8f)};
+        blimp_mixer_apply(&raw, &w_big, &act);
+        CHECK(act.thrust_fr > 0.0f);                     /* 0.8 gf > half of 1 gf: passes */
+        CHECK(check_invariants(&raw, &act) == 0);
+    }
+
     /* ---- yaw is protected when surge saturates ------------------------- */
     TEST_GROUP("yaw survives a surge clamp");
     {

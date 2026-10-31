@@ -82,6 +82,15 @@ typedef struct {
     /* -- failsafe ---------------------------------------------------------- */
     float link_timeout_s;        /* no ground packet -> failsafe            */
     float max_altitude_m;        /* ceiling guard                           */
+
+    /* -- mixer (appended 2026-10-30, so every field above keeps its offset) */
+    float front_deadband_n;      /* N: a yaw difference or a surge the front
+                                  * pair is asked for below this is zero, so
+                                  * the heading loop's noise floor cannot keep
+                                  * one motor creeping (mixer.c). Scale it with
+                                  * motor_max_thrust_n: it was a fixed 0.5 gf,
+                                  * which on 1 gf of usable thrust (30 % duty)
+                                  * silenced the bench hold's whole range.   */
 } blimp_params_t;
 
 /* Fills p with the documented starting values. Never fails. */

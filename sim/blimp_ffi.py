@@ -120,6 +120,7 @@ class BlimpParams(C.Structure):
         ("prepare_settle_s", C.c_float),
         ("link_timeout_s", C.c_float),
         ("max_altitude_m", C.c_float),
+        ("front_deadband_n", C.c_float),    # core 0.2.0: the mixer's deadband, appended
     ]
 
 
@@ -319,7 +320,7 @@ class BlimpInput(C.Structure):
 # ---------------------------------------------------------------------------
 _EXPECTED_LAYOUT = {
     "BlimpPidParams": (32, {"kp": 0, "ki": 4, "kd": 8, "i_min": 12, "i_max": 16, "out_min": 20, "out_max": 24, "d_lpf_hz": 28}),
-    "BlimpParams": (180, {"front_half_span_m": 0, "cam_dz_m": 4, "max_total_thrust_n": 8, "motor_max_thrust_n": 12, "heave_budget_n": 16, "hover_thrust_n": 20, "alt": 24, "yaw": 56, "surge": 88, "pitch_damp_kd": 120, "comp_alpha_attitude": 124, "comp_alpha_alt": 128, "mag_declination_rad": 132, "use_mag": 136, "gyro_bias_tau_s": 140, "wp_touch_radius_m": 144, "wp_approach_speed_ms": 148, "wp_align_tol_rad": 152, "touch_confirm_s": 156, "search_yaw_rate": 160, "miss_timeout_s": 164, "prepare_settle_s": 168, "link_timeout_s": 172, "max_altitude_m": 176}),
+    "BlimpParams": (184, {"front_half_span_m": 0, "cam_dz_m": 4, "max_total_thrust_n": 8, "motor_max_thrust_n": 12, "heave_budget_n": 16, "hover_thrust_n": 20, "alt": 24, "yaw": 56, "surge": 88, "pitch_damp_kd": 120, "comp_alpha_attitude": 124, "comp_alpha_alt": 128, "mag_declination_rad": 132, "use_mag": 136, "gyro_bias_tau_s": 140, "wp_touch_radius_m": 144, "wp_approach_speed_ms": 148, "wp_align_tol_rad": 152, "touch_confirm_s": 156, "search_yaw_rate": 160, "miss_timeout_s": 164, "prepare_settle_s": 168, "link_timeout_s": 172, "max_altitude_m": 176, "front_deadband_n": 180}),
     "BlimpState": (56, {"roll": 0, "pitch": 4, "yaw": 8, "gyro": 12, "accel": 24, "altitude": 36, "vz": 40, "yaw_rate": 44, "t_us": 48, "attitude_valid": 52, "altitude_valid": 53}),
     "BlimpImuSample": (56, {"gyro": 0, "accel": 12, "mag": 24, "baro_alt": 36, "range_alt": 40, "t_us": 44, "gyro_valid": 48, "accel_valid": 49, "mag_valid": 50, "baro_valid": 51, "range_valid": 52}),
     "BlimpWrench": (16, {"fx": 0, "fy": 4, "fz": 8, "tz": 12}),

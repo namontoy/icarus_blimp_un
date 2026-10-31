@@ -234,7 +234,7 @@ from the ground, keeps the link alive that the hold needs, kills it from the gro
 `--max-rate`, records a capture (the wrench and the heading error in the record's setpoint
 slots) and prints overshoot, settling and the final error per step. A gain change is a `param`
 line, not a flash, since 2026-10-30. On the rope rig without the envelope the same loop runs on
-about 1/40 of the yaw inertia (2026-10-30: about 2e-4 kg·m², from the yaw kick of one surge
+about 1/60 of the yaw inertia (2026-10-30: about 1.4e-4 kg·m², from the yaw kick of one surge
 motor at 0.2 duty), so its gains there check the loop's signs, latch and delay, not the flight
 values.
 - C1, altitude alone, yaw held by the Y1 thread: setpoint steps 1.2 → 1.7 → 1.2 m. Pass: 95 %
@@ -335,8 +335,9 @@ motors cut during the capture download: write it down, it is the T2 result.
 **2. The rest of P0.** The IMU sign check with the gondola in hand (the ground station's
 Sensors panel, or the sensors line of `blimp_link.py status`): nose up, left side up, nose left
 should each give a positive rate in `core/`'s frame; note the gyro's z sign in particular, it
-decides what the yaw fit's sign means. Measure l_f, the front motors' half span (AGENTS.md puts
-the surge pair at ±20 cm, so `--half-span 0.20`, not `params.c`'s 0.10). Weigh the trim (about
+decides what the yaw fit's sign means. Measure l_f, the front motors' half span (measured
+2026-10-30: 24 cm between the shafts, so `--half-span 0.12`, not `params.c`'s 0.10; done, with
+the signs, on the rope rig, `docs/history/rig-2026-10-30.md`). Weigh the trim (about
 6 gf heavy). Then the push direction of each pair by hand, the vehicle held: `python
 software/blimp_link.py motor 0 0.5 0 0.5 --seconds 2 --limit 0.5` (the rear pair, positive), the
 same with `0 -0.5 0 -0.5`: which sign lifts, and which is stronger; then `0.5 0 0 0` and
@@ -350,7 +351,7 @@ free to turn; props on).
 
 ```
 python software/step_test.py yaw --mirror                                            # the schedule, 62 s
-python software/step_test.py yaw --mirror --go --thrust-map docs/history/pid-bench-2026-10-28/thrust-map.json --half-span 0.20
+python software/step_test.py yaw --mirror --go --thrust-map docs/history/pid-bench-2026-10-28/thrust-map.json --half-span 0.12
 ```
 
 Watch the readback follow each step in the printed lines. At the end every step and every

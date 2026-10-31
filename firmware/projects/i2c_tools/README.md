@@ -338,7 +338,7 @@ because ambient IR is what limits long-range performance (§8).
 motor -m <FL|RL|FR|RR|0-3> -t <-1..1> [-d <ms>] [--hold]
 motor --sweep -m <id> [-t <negative for reverse>] [-d <ms per step>]
 motor -s | -b
-motor [--decay slow|fast] [--deadband <percent>] [--failsafe <ms>]
+motor [--decay slow|fast] [--deadband <percent>] [--max-duty <percent>] [--failsafe <ms>]
 motor [--status]
 ```
 
@@ -353,6 +353,7 @@ motor [--status]
 | `--sweep` | Ramp one motor from 5 % to 100 % duty in 20 steps, with the deadband switched off, so you can see where it starts turning. Each step lasts `-d` ms |
 | `--decay` | PWM decay mode. Default `slow` |
 | `--deadband` | Break-away duty in percent, 0–90 |
+| `--max-duty` | Duty ceiling in percent, 10–100 (2026-10-30): commands map onto [deadband, ceiling], so 1.0 gives this duty and nothing gives more. The team's limit is 30; the default (`CONFIG_MOTOR_MAX_DUTY_PERCENT`) stays 100, which keeps a command equal to its duty for the ground station and the thrust stand. With a ceiling, set `param motor_max_thrust_n` to the thrust at the ceiling. `--sweep` lifts it while it ramps |
 | `--failsafe` | Failsafe timeout in ms. 0 disables it |
 | `--status` | Pins, PWM frequency and resolution, decay, deadband, failsafe state, standing commands. A bare `motor` prints the same |
 
@@ -545,8 +546,13 @@ any stop (`MOTOR_STOP`, `motor -s`, `hold kill`) latches KILLED until
 `hold off`. The capture's setpoint slots carry the wrench given to the motors
 and the heading error (`ctl_types.h`, `software/blimp_log.py`'s `hold_*`
 columns). Thrust becomes throttle as T / `motor_max_thrust_n`, then the
-deadband: set both for the vehicle on the bench (`param motor_max_thrust_n`,
-`motor --deadband`).
+driver maps it onto [deadband, ceiling]: on the bench set the ceiling and the
+deadband (`motor --max-duty 30 --deadband 10`), `motor_max_thrust_n` to the
+thrust at the ceiling (about 1 gf at 30 % on the 2026-10-28 scale), and
+`front_deadband_n`, the mixer's cut-off, to a few percent of it (0.05 gf):
+its default of 0.5 gf, a constant until 2026-10-30, silenced every
+correction on the rope rig. `hold_test.py --max-duty --deadband --param ...`
+does all of it before the start.
 
 ### `motormap`: each motor's name, position and sign
 

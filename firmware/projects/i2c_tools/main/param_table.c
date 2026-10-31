@@ -49,9 +49,11 @@ static const param_entry_t TABLE[] = {
     F(front_half_span_m,     0.01f,     0.50f,      "m"),
     F(cam_dz_m,             -1.50f,     1.50f,      "m"),
 
-    /* thrust budget: the upper ends are the validator's own limits */
+    /* thrust budget: the upper ends are the validator's own limits. A motor
+       gives 0.6-2 gf at the team's 30 % duty ceiling (2026-10-28 scale), and
+       motor_max_thrust_n is the thrust at the ceiling, so its floor is 0.2 gf */
     F(max_total_thrust_n,    0.01f,     RULE13_N,   "N"),
-    F(motor_max_thrust_n,    0.01f,     RULE13_N,   "N"),
+    F(motor_max_thrust_n,    0.002f,    RULE13_N,   "N"),
     F(heave_budget_n,        0.0f,      HEAVE_CAP_N, "N"),
     F(hover_thrust_n,        0.0f,      RULE11_N,   "N"),
 
@@ -106,6 +108,10 @@ static const param_entry_t TABLE[] = {
     /* failsafe */
     F(link_timeout_s,        0.1f,      10.0f,      "s"),
     F(max_altitude_m,        0.5f,      6.0f,       "m"),
+
+    /* mixer: up to 1 gf; the validator also keeps it at most half of
+       motor_max_thrust_n, so it can never silence the front pair */
+    F(front_deadband_n,      0.0f,      0.0098f,    "N"),
 };
 
 #define TABLE_LEN (sizeof(TABLE) / sizeof(TABLE[0]))

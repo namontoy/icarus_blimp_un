@@ -146,6 +146,9 @@ static int               s_res_bits;
 static int               s_freq_hz;
 static motor_decay_t     s_decay = MOTOR_DECAY_SLOW;
 static float             s_deadband = CONFIG_MOTOR_DEADBAND_PERMILLE / 1000.0f;
+/* What a command of 1.0 gives (Kconfig MOTOR_MAX_DUTY_PERCENT): commands map
+   onto [deadband, ceiling]. Always above the deadband. */
+static float             s_max_duty = CONFIG_MOTOR_MAX_DUTY_PERCENT / 100.0f;
 static float             s_cmd[MOTOR_COUNT];
 /* The throttle each pin pair was last written for by motor_write(), so
    motors_set_all() can leave a bridge alone when its command has not changed.
@@ -227,7 +230,9 @@ static void motor_write(motor_id_t m, float throttle)
            controller's output range produces duty that only warms the
            winding, and the plant looks dead until the command clears
            break-away - a nonlinearity the integrator would wind up against. */
-        float duty = s_deadband + (1.0f - s_deadband) * mag;
+        /* ... and onto [deadband, ceiling] when a duty ceiling is set: a
+           full command is then the ceiling, never more. */
+        float duty = s_deadband + (s_max_duty - s_deadband) * mag;
         uint32_t d = (uint32_t)lrintf(duty * (float)s_duty_full);
         if (d > s_duty_full) {
             d = s_duty_full;
@@ -575,10 +580,10 @@ esp_err_t motors_init(void)
                  o + 1, s_pins[o].gpio_in1, s_pins[o].gpio_in2, s_pins[o].where,
                  s_names[s_map.name[o]], s_names[s_map.position[o]], s_map.sign[o] > 0 ? '+' : '-');
     }
-    ESP_LOGI(TAG, "PWM %" PRIu32 " Hz (asked %d), %d bit, %s decay, deadband %.1f%%",
+    ESP_LOGI(TAG, "PWM %" PRIu32 " Hz (asked %d), %d bit, %s decay, deadband %.1f%%, ceiling %.0f%%",
              actual, s_freq_hz, s_res_bits,
              s_decay == MOTOR_DECAY_SLOW ? "slow" : "fast",
-             s_deadband * 100.0f);
+             s_deadband * 100.0f, s_max_duty * 100.0f);
     if (s_fs_timeout_ms > 0) {
         ESP_LOGI(TAG, "failsafe armed only while a motor is driven, then coasts "
                       "all of them after %d ms without a command", s_fs_timeout_ms);
@@ -822,7 +827,7 @@ esp_err_t motors_set_decay(motor_decay_t mode)
 
 esp_err_t motors_set_deadband(float deadband)
 {
-    if (!isfinite(deadband) || deadband < 0.0f || deadband > 0.9f) {
+    if (!isfinite(deadband) || deadband < 0.0f || deadband > 0.9f || deadband >= s_max_duty) {
         return ESP_ERR_INVALID_ARG;
     }
     if (!s_ready) {
@@ -843,6 +848,31 @@ float motors_get_deadband(void)
     return s_deadband;
 }
 
+esp_err_t motors_set_max_duty(float max_duty)
+{
+    if (!isfinite(max_duty) || max_duty < 0.1f || max_duty > 1.0f || max_duty <= s_deadband) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!s_ready) {
+        s_max_duty = max_duty;
+        return ESP_OK;
+    }
+    /* Re-applied at once, as the deadband is: a lower ceiling must take
+       effect on a motor that is already running, not at its next command. */
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_max_duty = max_duty;
+    for (int m = 0; m < MOTOR_COUNT; m++) {
+        motor_write((motor_id_t)m, s_cmd[m]);
+    }
+    xSemaphoreGive(s_lock);
+    return ESP_OK;
+}
+
+float motors_get_max_duty(void)
+{
+    return s_max_duty;
+}
+
 /* --------------------------------------------------------------- console */
 
 static struct {
@@ -855,6 +885,7 @@ static struct {
     struct arg_lit *sweep;
     struct arg_str *decay;
     struct arg_dbl *deadband;
+    struct arg_dbl *max_duty;
     struct arg_int *failsafe;
     struct arg_lit *status;
     struct arg_end *end;
@@ -877,10 +908,10 @@ static int parse_motor_id(const char *s)
 static void print_status(void)
 {
     printf("PWM %" PRIu32 " Hz, %d bit (%" PRIu32 " steps), %s decay, "
-           "deadband %.1f%%\n",
+           "deadband %.1f%%, duty ceiling %.0f%%\n",
            ledc_get_freq(LEDC_LOW_SPEED_MODE, LEDC_TIMER_0), s_res_bits,
            s_duty_full, s_decay == MOTOR_DECAY_SLOW ? "slow" : "fast",
-           s_deadband * 100.0f);
+           s_deadband * 100.0f, s_max_duty * 100.0f);
     if (s_fs_timeout_ms <= 0) {
         printf("failsafe off\n");
     } else if (s_fs_tripped) {
@@ -907,7 +938,7 @@ static void print_status(void)
         snprintf(pins, sizeof(pins), "%d/%d", s_pins[o].gpio_in1, s_pins[o].gpio_in2);
         float mag = fabsf(s_cmd[m]);
         float duty = (mag < MOTOR_ZERO_EPS) ? 0.0f
-                   : (s_deadband + (1.0f - s_deadband) * mag) * 100.0f;
+                   : (s_deadband + (s_max_duty - s_deadband) * mag) * 100.0f;
         printf("%-6s %-7d %-12s %-9s %-9s %-5c %+10.3f %9.1f%%\n",
                s_names[m], o + 1, s_pins[o].where, pins, s_names[s_map.position[o]],
                s_map.sign[o] > 0 ? '+' : '-', s_cmd[m], duty);
@@ -932,16 +963,19 @@ static void run_for(int ms)
  * which the prop breaks away can simply be read off. That number is the
  * deadband: feed it back with --deadband.
  *
- * The deadband mapping is removed for the duration, because measuring
- * break-away through the correction that is supposed to compensate for it
- * would just return the correction.
+ * The deadband mapping and the duty ceiling are removed for the duration,
+ * because measuring break-away through the correction that is supposed to
+ * compensate for it would just return the correction, and the printed duty
+ * must be the duty.
  */
 static void run_sweep(motor_id_t m, bool reverse, int dwell_ms)
 {
     const int steps = 20;
     float saved = s_deadband;
+    float saved_max = s_max_duty;
 
     motors_set_deadband(0.0f);
+    motors_set_max_duty(1.0f);
     printf("Ramping motor_%s %s in %d steps, %d ms each.\n",
            s_names[m], reverse ? "reverse" : "forward", steps, dwell_ms);
     printf("Watch the prop and note the first step where it turns on its own.\n\n");
@@ -958,6 +992,7 @@ static void run_sweep(motor_id_t m, bool reverse, int dwell_ms)
         }
     }
     motors_coast();
+    motors_set_max_duty(saved_max);
     motors_set_deadband(saved);
     printf("\nStopped. Set the break-away duty with: motor --deadband <percent>\n");
 }
@@ -1006,10 +1041,20 @@ static int do_motor_cmd(int argc, char **argv)
         motors_set_decay(mode);
         printf("decay mode: %s\n", d);
     }
+    if (motor_args.max_duty->count) {
+        float mx = (float)motor_args.max_duty->dval[0] / 100.0f;
+        if (motors_set_max_duty(mx) != ESP_OK) {
+            printf("--max-duty takes 10..100 (percent), above the deadband (%.1f%%)\n",
+                   s_deadband * 100.0f);
+            return 1;
+        }
+        printf("duty ceiling: %.0f%% (a command of 1.0 gives this duty)\n", mx * 100.0f);
+    }
     if (motor_args.deadband->count) {
         float db = (float)motor_args.deadband->dval[0] / 100.0f;
         if (motors_set_deadband(db) != ESP_OK) {
-            ESP_LOGE(TAG, "--deadband takes 0..90 (percent)");
+            printf("--deadband takes 0..90 (percent), below the duty ceiling (%.0f%%)\n",
+                   s_max_duty * 100.0f);
             return 1;
         }
         printf("deadband: %.1f%%\n", db * 100.0f);
@@ -1107,6 +1152,7 @@ void register_motor(void)
     motor_args.sweep    = arg_lit0(NULL, "sweep", "Ramp one motor to find its break-away duty");
     motor_args.decay    = arg_str0(NULL, "decay", "<slow|fast>", "PWM decay mode (default slow)");
     motor_args.deadband = arg_dbl0(NULL, "deadband", "<percent>", "Break-away duty, 0..90");
+    motor_args.max_duty = arg_dbl0(NULL, "max-duty", "<percent>", "Duty ceiling: what a command of 1.0 gives, 10..100");
     motor_args.failsafe = arg_int0(NULL, "failsafe", "<ms>", "Coast if idle this long; 0 disables");
     motor_args.status   = arg_lit0(NULL, "status", "Print pins, PWM and standing commands");
     motor_args.end      = arg_end(2);

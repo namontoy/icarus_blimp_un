@@ -113,6 +113,8 @@ def run(args):
         print('param before the start: %s' % ' '.join(args.param))
     if args.deadband is not None:
         print('motor deadband before the start: %.1f %%' % args.deadband)
+    if args.max_duty is not None:
+        print('motor duty ceiling before the start: %.0f %%' % args.max_duty)
     if not args.go:
         print('dry run. PROPS ON for the real thing: the gondola on its swivel, nothing near the props, '
               'STOP within reach; then add --go')
@@ -142,12 +144,29 @@ def run(args):
             log('param %s %s: %s' % (name, value, reply.strip().splitlines()[0] if reply.strip() else '?'))
             if '(was ' not in reply and 'is already' not in reply:
                 sys.exit('param %s was not set; nothing started' % p)
-        if args.deadband is not None:
-            log(console(con, 'motor --deadband %g' % args.deadband).strip())
+        if args.max_duty is not None or args.deadband is not None:
+            opts = ''.join([' --max-duty %g' % args.max_duty if args.max_duty is not None else '',
+                            ' --deadband %g' % args.deadband if args.deadband is not None else ''])
+            reply = console(con, 'motor' + opts)
+            log(reply.strip())
+            if 'takes' in reply:
+                sys.exit('motor%s was refused; nothing started' % opts)
         params = bl.read_params(con)
-        state = console(con, 'hold')
-        if re.search(r'estimator: converging', state):
-            sys.exit('the estimator is still converging (it needs the gondola still for 60 s):\n' + state)
+        # core/ arms only after 60 s of stillness; wait for it rather than
+        # refuse, printing the count, up to --wait seconds (hands off meanwhile)
+        t_wait = time.monotonic()
+        while True:
+            state = console(con, 'hold')
+            m = re.search(r'estimator: (\w+) \(still (\d+) of 60 s\)', state)
+            if m and m.group(1) == 'converged':
+                break
+            if time.monotonic() - t_wait > args.wait:
+                sys.exit('the estimator did not converge in %.0f s (it needs the gondola still for 60 s; '
+                         'a hand on it, or the ToF covered, resets the count):\n%s' % (args.wait, state))
+            print('\rwaiting for the gondola to be still: %s of 60 s ' % (m.group(2) if m else '?'), end='',
+                  flush=True)
+            time.sleep(1.0)
+        print()
 
         cap = bl.CaptureClient(link)
         if cap.info()['state'] == 1:
@@ -251,8 +270,11 @@ def main(argv=None):
     ap.add_argument('--dwell', type=float, default=8.0, help='s at each setpoint (default %(default)s)')
     ap.add_argument('--param', nargs='*', default=[], metavar='NAME=VALUE', help="'param' sets before the start")
     ap.add_argument('--deadband', type=float, help="'motor --deadband' before the start, percent")
+    ap.add_argument('--max-duty', type=float, help="'motor --max-duty' before the start, percent (the team: 30)")
     ap.add_argument('--max-rate', type=float, default=120.0, help='kill above this |gyro|, deg/s (default %(default)s)')
     ap.add_argument('--poll', type=float, default=1.0, help="s between 'hold' status lines (default %(default)s)")
+    ap.add_argument('--wait', type=float, default=90.0,
+                    help="s to wait for core/'s estimator to converge before giving up (default %(default)s)")
     ap.add_argument('--folder', default='captures')
     ap.add_argument('--out', help='the .bin (default <folder>/hold-heading-<date>.bin)')
     ap.add_argument('--notes', default='')

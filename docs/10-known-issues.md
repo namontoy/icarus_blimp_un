@@ -74,10 +74,21 @@ with it, open:
   the motors' dead band would go unseen. Reasoned from the code, not measured; a `core/` change
   (no bias learning while armed, or only with the motors off) when the bench shows it.
 - **The thrust chain is linear**: the hold turns `core/`'s newtons into throttle as
-  T / `motor_max_thrust_n` and then the driver's deadband, against a measured F(u) that is close
-  to quadratic, so part duty delivers less than asked (about half at mid duty with the 2026-10-28
-  curves). Safe for Rule 13, a gain error for the loops; the per-motor thrust map (plan P0) is the
-  fix.
+  T / `motor_max_thrust_n` and then the driver's [deadband, ceiling], against a measured F(u)
+  that is close to quadratic. Over full duty, part duty delivers less than asked (about half at
+  mid duty with the 2026-10-28 curves); under the team's 30 % ceiling, with the 10 % deadband
+  and `motor_max_thrust_n` the thrust at the ceiling, the map is close to linear over the range
+  used. Safe for Rule 13 either way, a gain error for the loops; the per-motor thrust map (plan
+  P0, FL and FR at 30 % first) is the fix.
+
+**2026-10-30, the first hold on the rope rig gave no thrust at all.** The hold armed and tracked
+a 30° step's error, and every motor stayed at zero: `core/`'s mixer dropped any yaw difference
+or surge under a fixed 0.5 gf, sized for the 35 gf placeholder motors, and the rig's small gains
+asked for 0.26 gf. Reproduced on the host through the DLL. Fixed the same day: the cut-off is
+`blimp_params_t.front_deadband_n` (default still 0.5 gf, so the simulator is unchanged; the
+validator and the mixer keep it at most half of `motor_max_thrust_n`), the motor driver has a
+duty ceiling (`motor --max-duty`, the team's 30 %, default 100), and `param` accepts a
+`motor_max_thrust_n` down to 0.2 gf, the thrust at that ceiling being about 1 gf.
 
 **2026-10-29, the link and the window reviewed.** Four reviewers and the team settled how the
 window and the link may affect the motors: `docs/link-robustness-review.md`. The ground station

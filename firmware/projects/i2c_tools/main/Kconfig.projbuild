@@ -150,6 +150,23 @@ menu "Motor driver (DRV8833)"
             Measure the real value per motor with 'motor -m FL --sweep'
             before you set a non-zero one.
 
+    config MOTOR_MAX_DUTY_PERCENT
+        int "Duty ceiling, percent: what a command of 1.0 gives"
+        range 10 100
+        default 100
+        help
+            Commands are mapped onto [deadband, ceiling] instead of
+            [deadband, 100 %], so a full command is this duty and nothing
+            can exceed it. The team runs the motors at 30 % at most (asked
+            2026-10-30, to spare the electronics): 'motor --max-duty 30'
+            sets it until the next reset, and the bench hold sets it with
+            'software/hold_test.py --max-duty 30'. With a ceiling, core/'s
+            motor_max_thrust_n must be the thrust AT the ceiling (about 1 gf
+            at 30 % on the 2026-10-28 scale), so that core/'s idea of a
+            full command and the motor's agree. 100 keeps a command equal
+            to its duty, which is what the ground station's sliders, the
+            readback and the thrust stand (software/thrust_map.py) assume.
+
     config MOTOR_FAILSAFE_MS
         int "Coast all motors after this long with no command; 0 disables"
         range 0 60000

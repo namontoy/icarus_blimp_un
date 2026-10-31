@@ -24,7 +24,8 @@ CLAUDE.md, and others). Keep it tool-neutral; tool-specific notes belong in that
   measured 58 x 45 degree lens) as the perception sensor. The lidar was ruled out as too heavy.
   Details: CLAUDE.md "Hardware facts that shape code" and docs/sensor-bringup-report.md.
 - Four fixed brushed motors, named FL, FR, RL, RR in the driver, the link packets and `core/`.
-  Surge pair FL, FR: push along +x, on the rear bar at +/-20 cm (surge, and yaw by running one
+  Surge pair FL, FR: push along +x, on the rear bar at +/-12 cm (24 cm between the shafts,
+  measured 2026-10-30; `params.c` and the sim scene still say 0.10) (surge, and yaw by running one
   faster). Heave pair RL, RR: push along +z, on the same bar at +/-5.5 cm (heave; their
   difference is a static roll trim at most). No servos, no sideways force. The DRV8833s allow
   reverse thrust, but `core/`'s mixer still assumes one-way motors; changing that is a core

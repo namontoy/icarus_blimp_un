@@ -49,6 +49,7 @@
                                      * only the trim, so do not overshoot */
 #define HOVER_TRIM_GF        6.0f   /* flown this much heavy (Rule 11 allows
                                      * 10); rear pair holds it up            */
+#define FRONT_DEADBAND_N     BLIMP_GF_TO_N(0.5f)   /* see the mixer block below */
 
 void blimp_params_defaults(blimp_params_t *p)
 {
@@ -141,6 +142,14 @@ void blimp_params_defaults(blimp_params_t *p)
     /* ---- failsafe --------------------------------------------------------- */
     p->link_timeout_s = 1.0f;
     p->max_altitude_m = 3.5f;
+
+    /* ---- mixer ------------------------------------------------------------ */
+    /* 0.5 gf, the value the mixer had as a constant until 2026-10-30, so the
+     * simulator flies as before: about 1.4 % of the 35 gf placeholder. On the
+     * real motors (about 1 gf at the 30 % duty the team caps them at, the
+     * 2026-10-28 scale) that is half the range; set it with the measured
+     * motor_max_thrust_n, a few percent of it. */
+    p->front_deadband_n = FRONT_DEADBAND_N;
 }
 
 /* Clamp anything that would break a rule or produce undefined behaviour.
@@ -215,6 +224,16 @@ bool blimp_params_validate(blimp_params_t *p)
     }
     if (!isfinite(p->link_timeout_s) || p->link_timeout_s <= 0.0f) {
         p->link_timeout_s = 1.0f;
+        ok = false;
+    }
+    /* A deadband at or above the per-motor cap would silence the front pair
+     * altogether; negative or non-finite means the default. */
+    if (!isfinite(p->front_deadband_n) || p->front_deadband_n < 0.0f) {
+        p->front_deadband_n = FRONT_DEADBAND_N;
+        ok = false;
+    }
+    if (p->front_deadband_n > 0.5f * p->motor_max_thrust_n) {
+        p->front_deadband_n = 0.5f * p->motor_max_thrust_n;
         ok = false;
     }
 

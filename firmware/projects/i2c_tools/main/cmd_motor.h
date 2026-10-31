@@ -111,6 +111,16 @@ esp_err_t motors_set_deadband(float deadband);
 float motors_get_deadband(void);
 
 /**
+ * Duty ceiling, 0.1 to 1.0 and above the deadband: commands are mapped onto
+ * [deadband, ceiling], so a command of 1.0 gives this duty and nothing gives
+ * more (Kconfig MOTOR_MAX_DUTY_PERCENT, 100 by default; the team's limit is
+ * 30 %). With a ceiling below 1, core/'s motor_max_thrust_n must be the
+ * thrust at the ceiling, not at full duty.
+ */
+esp_err_t motors_set_max_duty(float max_duty);
+float motors_get_max_duty(void);
+
+/**
  * Coast every motor if motors_failsafe_feed() has not been called for
  * timeout_ms. 0 disables it.
  *

@@ -28,14 +28,15 @@
  * module that sits last before the motors. */
 #define BLIMP_MIXER_DEMAND_ABS_MAX 1.0e6f
 
-/* Deadbands on the front pair, in newtons. A brushed motor below ~0.5 gf of
- * commanded thrust does not turn anyway (motor.c's duty deadband), and
- * without this a yaw demand of a few micro-newton-metres from the heading
- * loop's noise floor would, through the yaw-floor rule, keep one front motor
- * creeping and walk the vehicle forward while it is supposed to be holding
- * station (observed in simulation: 0.5 m of drift during PREPARE). */
-#define BLIMP_MIXER_YAW_DEADBAND_N   BLIMP_GF_TO_N(0.5f)
-#define BLIMP_MIXER_SURGE_DEADBAND_N BLIMP_GF_TO_N(0.5f)
+/* Deadband on the front pair, in newtons: params' front_deadband_n since
+ * 2026-10-30 (a fixed 0.5 gf before). Without it a yaw demand of a few
+ * micro-newton-metres from the heading loop's noise floor would, through the
+ * yaw-floor rule, keep one front motor creeping and walk the vehicle forward
+ * while it is supposed to be holding station (observed in simulation: 0.5 m
+ * of drift during PREPARE). As a constant it was wrong for the real motors:
+ * 0.5 gf is half of what one gives at the team's 30 % duty cap, and on the
+ * rope rig it silenced every correction the bench hold asked for. */
+#define BLIMP_MIXER_FALLBACK_DEADBAND_N BLIMP_GF_TO_N(0.5f)
 
 /* Fallbacks if a params field is NaN/absent. Mirror params.c's defaults. */
 #define BLIMP_MIXER_FALLBACK_L_F        0.10f
@@ -69,6 +70,7 @@ typedef struct {
     float max_total;    /* > 0                                  */
     float motor_max;    /* > 0                                  */
     float heave_budget; /* 0 <= heave_budget <= max_total       */
+    float deadband;     /* 0 <= deadband <= motor_max / 2       */
 } blimp_mixer_safe_params_t;
 
 static blimp_mixer_safe_params_t sanitize_params(const blimp_params_t *p)
@@ -93,6 +95,12 @@ static blimp_mixer_safe_params_t sanitize_params(const blimp_params_t *p)
                          : BLIMP_MIXER_FALLBACK_HEAVE_FRAC * s.max_total;
     if (s.heave_budget > s.max_total) {
         s.heave_budget = s.max_total;
+    }
+
+    s.deadband = (p && isfinite(p->front_deadband_n) && p->front_deadband_n >= 0.0f)
+                     ? p->front_deadband_n : BLIMP_MIXER_FALLBACK_DEADBAND_N;
+    if (s.deadband > 0.5f * s.motor_max) {
+        s.deadband = 0.5f * s.motor_max;
     }
     return s;
 }
@@ -163,7 +171,7 @@ void blimp_mixer_apply(const blimp_params_t *p,
 
     float d = clampf(tz / sp.l_f, -BLIMP_MIXER_DEMAND_ABS_MAX,
                      BLIMP_MIXER_DEMAND_ABS_MAX);
-    if (fabsf(d) < BLIMP_MIXER_YAW_DEADBAND_N) {
+    if (fabsf(d) < sp.deadband) {
         d = 0.0f;
     }
     bool yaw_clipped = false;
@@ -174,7 +182,7 @@ void blimp_mixer_apply(const blimp_params_t *p,
     }
 
     float surge = (fx > 0.0f) ? fx : 0.0f;   /* no reverse thrust exists */
-    if (surge < BLIMP_MIXER_SURGE_DEADBAND_N) {
+    if (surge < sp.deadband) {
         surge = 0.0f;
     }
     bool surge_clipped = false;
