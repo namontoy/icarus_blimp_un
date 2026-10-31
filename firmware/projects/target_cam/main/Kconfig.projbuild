@@ -14,6 +14,27 @@ menu "Target Camera Configuration"
             bool "Seeed XIAO ESP32S3 Sense"
     endchoice
 
+    config TARGETCAM_S3_UART
+        bool "Copy the CSV rows to the flight board on UART1 (TX IO14, RX IO13)"
+        depends on TARGETCAM_BOARD_AI_THINKER
+        default y
+        help
+            Every CSV row that goes to the PC on UART0 also goes out on UART1,
+            TX IO14, for the S3 to read. Only data rows: no '#' lines, frames
+            or blob records. The 's' command stops the PC copy only; the S3
+            copy always runs. RX IO13 is configured with a pull-up but nothing
+            reads it yet. This is the stopgap until the framed link protocol
+            in docs/inter-board-link-plan.md (Phase 2) replaces it.
+
+    config TARGETCAM_S3_UART_BAUD
+        int "Flight-board UART baud rate"
+        depends on TARGETCAM_S3_UART
+        range 9600 2000000
+        default 115200
+        help
+            A ~200-byte row takes ~17 ms on the wire at 115200, well within
+            the 80 ms frame period.
+
     config TARGETCAM_FRAME_PERIOD_MS
         int "Frame period (milliseconds)"
         range 33 1000

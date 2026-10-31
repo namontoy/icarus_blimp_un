@@ -2,7 +2,8 @@
  * Forward-looking colour-target detection on an ESP32-CAM.
  *
  * Grabs paced RGB565 frames, finds the largest blob of one configured colour,
- * and streams its bearing, size and (optionally) range as CSV on UART0. Written
+ * and streams its bearing, size and (optionally) range as CSV on UART0, with a
+ * copy of every row on UART1 for the flight board (TARGETCAM_S3_UART). Written
  * for the blimp's nose camera: point it at a balloon, ball or painted tag and
  * the flight board gets "target is 6.2 deg right, 1.4 deg up, ~3.1 m away".
  *
@@ -27,6 +28,7 @@
  *     scene is lit; which is better on this airframe is a measurement, not a
  *     calculation.
  */
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -187,6 +189,12 @@ static const char *s_cnn_state = "none";
    CSV row. The row cannot carry its own (the print is part of it), so each row
    reports the one before. Against the 80 ms period, this is the margin. */
 static int64_t s_loop_us;
+
+/* UART1 to the flight board. Its state is in the banner, so a board whose
+   link failed to start says so on every '?'. */
+#define S3_UART         UART_NUM_1
+static const char *s_s3_state = "off in this build";
+static bool s_s3_ok;
 
 static void *s_work;                /* blob_detect workspace, allocated once */
 
@@ -596,6 +604,55 @@ static void print_cfg(void)
 
 /* ------------------------------------------------------------------ */
 
+/* Start UART1 to the S3. A failure is reported, not fatal: the PC link on
+   UART0 is how the failure gets diagnosed, so it must survive. */
+static void s3_uart_init(void)
+{
+#if CONFIG_TARGETCAM_S3_UART
+    const uart_config_t cfg = {
+        .baud_rate  = CONFIG_TARGETCAM_S3_UART_BAUD,
+        .data_bits  = UART_DATA_8_BITS,
+        .parity     = UART_PARITY_DISABLE,
+        .stop_bits  = UART_STOP_BITS_1,
+        .flow_ctrl  = UART_HW_FLOWCTRL_DISABLE,
+        .source_clk = UART_SCLK_DEFAULT,
+    };
+    /* The 1 kB TX ring holds several rows, so uart_write_bytes() copies and
+       returns: the S3 copy costs the loop no wire time. Nothing reads RX yet;
+       256 B is the smallest buffer the driver accepts (it must exceed the
+       128 B FIFO). */
+    esp_err_t err = uart_driver_install(S3_UART, 256, 1024, 0, NULL, 0);
+    if (err == ESP_OK) err = uart_param_config(S3_UART, &cfg);
+    if (err == ESP_OK) err = uart_set_pin(S3_UART, S3_LINK_PIN_TX, S3_LINK_PIN_RX,
+                                          UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+    /* An unconnected RX must idle high, or noise reads as a break storm. After
+       uart_set_pin(), which configures the pad. */
+    if (err == ESP_OK) err = gpio_pullup_en(S3_LINK_PIN_RX);
+    if (err != ESP_OK) {
+        static char why[48];
+        snprintf(why, sizeof why, "FAILED (%s), rows go to the PC only",
+                 esp_err_to_name(err));
+        s_s3_state = why;
+        return;
+    }
+    s_s3_ok = true;
+    s_s3_state = "every CSV row copied ('s' does not stop it)";
+#endif
+}
+
+/* Append to the CSV row. Clamped, so the worst case truncates the row instead
+   of running off the buffer; the S3's parser refuses a short row by csv_v. */
+static void row_add(char *row, size_t size, size_t *at, const char *fmt, ...)
+{
+    if (*at >= size - 1) return;
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(row + *at, size - *at, fmt, ap);
+    va_end(ap);
+    if (n > 0) *at += (size_t)n;
+    if (*at > size - 1) *at = size - 1;
+}
+
 static void print_banner(void)
 {
     float f = focal_px();
@@ -637,6 +694,12 @@ static void print_banner(void)
            strcmp(st, "saved") == 0    ? "saved (loaded from flash)" :
            strcmp(st, "defaults") == 0 ? "defaults (nothing saved in flash)" :
                                          "modified (not saved: !save keeps them)");
+#if CONFIG_TARGETCAM_S3_UART
+    printf("# s3 link      UART1 %d baud, TX IO%d RX IO%d: %s\n",
+           CONFIG_TARGETCAM_S3_UART_BAUD, S3_LINK_PIN_TX, S3_LINK_PIN_RX, s_s3_state);
+#else
+    printf("# s3 link      %s\n", s_s3_state);
+#endif
     printf("# commands     p<red|blue|green|orange> preset | c calibrate on centre | "
            "H<deg> hue | T<deg> tol | S<0-255> sat | V<0-255> val\n");
     printf("#              a<px> area | d<mm> size | F<deg> h-FOV |");
@@ -1458,6 +1521,7 @@ void app_main(void)
     /* Take over UART0 so reads can be non-blocking. stdout keeps working. */
     ESP_ERROR_CHECK(uart_driver_install(UART_NUM_0, 256, 0, 0, NULL, 0));
     link_init();
+    s3_uart_init();
 
     escape_hatch_delay();
 
@@ -1633,27 +1697,42 @@ void app_main(void)
             fill = (float)r.b[0].area / (float)(w * h);
         }
 
-        if (s_streaming) {
-            printf("%lld,%d,%.2f,%.2f,%.2f,%.2f,%d,%d,%d,%.2f,%.0f,%d,%d,%d",
-                   capture_us / 1000, ok, r.b[0].cx, r.b[0].cy, az, el,
-                   r.b[0].area, w, h, fill, range_mm, r.b[0].clipped,
-                   r.n_blobs, r.matched);
-            /* The other balloons in view, largest (usually nearest) first.
-               Absent ones print as 0,0,-1. */
-            for (int k = 1; k < BLOB_MAX_REPORT; k++) {
-                float a2 = 0.0f, e2 = 0.0f, r2 = -1.0f;
-                if (k < r.n_report) {
-                    blob_geom(&r.b[k], &a2, &e2, &r2);
-                }
-                printf(",%.2f,%.2f,%.0f", a2, e2, r2);
+        /* Built once, sent twice: the PC copy follows 's', the S3 copy does
+           not. The longest row possible is under 400 B. Static, not on the
+           stack: this loop is app_main, whose 3584 B stack also carries
+           esp_camera_init(), and 512 B more overflowed it in the SCCB setup
+           (bench, 2026-10-30). */
+        static char row[512];
+        size_t at = 0;
+        row_add(row, sizeof row, &at, "%lld,%d,%.2f,%.2f,%.2f,%.2f,%d,%d,%d,%.2f,%.0f,%d,%d,%d",
+                capture_us / 1000, ok, r.b[0].cx, r.b[0].cy, az, el,
+                r.b[0].area, w, h, fill, range_mm, r.b[0].clipped,
+                r.n_blobs, r.matched);
+        /* The other balloons in view, largest (usually nearest) first.
+           Absent ones print as 0,0,-1. */
+        for (int k = 1; k < BLOB_MAX_REPORT; k++) {
+            float a2 = 0.0f, e2 = 0.0f, r2 = -1.0f;
+            if (k < r.n_report) {
+                blob_geom(&r.b[k], &a2, &e2, &r2);
             }
-            printf(",%.1f,%lld", dt_ms, proc_us);
-            /* v2. %.3g keeps an absent confidence at two bytes ("-1"). */
-            printf(",%d,%.3g,%.3g,%.3g,%.3g,%ld,%ld,%ld,%lld,%d\n", tr.stage,
-                   tr.conf[0], tr.conf[1], tr.conf[2], tr.conf[3],
-                   (long)tr.t_px_us, (long)tr.t_b_us, (long)tr.t_c_us,
-                   s_loop_us, CSV_VERSION);
+            row_add(row, sizeof row, &at, ",%.2f,%.2f,%.0f", a2, e2, r2);
+        }
+        row_add(row, sizeof row, &at, ",%.1f,%lld", dt_ms, proc_us);
+        /* v2. %.3g keeps an absent confidence at two bytes ("-1"). */
+        row_add(row, sizeof row, &at, ",%d,%.3g,%.3g,%.3g,%.3g,%ld,%ld,%ld,%lld,%d",
+                tr.stage, tr.conf[0], tr.conf[1], tr.conf[2], tr.conf[3],
+                (long)tr.t_px_us, (long)tr.t_b_us, (long)tr.t_c_us,
+                s_loop_us, CSV_VERSION);
+
+        if (s_streaming) {
+            printf("%s\n", row);
             fflush(stdout);
+        }
+        if (s_s3_ok) {
+            /* CRLF, the bytes the PC sees on UART0 (the console adds the CR
+               there), so one parser reads either port. */
+            uart_write_bytes(S3_UART, row, at);
+            uart_write_bytes(S3_UART, "\r\n", 2);
         }
         send_blob_records(&tr, n_rec, capture_us / 1000);
         serve_commands();

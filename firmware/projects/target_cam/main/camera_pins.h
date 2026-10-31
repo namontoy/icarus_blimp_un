@@ -30,6 +30,14 @@
    GPIO4 also floats bright on some boards, so we drive it low explicitly. */
 #define CAM_PIN_FLASH_LED 4
 
+/* UART1 to the flight board (S3), per the Cableado: the camera receives on
+   IO13 and transmits on IO14. They are the microSD slot's DAT3 and CLK, so the
+   slot must stay empty, and the only header pins that are not boot straps
+   (docs/inter-board-link-plan.md). The other boards use 13 and 14 for camera
+   data, so they have no flight link. */
+#define S3_LINK_PIN_RX  13
+#define S3_LINK_PIN_TX  14
+
 #elif defined(CONFIG_TARGETCAM_BOARD_ESP_EYE)
 
 #define CAM_PIN_PWDN    -1

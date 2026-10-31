@@ -4,8 +4,9 @@ The blimp's nose camera. Its job in the IAR-LARC 2026 race is to find the
 **red mylar waypoint balloons** (22", 50–60 cm, centre 2 m above the floor, four
 of them on a 4 m × 2 m rectangle) so the airframe can steer from one to the
 next. It reports up to **four blobs** of one colour, largest (usually nearest)
-first, and streams them as CSV on UART0: bearing left/right and up/down,
-apparent size, and range from the known 550 mm balloon size.
+first, and streams them as CSV on UART0, with a copy of every row on UART1
+(TX IO14) for the flight board: bearing left/right and up/down, apparent
+size, and range from the known 550 mm balloon size.
 
 Four colour presets are built in, for bench testing with whatever balloons
 are to hand: **red** (the competition colour, default), **blue**, **green**
@@ -78,7 +79,8 @@ OV2640 ──RGB565 QQVGA──> frame buffer (DRAM)
                              │
    az/el from pinhole model, range = 550 mm · f / larger box side
                              │
-                    CSV line on UART0 @ 115200
+                    CSV line on UART0 @ 115200 (PC)
+                    same line on UART1 @ 115200, TX IO14 (S3)
 ```
 
 ### The edge-pixel fix (found by the host suite)
@@ -406,6 +408,28 @@ column (`csv_v`), never by guessing: a 35-column row whose `csv_v` is not 2 is
 refused. Readers that know both: `tcview` and `host/target_monitor.py`. The
 S3 reader is to be written against v2.
 
+### Copy to the flight board (UART1)
+
+On the AI-Thinker board, every data row also goes out on **UART1, TX IO14,
+115200 8N1, CRLF**, so the S3 can read it (`TARGETCAM_S3_UART`, on by default;
+baud `TARGETCAM_S3_UART_BAUD`). Wiring follows the Cableado: S3 GP6 ← 470 Ω ←
+IO14, and S3 GP2 → 470 Ω → IO13. Things to know:
+
+- **Only data rows.** No `#` comments, `#!` frames or blob records, no boot
+  log (that stays on UART0). A line that does not start with a digit is not
+  a row.
+- **`s` does not stop it.** `s` silences the PC copy only.
+- **IO13 (RX) is configured with a pull-up and not read yet.** Commands still
+  come only from UART0.
+- **The microSD slot must stay empty.** IO13 and IO14 are its DAT3 and CLK.
+- The boot banner, and `?`, print `# s3 link` with the state: copying, or
+  `FAILED (<error>)`, in which case rows go to the PC only.
+- IO14 can toggle while the chip boots, before the firmware takes it over, so
+  the S3 should discard anything before the first complete row.
+
+This is a stopgap. The framed link protocol in
+`docs/inter-board-link-plan.md` (Phase 2) is meant to replace it.
+
 | Field | Meaning |
 |---|---|
 | `ok` | **0 means no target, not a target dead ahead.** All position fields are 0 and must be ignored. |
@@ -574,6 +598,7 @@ measured distances (see the checklist).
 5. **One target colour at a time**, up to four blobs. Tracking a particular
    balloon across frames, and knowing which waypoint is next, is the
    navigator's job on the S3.
-6. **Two cameras, two UARTs.** optflow_cam and target_cam each stream on their
-   own UART0. The flight board needs two serial inputs, or the two streams
-   must be merged.
+6. **Two cameras, two UARTs.** target_cam copies its rows to UART1 (IO14) for
+   the S3; optflow_cam still streams on UART0 only. The flight board needs two
+   serial inputs, or the two streams must be merged. The S3 side of the link
+   (UART1 RX on GP6) is not written yet.
