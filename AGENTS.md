@@ -40,12 +40,14 @@ CLAUDE.md, and others). Keep it tool-neutral; tool-specific notes belong in that
 - `core/`: portable C11 flight controller. `blimp_step()` in `core/include/blimp/blimp.h` is the
   entire controller; tests are `core/tests/test_<module>.c`.
 - `firmware/projects/i2c_tools/`: the live ESP-IDF project for the ESP32-S3-Zero: sensor and motor
-  drivers, Wi-Fi/UDP link, console, and since 2026-10-27 the skeleton of the fixed-rate control
-  task (`main/ctl_task.c`, middle stages empty) with the capture of its records
-  (`main/capture.c`, in PSRAM, fetched over the link); plan and increments in
-  `docs/control-loop-plan.md`, esp-drone reuse in `docs/reuse_log.md`. Once its stages are
-  filled, it calls `blimp_step()`. Since 2026-10-30 it compiles `core/` as a component, and
-  the `param` console command (`main/cmd_param.c`) reads and sets `blimp_params_t` live, in RAM.
+  drivers, Wi-Fi/UDP link, console, and since 2026-10-27 the fixed-rate control task
+  (`main/ctl_task.c`) with the capture of its records (`main/capture.c`, in PSRAM, fetched over
+  the link); plan and increments in `docs/control-loop-plan.md`, esp-drone reuse in
+  `docs/reuse_log.md`. Since 2026-10-30 it compiles `core/` as a component, the `param` console
+  command (`main/cmd_param.c`) reads and sets `blimp_params_t` live, in RAM, and (branch
+  `control-inc3`, not yet run on the board) the task calls `blimp_step()` every tick and drives
+  the motors in the bench hold (`hold`, `software/hold_test.py`), through the motor map
+  (`motormap`).
 - `firmware/projects/espfly/`: the previous board's shell. `main/main.c` is only an RTOS shell
   around `blimp_step()` (the esp_timer loop pattern); not part of day-to-day builds.
 - `firmware/projects/optflow_cam/`: ESP32-CAM optical-flow experiment. `blink/`: toolchain test.
@@ -102,8 +104,9 @@ python tools/wifi_soak.py <label> --connection ICARUS-xxxxxx   # Linux: S3 link 
 
 - IMPORTANT: control, estimation and guidance logic lives only in `core/`. `sim/` synthesises
   sensors and applies actuator outputs. The firmware is the shell: sensor schedule, unit
-  conversion, mode switch, failsafes, logging and motor output. Its estimate/control/mixer stages
-  are placeholders until `blimp_step()` fills them; never grow them into a second controller. If
+  conversion, mode switch, failsafes, logging and motor output. Its control stage calls
+  `blimp_step()` and its mixer stage only places `core/`'s thrusts on the motors; never grow them
+  into a second controller. If
   the simulated blimp flies badly, fix `core/`; never compensate in `sim/` or in the firmware.
 - `core/` is freestanding C11 plus `<math.h>`: no ESP-IDF, FreeRTOS, MuJoCo or stdio; no dynamic
   allocation, no mutable globals, no blocking; deterministic. Every tunable is a field of
@@ -120,6 +123,10 @@ python tools/wifi_soak.py <label> --connection ICARUS-xxxxxx   # Linux: S3 link 
   what you use (`<stddef.h>` for `NULL`): MSVC's headers pull in more than glibc's.
 - Motor names and order: FL, RL, FR, RR is `motor_id_t` order in the S3-Zero driver and in the
   link packets; `core/` names them thrust_fl/fr/rl/rr. Never introduce M1..M4 or another order.
+  In the S3-Zero a motor's name and its position are separate (the motor map, `cmd_motor.h`):
+  `core/`'s names are positions seen from behind the blimp, and the firmware drives positions.
+  The team's names are mirrored against them (the motor named FL is on the blimp's right,
+  measured 2026-10-30); never "fix" that by swapping thrusts in the firmware's stages.
 - In the S3-Zero firmware, persistent config goes in `sdkconfig.defaults*`, never in the gitignored
   `sdkconfig`; the existing console commands and the motor failsafe keep working.
 - `BLIMP_BOOT_MOTOR_ID_MODE` in `firmware/projects/espfly/main/board_config.h` must be `0` in any

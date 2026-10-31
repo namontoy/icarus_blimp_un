@@ -55,6 +55,30 @@ the mock; on the board, `software/param_check.py --reboot` passed 13 of 13 the s
 puts `blimp_step()` in the loop. Found on the way: the closed-loop tests C1–C4 step a setpoint
 that `blimp_step()` cannot take today (a `core/` change, noted in the plan's increment 3).
 
+**2026-10-30, the bench hold (branch `control-inc3`; built and host-tested, not yet run on the
+board).** `core/` 0.2.0 takes a commanded heading, altitude or surge in place of guidance
+(`blimp_hold_t`), and the S3's control task runs `blimp_step()` every tick, arming it only on the
+`hold` console command, with any STOP latching KILLED until `hold off`;
+`software/hold_test.py` steps the heading from the ground. The motor map (`motormap`) keeps each
+output's name apart from its position in `core/`'s frame, because the rope rig of the same day
+(`docs/history/rig-2026-10-30.md`) found the team's motor names mirrored against `core/`'s frame
+(the motor named FL is on the blimp's right) and the team kept the names. Three things found
+with it, open:
+- **The barometer glitches**: about one BME280 reading in thirteen is 1–10 °C cold and 150–1440
+  Pa low, a 120 m jump at worst, seen in two captures that day. The hold does not hand the
+  barometer to `core/`, whose ceiling guard would otherwise trip; the driver's read needs a look.
+- **The estimator learns a slow turn as gyro bias.** `core/src/estimator.c` updates the bias
+  (tau 20 s) whenever the gyro reads under 11.5 °/s and the accelerometer near 1 g, armed or
+  not. A blimp turning or drifting slower than that is "stationary" to it, so in a long slow turn
+  the bias creeps toward the real rate and the heading under-reads it; in a hold, a drift under
+  the motors' dead band would go unseen. Reasoned from the code, not measured; a `core/` change
+  (no bias learning while armed, or only with the motors off) when the bench shows it.
+- **The thrust chain is linear**: the hold turns `core/`'s newtons into throttle as
+  T / `motor_max_thrust_n` and then the driver's deadband, against a measured F(u) that is close
+  to quadratic, so part duty delivers less than asked (about half at mid duty with the 2026-10-28
+  curves). Safe for Rule 13, a gain error for the loops; the per-motor thrust map (plan P0) is the
+  fix.
+
 **2026-10-29, the link and the window reviewed.** Four reviewers and the team settled how the
 window and the link may affect the motors: `docs/link-robustness-review.md`. The ground station
 changed on branch `link-robustness`: a change leaves at once and the repeat holds 20 Hz on

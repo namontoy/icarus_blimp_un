@@ -55,6 +55,7 @@ COLUMNS = (['t_s', 'dt_ms'] +
            ['pressure_pa', 'baro_temp_c', 'humidity_pct', 'tof_mm', 'tof_status', 'fresh', 'mode', 'flags'] +
            ['cam%d_%s' % (c, k) for c in (0, 1) for k in ('seq', 'detected', 'cx', 'cy', 'area')] +
            ['setpoint_%s' % m for m in MOTORS] + ['throttle_%s' % m for m in MOTORS] +
+           ['hold_fx_n', 'hold_fz_n', 'hold_tz_nm', 'hold_err_rad'] +
            ['bat_v', 'exec_us'] +
            ['acc_%s_raw' % a for a in 'xyz'] + ['gyro_%s_raw' % a for a in 'xyz'] +
            ['mag_%s_raw' % a for a in 'xyz'])
@@ -175,9 +176,18 @@ def to_units(h, records):
         for c in (0, 1):
             for k in ('seq', 'detected', 'cx', 'cy', 'area'):
                 row['cam%d_%s' % (c, k)] = r['cam'][c][k]
+        # The setpoint slots are the four link commands in MANUAL; in the bench
+        # hold (and KILLED) they are the wrench given to the motors and the
+        # heading error (ctl_types.h, log_record_t, 2026-10-30).
+        manual = r['mode'] == 0
+        sp = r['setpoint']
         for i, m in enumerate(MOTORS):
-            row['setpoint_%s' % m] = r['setpoint'][i] / 32767.0
+            row['setpoint_%s' % m] = sp[i] / 32767.0 if manual else float('nan')
             row['throttle_%s' % m] = r['throttle'][i] / 32767.0
+        row['hold_fx_n'] = float('nan') if manual else sp[0] * 1e-4
+        row['hold_fz_n'] = float('nan') if manual else sp[1] * 1e-4
+        row['hold_tz_nm'] = float('nan') if manual else sp[2] * 1e-5
+        row['hold_err_rad'] = float('nan') if manual else sp[3] * 1e-3
         row['bat_v'] = r['bat_mv'] / 1000.0
         row['exec_us'] = r['exec_us']
         rows.append(row)

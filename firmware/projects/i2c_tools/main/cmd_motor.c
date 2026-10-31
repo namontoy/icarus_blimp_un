@@ -114,7 +114,9 @@ typedef struct {
     ledc_channel_t ch_in2;
 } motor_pins_t;
 
-/* Order matches motor_id_t and the array taken by motors_set_all(). */
+/* The four outputs, numbered 1-4 for people and 0-3 here, in the order of
+   their Kconfig settings. Which name and position each one carries is the
+   motor map below (cmd_motor.h); .name is only the Kconfig label of the pins. */
 static const motor_pins_t s_pins[MOTOR_COUNT] = {
     { "FL", "#1 IN4/IN3", CONFIG_MOTOR_FL_IN1_GPIO, CONFIG_MOTOR_FL_IN2_GPIO,
       LEDC_CHANNEL_0, LEDC_CHANNEL_1 },
@@ -125,6 +127,18 @@ static const motor_pins_t s_pins[MOTOR_COUNT] = {
     { "RR", "#2 IN2/IN1", CONFIG_MOTOR_RR_IN1_GPIO, CONFIG_MOTOR_RR_IN2_GPIO,
       LEDC_CHANNEL_6, LEDC_CHANNEL_7 },
 };
+
+/* motor_id_t order: the names on the wire and at the console. */
+static const char *const s_names[MOTOR_COUNT] = { "FL", "RL", "FR", "RR" };
+
+/* The motor map (cmd_motor.h): per output, its name, position and sign, and
+   the inverse for the names. Written only under s_lock with every motor idle,
+   read by motor_write() under the same lock. */
+static motor_map_t       s_map;
+static uint8_t           s_out_of[MOTOR_COUNT];     // name -> output
+
+/* The control loop's claim (cmd_motor.h). */
+static volatile bool     s_loop_owns;
 
 static bool              s_ready;
 static uint32_t          s_duty_full;        // 2^bits: a true 100%, see below
@@ -184,13 +198,20 @@ static int pick_resolution_bits(int freq_hz)
  * not 2047/2048, or every PWM period puts a short glitch into an H-bridge
  * input and the bridge spends part of its life in a state nobody asked for.
  *
+ * m is a name; the map picks the output and its sign. s_out keeps the
+ * command as given, before the sign, so an unchanged command is still
+ * recognised as one.
+ *
  * Call with the lock held.
  */
 static void motor_write(motor_id_t m, float throttle)
 {
-    const motor_pins_t *p = &s_pins[m];
+    const int o = s_out_of[m];
+    const motor_pins_t *p = &s_pins[o];
+    const float given = throttle;
     uint32_t d1, d2;
 
+    throttle *= (float)s_map.sign[o];
     float mag = fabsf(throttle);
     if (mag < MOTOR_ZERO_EPS) {
         /* Coast, not brake. A zero command should stop driving the prop, not
@@ -231,7 +252,7 @@ static void motor_write(motor_id_t m, float throttle)
     ledc_set_duty(LEDC_LOW_SPEED_MODE, p->ch_in2, d2);
     ledc_update_duty(LEDC_LOW_SPEED_MODE, p->ch_in1);
     ledc_update_duty(LEDC_LOW_SPEED_MODE, p->ch_in2);
-    s_out[m] = throttle;
+    s_out[m] = given;
 }
 
 /* Both inputs to the same level on every motor: 0 coasts, full brakes. */
@@ -326,11 +347,100 @@ esp_err_t motors_failsafe_set_timeout_ms(int timeout_ms)
 
 /* ------------------------------------------------------------------ init */
 
+/* "FL RL FR RR" (any order, any case, spaces or commas) into four labels;
+   false unless it is a permutation of the four. */
+static bool parse_labels(const char *text, uint8_t out[MOTOR_COUNT])
+{
+    bool seen[MOTOR_COUNT] = { false };
+    int n = 0;
+    const char *c = text;
+    while (*c) {
+        while (*c == ' ' || *c == ',') {
+            c++;
+        }
+        if (!*c) {
+            break;
+        }
+        int found = -1;
+        for (int m = 0; m < MOTOR_COUNT; m++) {
+            if (strncasecmp(c, s_names[m], 2) == 0 && (c[2] == '\0' || c[2] == ' ' || c[2] == ',')) {
+                found = m;
+            }
+        }
+        if (found < 0 || seen[found] || n >= MOTOR_COUNT) {
+            return false;
+        }
+        seen[found] = true;
+        out[n++] = (uint8_t)found;
+        c += 2;
+    }
+    return n == MOTOR_COUNT;
+}
+
+void motors_default_map(motor_map_t *out)
+{
+    for (int o = 0; o < MOTOR_COUNT; o++) {
+        out->name[o] = (uint8_t)o;      /* the Kconfig labels of the pins */
+        out->position[o] = (uint8_t)o;
+        out->sign[o] = 1;
+    }
+    if (!parse_labels(CONFIG_MOTOR_POSITIONS, out->position)) {
+        ESP_LOGE(TAG, "MOTOR_POSITIONS \"%s\" is not FL, RL, FR, RR in some order; "
+                      "using the names as positions", CONFIG_MOTOR_POSITIONS);
+        for (int o = 0; o < MOTOR_COUNT; o++) {
+            out->position[o] = (uint8_t)o;
+        }
+    }
+    const char *c = CONFIG_MOTOR_SIGNS;
+    int o = 0;
+    for (; *c && o < MOTOR_COUNT; c++) {
+        if (*c == '+' || *c == '-') {
+            out->sign[o++] = (*c == '-') ? -1 : 1;
+        }
+    }
+    if (o != MOTOR_COUNT) {
+        ESP_LOGE(TAG, "MOTOR_SIGNS \"%s\" needs four + or -; using + for all", CONFIG_MOTOR_SIGNS);
+        for (o = 0; o < MOTOR_COUNT; o++) {
+            out->sign[o] = 1;
+        }
+    }
+}
+
+static bool map_valid(const motor_map_t *map)
+{
+    bool name_seen[MOTOR_COUNT] = { false }, pos_seen[MOTOR_COUNT] = { false };
+    for (int o = 0; o < MOTOR_COUNT; o++) {
+        if (map->name[o] >= MOTOR_COUNT || map->position[o] >= MOTOR_COUNT ||
+            name_seen[map->name[o]] || pos_seen[map->position[o]] ||
+            (map->sign[o] != 1 && map->sign[o] != -1)) {
+            return false;
+        }
+        name_seen[map->name[o]] = pos_seen[map->position[o]] = true;
+    }
+    return true;
+}
+
+/* Call with the lock held, or before s_ready. */
+static void map_apply(const motor_map_t *map)
+{
+    s_map = *map;
+    for (int o = 0; o < MOTOR_COUNT; o++) {
+        s_out_of[s_map.name[o]] = (uint8_t)o;
+    }
+    for (int m = 0; m < MOTOR_COUNT; m++) {
+        s_out[m] = NAN;     /* the next command lands, whatever it is */
+    }
+}
+
 esp_err_t motors_init(void)
 {
     if (s_ready) {
         return ESP_OK;
     }
+
+    motor_map_t defaults;
+    motors_default_map(&defaults);
+    map_apply(&defaults);
 
     for (int m = 0; m < MOTOR_COUNT; m++) {
         int pin[2] = { s_pins[m].gpio_in1, s_pins[m].gpio_in2 };
@@ -460,9 +570,10 @@ esp_err_t motors_init(void)
        the divider is integer and LEDC_AUTO_CLK may not have picked the source
        this code assumed, either of which silently shifts the real carrier. */
     uint32_t actual = ledc_get_freq(LEDC_LOW_SPEED_MODE, LEDC_TIMER_0);
-    for (int m = 0; m < MOTOR_COUNT; m++) {
-        ESP_LOGI(TAG, "motor_%s on GPIO %d/%d  (DRV8833 %s)", s_pins[m].name,
-                 s_pins[m].gpio_in1, s_pins[m].gpio_in2, s_pins[m].where);
+    for (int o = 0; o < MOTOR_COUNT; o++) {
+        ESP_LOGI(TAG, "output %d on GPIO %d/%d (DRV8833 %s): motor_%s, position %s, sign %c",
+                 o + 1, s_pins[o].gpio_in1, s_pins[o].gpio_in2, s_pins[o].where,
+                 s_names[s_map.name[o]], s_names[s_map.position[o]], s_map.sign[o] > 0 ? '+' : '-');
     }
     ESP_LOGI(TAG, "PWM %" PRIu32 " Hz (asked %d), %d bit, %s decay, deadband %.1f%%",
              actual, s_freq_hz, s_res_bits,
@@ -481,12 +592,81 @@ esp_err_t motors_init(void)
 
 const char *motor_name(motor_id_t m)
 {
-    return (m < MOTOR_COUNT) ? s_pins[m].name : "??";
+    return (m < MOTOR_COUNT) ? s_names[m] : "??";
 }
 
 const char *motor_where(motor_id_t m)
 {
-    return (m < MOTOR_COUNT) ? s_pins[m].where : "?";
+    return (m < MOTOR_COUNT) ? s_pins[s_out_of[m]].where : "?";
+}
+
+void motors_get_map(motor_map_t *out)
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    *out = s_map;
+    xSemaphoreGive(s_lock);
+}
+
+esp_err_t motors_set_map(const motor_map_t *map)
+{
+    if (map == NULL || !map_valid(map)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!s_ready) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    bool idle = !s_loop_owns;
+    for (int m = 0; m < MOTOR_COUNT; m++) {
+        if (s_cmd[m] != 0.0f) {
+            idle = false;
+        }
+    }
+    if (idle) {
+        map_apply(map);
+    }
+    xSemaphoreGive(s_lock);
+    return idle ? ESP_OK : ESP_ERR_INVALID_STATE;
+}
+
+motor_id_t motor_at_position(motor_id_t position)
+{
+    /* No lock: four bytes the map only changes with every motor idle, and
+       the loop, the one caller, owns the motors while it calls this. */
+    for (int o = 0; o < MOTOR_COUNT; o++) {
+        if (s_map.position[o] == position) {
+            return (motor_id_t)s_map.name[o];
+        }
+    }
+    return position;        /* unreachable for a valid map */
+}
+
+int motor_output_of(motor_id_t m)
+{
+    return (m < MOTOR_COUNT) ? s_out_of[m] : -1;
+}
+
+void motors_loop_claim(bool on)
+{
+    if (!on && s_loop_owns) {
+        s_loop_owns = false;
+        motors_coast();
+        return;
+    }
+    s_loop_owns = on;
+}
+
+bool motors_loop_owns(void)
+{
+    return s_loop_owns;
+}
+
+/* motors_set_all() and motors_loop_set_all(): one body, one gate. */
+static esp_err_t set_all(const float throttle[MOTOR_COUNT], bool from_loop);
+
+esp_err_t motors_loop_set_all(const float throttle[MOTOR_COUNT])
+{
+    return set_all(throttle, true);
 }
 
 esp_err_t motor_set(motor_id_t m, float throttle)
@@ -498,10 +678,10 @@ esp_err_t motor_set(motor_id_t m, float throttle)
        arithmetic, where every comparison below would go false and leave the
        bridge latched at whatever it was last told. */
     if (!isfinite(throttle)) {
-        ESP_LOGE(TAG, "motor %s: non-finite throttle rejected", s_pins[m].name);
+        ESP_LOGE(TAG, "motor %s: non-finite throttle rejected", s_names[m]);
         return ESP_ERR_INVALID_ARG;
     }
-    if (!s_ready) {
+    if (!s_ready || s_loop_owns) {
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -522,15 +702,24 @@ esp_err_t motor_set(motor_id_t m, float throttle)
 
 esp_err_t motors_set_all(const float throttle[MOTOR_COUNT])
 {
+    return set_all(throttle, false);
+}
+
+static esp_err_t set_all(const float throttle[MOTOR_COUNT], bool from_loop)
+{
     if (throttle == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (!s_ready) {
+    if (!s_ready || (s_loop_owns && !from_loop)) {
         return ESP_ERR_INVALID_STATE;
     }
     for (int m = 0; m < MOTOR_COUNT; m++) {
         if (!isfinite(throttle[m])) {
-            ESP_LOGE(TAG, "motor %s: non-finite throttle rejected", s_pins[m].name);
+            /* Not logged from the loop: it never prints inside a tick, and
+               it never sends a non-finite throttle (ctl_task.c, saturate). */
+            if (!from_loop) {
+                ESP_LOGE(TAG, "motor %s: non-finite throttle rejected", s_names[m]);
+            }
             return ESP_ERR_INVALID_ARG;
         }
     }
@@ -568,11 +757,31 @@ float motor_get(motor_id_t m)
     return (m < MOTOR_COUNT) ? s_cmd[m] : 0.0f;
 }
 
+/* Who to tell when a stop arrives while the loop holds the motors. */
+static void (*volatile s_stop_hook)(void);
+
+void motors_set_stop_hook(void (*hook)(void))
+{
+    s_stop_hook = hook;
+}
+
+/* A stop from anyone - MOTOR_STOP, 'motor -s', the link timeout - while the
+   loop holds the motors is a kill: tell the loop first, so its next tick
+   does not drive them again, then write the pins. */
+static void stop_while_owned(void)
+{
+    void (*hook)(void) = s_stop_hook;
+    if (s_loop_owns && hook != NULL) {
+        hook();
+    }
+}
+
 void motors_coast(void)
 {
     if (!s_ready) {
         return;
     }
+    stop_while_owned();
     xSemaphoreTake(s_lock, portMAX_DELAY);
     motor_write_all_static(0);
     xSemaphoreGive(s_lock);
@@ -584,6 +793,7 @@ void motors_brake(void)
     if (!s_ready) {
         return;
     }
+    stop_while_owned();
     xSemaphoreTake(s_lock, portMAX_DELAY);
     motor_write_all_static(s_duty_full);
     xSemaphoreGive(s_lock);
@@ -654,7 +864,7 @@ static struct {
 static int parse_motor_id(const char *s)
 {
     for (int m = 0; m < MOTOR_COUNT; m++) {
-        if (strcasecmp(s, s_pins[m].name) == 0) {
+        if (strcasecmp(s, s_names[m]) == 0) {
             return m;
         }
     }
@@ -686,17 +896,24 @@ static void print_status(void)
 #else
     printf("nSLEEP not on a GPIO - must be strapped high in hardware\n");
 #endif
-    printf("\n%-6s %-12s %-9s %10s %10s\n",
-           "motor", "driver", "GPIO", "command", "duty");
+    if (s_loop_owns) {
+        printf("the control loop holds the motors ('hold'): commands from here and the link are refused\n");
+    }
+    printf("\n%-6s %-7s %-12s %-9s %-9s %-5s %10s %10s\n",
+           "motor", "output", "driver", "GPIO", "position", "sign", "command", "duty");
     for (int m = 0; m < MOTOR_COUNT; m++) {
+        const int o = s_out_of[m];
         char pins[12];
-        snprintf(pins, sizeof(pins), "%d/%d", s_pins[m].gpio_in1, s_pins[m].gpio_in2);
+        snprintf(pins, sizeof(pins), "%d/%d", s_pins[o].gpio_in1, s_pins[o].gpio_in2);
         float mag = fabsf(s_cmd[m]);
         float duty = (mag < MOTOR_ZERO_EPS) ? 0.0f
                    : (s_deadband + (1.0f - s_deadband) * mag) * 100.0f;
-        printf("%-6s %-12s %-9s %+10.3f %9.1f%%\n",
-               s_pins[m].name, s_pins[m].where, pins, s_cmd[m], duty);
+        printf("%-6s %-7d %-12s %-9s %-9s %-5c %+10.3f %9.1f%%\n",
+               s_names[m], o + 1, s_pins[o].where, pins, s_names[s_map.position[o]],
+               s_map.sign[o] > 0 ? '+' : '-', s_cmd[m], duty);
     }
+    printf("(position: where the motor sits in core/'s frame, seen from behind; "
+           "the control loop drives positions. 'motormap' changes the map.)\n");
 }
 
 /* Hold a command for ms, keeping the failsafe fed, then coast. */
@@ -726,7 +943,7 @@ static void run_sweep(motor_id_t m, bool reverse, int dwell_ms)
 
     motors_set_deadband(0.0f);
     printf("Ramping motor_%s %s in %d steps, %d ms each.\n",
-           s_pins[m].name, reverse ? "reverse" : "forward", steps, dwell_ms);
+           s_names[m], reverse ? "reverse" : "forward", steps, dwell_ms);
     printf("Watch the prop and note the first step where it turns on its own.\n\n");
     printf("%6s %8s\n", "step", "duty");
 
@@ -824,6 +1041,10 @@ static int do_motor_cmd(int argc, char **argv)
     }
 
     if (motor_args.sweep->count || motor_args.throttle->count) {
+        if (s_loop_owns) {
+            printf("refused: the control loop holds the motors; 'hold off' gives them back\n");
+            return 1;
+        }
         if (!motor_args.motor->count) {
             ESP_LOGE(TAG, "which motor? use -m FL|RL|FR|RR");
             return 1;
@@ -855,14 +1076,14 @@ static int do_motor_cmd(int argc, char **argv)
                can only be stopped by the next command line - which is fine at
                a desk and is why it is not the default. */
             printf("motor_%s at %+.3f, held. Stop it with 'motor -s'.\n",
-                   s_pins[m].name, t);
+                   s_names[m], t);
             if (s_fs_timeout_ms > 0) {
                 printf("note: the %d ms failsafe will coast it; "
                        "disable with --failsafe 0 to really hold it.\n",
                        s_fs_timeout_ms);
             }
         } else {
-            printf("motor_%s at %+.3f for %d ms...\n", s_pins[m].name, t, duration);
+            printf("motor_%s at %+.3f for %d ms...\n", s_names[m], t, duration);
             fflush(stdout);
             run_for(duration);
             printf("stopped\n");

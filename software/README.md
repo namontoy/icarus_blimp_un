@@ -46,6 +46,17 @@ python software/step_response.py captures/step-yaw-<date>.bin --axis yaw --all \
 `step_test.py` refuses to start while another source (the ground station) holds the motors and
 stops them on Ctrl-C and on any error; the captures and their `.json` notes go under `captures/`.
 
+The closed-loop tests (C1–C4) run on the firmware's bench hold (`hold`, branch `control-inc3`):
+
+```
+python software/hold_test.py --steps 0 30 0 -30 0 --dwell 8      # prints the plan; --go runs it
+python software/hold_test.py --steps 0 30 0 --go --param yaw.kp=0.0009 yaw.kd=0.0009 --deadband 10
+```
+
+`hold_test.py` keeps the link alive that the hold needs, steps the heading, kills the hold from
+the ground when the gyro passes `--max-rate`, and always ends with `hold off`; it saves the
+capture with overshoot, settling and the final error per step in its `.json`.
+
 ## The ground station: `ground_station/`
 
 The GUI for the bench and the arena: motors, sensors, the camera and the console in one

@@ -204,6 +204,7 @@ BLIMP_API size_t blimp_ffi_struct_size(int id)
     case 8:  return sizeof(blimp_guidance_t);
     case 9:  return sizeof(blimp_input_t);
     case 10: return sizeof(blimp_t);
+    case 11: return sizeof(blimp_hold_t);
     default: return (size_t)0;
     }
 }

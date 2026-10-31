@@ -51,9 +51,13 @@
  * barometer and the ToF over alternate ticks. No code was copied.
  */
 #include <inttypes.h>
+#include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include "argtable3/argtable3.h"
+#include "blimp/blimp.h"
 #include "esp_attr.h"
 #include "esp_console.h"
 #include "esp_heap_caps.h"
@@ -70,9 +74,42 @@
 #include "cmd_param.h"
 #include "ctl_task.h"
 #include "ctl_types.h"
+#include "net_link.h"
 #include "sensor_stream.h"
 
 static const char *TAG = "ctl";
+
+/* A sample older than this is not handed to core/ as valid. The stream runs
+   at 50 Hz, the ToF at about 10 Hz and the magnetometer with the IMU. */
+#define CTL_IMU_STALE_US    100000u
+#define CTL_MAG_STALE_US    250000u
+#define CTL_TOF_STALE_US    250000u
+#define CTL_G_MPS2          9.80665f
+
+/* The chip axis (0-2) and sign along each body axis, from Kconfig's
+   CTL_IMU_AXES and CTL_MAG_AXES. */
+typedef struct {
+    uint8_t idx[3];
+    int8_t  sign[3];
+} axis_map_t;
+
+/* What 'hold' shows, copied out of the tick under the mux. */
+typedef struct {
+    ctl_mode_t        mode;
+    bool              armed;
+    bool              converging;
+    float             still_s;          /* the estimator's stationary dwell    */
+    float             yaw, yaw_rate;    /* rad, rad/s, core/'s estimate        */
+    float             altitude;
+    bool              altitude_valid;
+    blimp_wrench_t    demand;           /* the errors the loops ran on         */
+    ctrl_out_t        out;              /* the wrench the motors were given    */
+    blimp_actuators_t act;
+    float             throttle[MOTOR_COUNT];
+    uint8_t           guid_state;
+    uint32_t          link_age_ms;
+    bool              link_seen;
+} hold_snap_t;
 
 /* esp_psram_* only links with CONFIG_SPIRAM; a build without it (the
    2026-10-28 Wi-Fi bisect) then reports no PSRAM, as IGNORE_NOTFOUND would. */
@@ -123,6 +160,23 @@ static struct {
        increment 3 on. */
     blimp_params_t params;
     uint32_t       params_gen;
+
+    /* The controller, core/'s blimp_step(), run every tick in every mode so
+       the estimator converges in the background; its output reaches the
+       motors only in the bench hold (CLOSED_LOOP). */
+    blimp_t           b;
+    blimp_actuators_t act;
+    blimp_hold_t      hold;             /* the setpoints in force               */
+    sensor_scales_t   scales;
+    axis_map_t        imu_axes, mag_axes;
+
+    /* Requests from the 'hold' command, taken at the top of a tick under the
+       mux; and the kill, set by the motor driver's stop hook from whatever
+       task stopped the motors (cmd_motor.h), so a plain flag. */
+    bool              want_hold;
+    blimp_hold_t      hold_req;
+    volatile bool     kill_req;
+    hold_snap_t       snap;
 } s = {
     .mux = portMUX_INITIALIZER_UNLOCKED,
     .params_gen = PARAM_GEN_NONE,
@@ -179,39 +233,272 @@ static void read_sensors(uint32_t tick, sensors_raw_t *raw)
     raw->tof_t_us   = latest.tof_t_us;
 }
 
-/* Increment 3: counts to SI, mounting rotations, tilt for the range. */
+/* "-Y +X +Z": the chip axis, with its sign, along body x, y, z. */
+static bool parse_axes(const char *text, axis_map_t *out)
+{
+    bool seen[3] = { false, false, false };
+    int n = 0;
+    const char *c = text;
+    while (*c) {
+        while (*c == ' ' || *c == ',') {
+            c++;
+        }
+        if (!*c) {
+            break;
+        }
+        int8_t sign = 1;
+        if (*c == '+' || *c == '-') {
+            sign = (*c == '-') ? -1 : 1;
+            c++;
+        }
+        const int idx = (*c == 'x' || *c == 'X') ? 0 : (*c == 'y' || *c == 'Y') ? 1
+                      : (*c == 'z' || *c == 'Z') ? 2 : -1;
+        if (idx < 0 || seen[idx] || n >= 3) {
+            return false;
+        }
+        seen[idx] = true;
+        out->idx[n] = (uint8_t)idx;
+        out->sign[n] = sign;
+        n++;
+        c++;
+    }
+    return n == 3;
+}
+
+static void remap(const axis_map_t *m, const float chip[3], float body[3])
+{
+    for (int i = 0; i < 3; i++) {
+        body[i] = (float)m->sign[i] * chip[m->idx[i]];
+    }
+}
+
+/*
+ * Counts to SI in core/'s body frame (x forward, y left, z up), through the
+ * mounting maps of Kconfig, which is everything core/'s blimp_imu_sample_t
+ * asks of the shell. The scales are the ones the stream attached the chips
+ * at, re-read once a second (a console command can re-attach at others).
+ *
+ * The IMU sample keeps its own timestamp, not the tick's. The stream does not
+ * deliver a new sample every tick (about 40 of 50 a second, 2026-10-30), and
+ * core/'s estimator integrates the gyro over the gap between timestamps: a
+ * repeated sample then has dt = 0 and is skipped cleanly, where marking it
+ * invalid would integrate a zero rate for the tick and restart the estimator's
+ * stillness count, which then never reaches the 60 s that arming needs.
+ */
 static void estimate(const sensors_raw_t *raw, state_est_t *est)
 {
-    (void)raw;
-    (void)est;
+    if (s.scales.imu_gyro_dps == 0 || s.tick % 50u == 0u) {
+        sensor_stream_scales(&s.scales);
+    }
+    const sensor_scales_t *sc = &s.scales;
+    float chip[3];
+
+    est->t_us = raw->imu_t_us;
+    const bool imu_known = raw->imu_t_us != 0 && sc->imu_gyro_dps > 0 && sc->imu_accel_g > 0;
+    const bool imu_ok = imu_known && (uint32_t)(raw->t_us - raw->imu_t_us) < CTL_IMU_STALE_US;
+    for (int i = 0; i < 3; i++) {
+        chip[i] = (float)raw->gyro[i] * ((float)sc->imu_gyro_dps / 32768.0f) * (BLIMP_PI / 180.0f);
+    }
+    remap(&s.imu_axes, chip, est->gyro);
+    for (int i = 0; i < 3; i++) {
+        chip[i] = (float)raw->acc[i] * ((float)sc->imu_accel_g / 32768.0f) * CTL_G_MPS2;
+    }
+    remap(&s.imu_axes, chip, est->accel);
+    est->gyro_valid = est->accel_valid = imu_ok;
+
+    const float mag_lsb = sc->mag_lsb_per_gauss;
+    for (int i = 0; i < 3; i++) {
+        chip[i] = mag_lsb > 0.0f ? (float)raw->mag[i] / mag_lsb * 100.0f : 0.0f;     /* uT */
+    }
+    remap(&s.mag_axes, chip, est->mag);
+    est->mag_valid = mag_lsb > 0.0f && raw->mag_t_us != 0 &&
+                     (uint32_t)(raw->t_us - raw->mag_t_us) < CTL_MAG_STALE_US;
+
+    est->pressure_pa  = (float)raw->baro_p_dpa * 0.1f;
+    est->air_temp_c   = (float)raw->baro_t_cc * 0.01f;
+    est->humidity_pct = (float)raw->baro_h_cpct * 0.01f;
+    est->baro_alt = est->pressure_pa > 0.0f
+                  ? 44330.0f * (1.0f - powf(est->pressure_pa / 101325.0f, 0.190295f)) : 0.0f;
+    /* Not handed to core/ yet. About one BME280 reading in thirteen comes back
+       1-10 C cold with its pressure 150-1440 Pa low (2026-10-30, and in that
+       morning's capture too): a jump of up to 120 m, which core/'s ceiling
+       guard would answer with a failsafe in the middle of a test. The ToF is
+       the altitude source until the barometer's reads are fixed. */
+    est->baro_valid = false;
+
+    /* Tilt from the accelerometer, for the range only: h = d cos(roll) cos(pitch). */
+    const float ax = est->accel[0], ay = est->accel[1], az = est->accel[2];
+    est->roll  = atan2f(ay, az);
+    est->pitch = atan2f(-ax, sqrtf(ay * ay + az * az));
+    est->range_alt = (float)raw->tof_mm * 0.001f * cosf(est->roll) * cosf(est->pitch);
+    est->range_valid = imu_ok && raw->tof_t_us != 0 && raw->tof_status == 0 && raw->tof_mm > 0 &&
+                       (uint32_t)(raw->t_us - raw->tof_t_us) < CTL_TOF_STALE_US;
+
+    est->imu_temp_c = (float)raw->imu_temp / 340.0f + 36.53f;      /* MPU-6050 datasheet */
+    est->bat_v      = (float)raw->bat_mv * 0.001f;
 }
 
-/* Increment 3: the mode switch. MANUAL bypasses the mixer; the autonomous
-   modes output a zero wrench until blimp_step() fills them. */
+/*
+ * blimp_step(), every tick and in every mode. Only the bench hold arms it
+ * (CLOSED_LOOP); in MANUAL it runs disarmed, so the estimator keeps
+ * converging and the hold can start without a 60 s wait. Guidance never runs
+ * on this vehicle yet (it needs the forward camera's detections), so the
+ * hold's setpoints are always the source: hold.active is set in every mode,
+ * and an axis not held outputs nothing. Every valid packet from the ground
+ * refreshes core/'s link watchdog, which zeroes the hold when the ground has
+ * been quiet for link_timeout_s.
+ */
 static void control(const state_est_t *est, const setpoint_t *sp, ctrl_out_t *out)
 {
-    (void)est;
-    (void)sp;
-    (void)out;
+    blimp_input_t in;
+    memset(&in, 0, sizeof(in));
+    memcpy(in.imu.gyro,  est->gyro,  sizeof(in.imu.gyro));
+    memcpy(in.imu.accel, est->accel, sizeof(in.imu.accel));
+    memcpy(in.imu.mag,   est->mag,   sizeof(in.imu.mag));
+    in.imu.baro_alt    = est->baro_alt;
+    in.imu.range_alt   = est->range_alt;
+    in.imu.t_us        = est->t_us;
+    in.imu.gyro_valid  = est->gyro_valid;
+    in.imu.accel_valid = est->accel_valid;
+    in.imu.mag_valid   = est->mag_valid;
+    in.imu.baro_valid  = est->baro_valid;
+    in.imu.range_valid = est->range_valid;
+    in.arm_request = sp->mode == CTL_MODE_CLOSED_LOOP;
+    in.t_us        = s.raw.t_us;
+    in.hold        = s.hold;
+    in.hold.active = true;
+
+    uint32_t rx_us;
+    if (net_link_last_rx(&rx_us)) {
+        blimp_notify_link(&s.b, rx_us);
+    }
+    blimp_step(&s.b, &in, &s.act);
+
+    blimp_wrench_t w;
+    blimp_mixer_forward(&s.b.params, &s.act, &w);
+    out->fx = w.fx;
+    out->fy = 0.0f;
+    out->fz = w.fz;
+    out->tz = w.tz;
 }
 
-/* Increment 3: wrench to per-motor thrust in N. */
+/*
+ * core/'s mixer already ran inside blimp_step(), Rule 13 included; this
+ * stage only puts its thrusts on the motors. core/ names them by position in
+ * its frame, and which motor sits at each position is the motor map's
+ * (cmd_motor.h), so a renamed motor still pushes from where it is.
+ */
 static void mixer(const ctrl_out_t *out, motor_cmd_t *cmd)
 {
     (void)out;
-    (void)cmd;
+    float by_pos[MOTOR_COUNT];
+    by_pos[MOTOR_FL] = s.act.thrust_fl;
+    by_pos[MOTOR_RL] = s.act.thrust_rl;
+    by_pos[MOTOR_FR] = s.act.thrust_fr;
+    by_pos[MOTOR_RR] = s.act.thrust_rr;
+    for (int p = 0; p < MOTOR_COUNT; p++) {
+        cmd->thrust_n[motor_at_position((motor_id_t)p)] = by_pos[p];
+    }
+    cmd->clamped_total = s.act.clamped_total;
 }
 
-/* Increment 3: thrust map, clamp, the Rule 13 cap, the clamp flags. */
+/*
+ * Thrust to throttle through core/'s own normalisation, motor_max_thrust_n
+ * (params.c: "both the Rule 13 compliance basis and the PWM normalisation").
+ * Linear, so against the measured F(u) = a u^2 + b u (docs/history/
+ * pid-bench-2026-10-28) a part duty gives less thrust than core/ asked for:
+ * the loop under-delivers, never over. A per-motor curve is the thrust map's
+ * job (docs/pid-tuning-plan.md, P0). The driver then maps (0, 1] onto
+ * [deadband, 1]. One-way, as core/'s mixer is: every thrust is >= 0.
+ */
 static void saturate(motor_cmd_t *cmd)
 {
-    (void)cmd;
+    const float tmax = s.b.params.motor_max_thrust_n;
+    cmd->clamped_mask = 0;
+    for (int m = 0; m < MOTOR_COUNT; m++) {
+        float u = (tmax > 0.0f) ? cmd->thrust_n[m] / tmax : 0.0f;
+        if (!(u > 0.0f)) {
+            u = 0.0f;                   /* also NaN */
+        } else if (u >= 1.0f) {
+            u = 1.0f;
+            cmd->clamped_mask |= (uint8_t)(1u << m);
+        }
+        cmd->throttle[m] = u;
+    }
 }
 
-/* Increment 3: motors_set_all() and motors_failsafe_feed(), nothing else. */
+/*
+ * The bench hold writes the motors here and nowhere else; the write feeds the
+ * driver's failsafe, which then trips only if this task stops. A kill that
+ * arrived during this tick is checked once more just before the write, so a
+ * stop is overridden for at most the few microseconds between the two.
+ * KILLED writes nothing: the stop that killed already coasted, and the
+ * loop's claim keeps every other source out. MANUAL: the link and the console
+ * drive the motors (net_link.c).
+ */
 static void pwm_out(const motor_cmd_t *cmd)
 {
-    (void)cmd;
+    if (s.sp.mode == CTL_MODE_CLOSED_LOOP && !s.kill_req) {
+        (void)motors_loop_set_all(cmd->throttle);
+    }
+}
+
+/* The stop hook (cmd_motor.h): any stop while the loop holds the motors. */
+static void on_motor_stop(void)
+{
+    s.kill_req = true;
+}
+
+/* At the top of a tick: the kill, then what 'hold' asked for. */
+static void take_requests(void)
+{
+    bool want;
+    blimp_hold_t req;
+    portENTER_CRITICAL(&s.mux);
+    want = s.want_hold;
+    req = s.hold_req;
+    portEXIT_CRITICAL(&s.mux);
+
+    if (s.kill_req) {
+        s.kill_req = false;
+        if (s.sp.mode == CTL_MODE_CLOSED_LOOP) {
+            s.sp.mode = CTL_MODE_KILLED;    /* the claim stays: nothing else drives */
+        }
+    }
+    if (!want) {
+        if (s.sp.mode != CTL_MODE_MANUAL) {
+            motors_loop_claim(false);       /* coasts, and gives the link the motors back */
+            s.sp.mode = CTL_MODE_MANUAL;
+        }
+    } else if (s.sp.mode == CTL_MODE_MANUAL) {
+        motors_loop_claim(true);
+        s.sp.mode = CTL_MODE_CLOSED_LOOP;
+    }
+    s.hold = req;
+}
+
+static void snapshot(void)
+{
+    hold_snap_t n;
+    n.mode           = s.sp.mode;
+    n.armed          = s.b.armed;
+    n.converging     = blimp_estimator_converging(&s.b.est);
+    n.still_s        = s.b.est.stationary_s;
+    n.yaw            = s.b.state.yaw;
+    n.yaw_rate       = s.b.state.yaw_rate;
+    n.altitude       = s.b.state.altitude;
+    n.altitude_valid = s.b.state.altitude_valid;
+    n.demand         = s.b.demand;
+    n.out            = s.out;
+    n.act            = s.act;
+    memcpy(n.throttle, s.cmd.throttle, sizeof(n.throttle));
+    n.guid_state     = (uint8_t)s.b.guid.state;
+    uint32_t rx_us;
+    n.link_seen   = net_link_last_rx(&rx_us);
+    n.link_age_ms = (uint32_t)(s.raw.t_us - rx_us) / 1000u;
+    portENTER_CRITICAL(&s.mux);
+    s.snap = n;
+    portEXIT_CRITICAL(&s.mux);
 }
 
 static void put24(uint8_t out[3], uint32_t v)
@@ -228,6 +515,22 @@ static int16_t q15(float v)
         return v < 0 ? -32767 : 0;      /* also NaN: nothing is better than a number */
     }
     return v > 1.0f ? 32767 : (int16_t)(v * 32767.0f);
+}
+
+/* v / unit, rounded and saturated to int16; NaN logs 0. */
+static int16_t fixed16(float v, float unit)
+{
+    const float q = v / unit;
+    if (!(q == q)) {
+        return 0;
+    }
+    if (q >= 32767.0f) {
+        return 32767;
+    }
+    if (q <= -32767.0f) {
+        return -32767;
+    }
+    return (int16_t)lrintf(q);
 }
 
 /*
@@ -269,8 +572,20 @@ static void log_tick(const sensors_raw_t *raw, const setpoint_t *sp, const motor
         r.cam[c].cy    = raw->cam[c].cy_px;
         r.cam[c].area  = raw->cam[c].area_px;
     }
+    if (sp->mode == CTL_MODE_MANUAL) {
+        for (int m = 0; m < MOTOR_COUNT; m++) {
+            r.setpoint[m] = q15(sp->cmd[m]);
+        }
+    } else {
+        /* The bench hold (ctl_types.h, log_record_t): the wrench given to
+           the motors, and the heading error the yaw loop ran on, which with
+           the setpoint the tool recorded gives the estimated heading. */
+        r.setpoint[0] = fixed16(s.out.fx, 1e-4f);           /* 0.1 mN       */
+        r.setpoint[1] = fixed16(s.out.fz, 1e-4f);           /* 0.1 mN       */
+        r.setpoint[2] = fixed16(s.out.tz, 1e-5f);           /* 10 uN m      */
+        r.setpoint[3] = fixed16(s.b.demand.tz, 1e-3f);      /* mrad         */
+    }
     for (int m = 0; m < MOTOR_COUNT; m++) {
-        r.setpoint[m] = q15(sp->cmd[m]);
         r.throttle[m] = q15(motor_get((motor_id_t)m));
     }
     r.bat_mv  = raw->bat_mv;
@@ -365,7 +680,10 @@ static void ctl_task(void *arg)
         s.tick++;
         s.raw.t_us = (uint32_t)t0;
 
-        (void)param_take(&s.params, &s.params_gen);
+        if (param_take(&s.params, &s.params_gen)) {
+            s.b.params = s.params;          /* blimp_step() validates it every tick */
+        }
+        take_requests();
         read_sensors(s.tick, &s.raw);
         estimate(&s.raw, &s.est);
         control(&s.est, &s.sp, &s.out);
@@ -375,7 +693,11 @@ static void ctl_task(void *arg)
 
         const uint32_t exec_us = (uint32_t)(esp_timer_get_time() - t0);
         const bool overrun = exec_us > CTL_PERIOD_US;
-        log_tick(&s.raw, &s.sp, &s.cmd, exec_us, overrun ? CTL_FS_OVERRUN : 0);
+        const uint8_t fs = (overrun ? CTL_FS_OVERRUN : 0) |
+                           (s.sp.mode == CTL_MODE_KILLED ? CTL_FS_KILLED : 0) |
+                           (s.cmd.clamped_total ? CTL_FS_CLAMP_TOTAL : 0);
+        log_tick(&s.raw, &s.sp, &s.cmd, exec_us, fs);
+        snapshot();
 
         stats_add(period_us, have_period, exec_us, n - 1, overrun);
         have_period = true;
@@ -457,6 +779,23 @@ esp_err_t ctl_task_start(void)
     if (s.task != NULL) {
         return ESP_OK;
     }
+
+    /* The controller and the mounting maps, before the first tick. A map
+       that does not parse falls back to the chip's own axes, loudly: the hold
+       then turns the wrong way unless the chip happens to sit that way. */
+    blimp_init(&s.b);
+    s.sp.mode = CTL_MODE_MANUAL;
+    if (!parse_axes(CONFIG_CTL_IMU_AXES, &s.imu_axes)) {
+        ESP_LOGE(TAG, "CTL_IMU_AXES \"%s\" does not parse; using the chip's axes", CONFIG_CTL_IMU_AXES);
+        (void)parse_axes("+X +Y +Z", &s.imu_axes);
+    }
+    if (!parse_axes(CONFIG_CTL_MAG_AXES, &s.mag_axes)) {
+        ESP_LOGE(TAG, "CTL_MAG_AXES \"%s\" does not parse; using the chip's axes", CONFIG_CTL_MAG_AXES);
+        (void)parse_axes("+X +Y +Z", &s.mag_axes);
+    }
+    motors_set_stop_hook(on_motor_stop);
+    ESP_LOGI(TAG, "%s; IMU axes %s, magnetometer axes %s", blimp_version(),
+             CONFIG_CTL_IMU_AXES, CONFIG_CTL_MAG_AXES);
 
     /* Before the task exists: its first line reports the dispatch. */
 #if CONFIG_ESP_TIMER_SUPPORTS_ISR_DISPATCH_METHOD
@@ -552,14 +891,16 @@ static int do_ctl_cmd(int argc, char **argv)
            s.isr_dispatch ? "ISR" : "task", st.total_ticks);
     printf("last window: %s\n", line);
     printf("stages: read_sensors peeks the sensor stream (interim) and samples the battery; "
-           "estimate, control, mixer, "
-           "saturate, pwm_out empty; log feeds 'capture'\n");
+           "estimate converts to SI in the body frame; control runs blimp_step() (%s) every tick, "
+           "armed only in the bench hold ('hold'); mixer, saturate and pwm_out drive the motors "
+           "only in the hold; log feeds 'capture'\n", blimp_version());
     const uint32_t gen = s.params_gen;
     if (gen == PARAM_GEN_NONE) {
         printf("parameters: none taken yet\n");
     } else {
         printf("parameters: the loop holds the set after %" PRIu32 " of %" PRIu32 " 'param' changes "
-               "(read by nothing until increment 3)\n", gen, param_changes());
+               "(blimp_step() reads them; they reach the motors in the bench hold)\n",
+               gen, param_changes());
     }
     size_t psram_size;
     if (psram_ready(&psram_size)) {
@@ -571,6 +912,214 @@ static int do_ctl_cmd(int argc, char **argv)
         printf("PSRAM not initialised\n");
     }
     printf("statistics line every %d ms: %s\n", CTL_STATS_PERIOD_MS, s.print ? "on" : "off");
+    return 0;
+}
+
+/* ------------------------------------------------------- 'hold' command */
+
+/*
+ * The bench hold (docs/control-loop-plan.md increment 3, the slice built
+ * 2026-10-30 for docs/pid-tuning-plan.md C1-C4): core/'s own loops on a
+ * heading, an altitude or a surge commanded here, gains from 'param'. Parsed
+ * by hand, not argtable, for the same reason as 'param': a negative heading
+ * would read as an option.
+ *
+ * Starting is refused unless the estimator has converged (core/ would not arm
+ * anyway, and a hold that starts by itself a minute later is a surprise),
+ * no motor is driven (the link's own timeout would otherwise coast them under
+ * the loop and kill it), and a ground tool has sent a packet within 0.5 s:
+ * core/'s link watchdog zeroes the hold after link_timeout_s of silence, so
+ * the hold runs only while something on the ground keeps the link alive.
+ */
+#define HOLD_ALT_MIN_M      0.2f
+#define HOLD_ALT_MAX_M      3.0f
+#define HOLD_SURGE_MAX_GF   30.0f
+#define HOLD_LINK_FRESH_MS  500u
+#define HOLD_GF_N           0.00980665f
+#define HOLD_RAD_DEG        (180.0f / BLIMP_PI)
+
+static const char *mode_name(ctl_mode_t m)
+{
+    switch (m) {
+    case CTL_MODE_MANUAL:      return "MANUAL";
+    case CTL_MODE_OPEN_LOOP:   return "OPEN_LOOP";
+    case CTL_MODE_CLOSED_LOOP: return "HOLD";
+    case CTL_MODE_KILLED:      return "KILLED";
+    default:                   return "?";
+    }
+}
+
+static void print_hold(void)
+{
+    hold_snap_t n;
+    blimp_hold_t h;
+    portENTER_CRITICAL(&s.mux);
+    n = s.snap;
+    h = s.hold_req;
+    portEXIT_CRITICAL(&s.mux);
+
+    printf("mode %s", mode_name(n.mode));
+    if (n.mode == CTL_MODE_CLOSED_LOOP) {
+        printf(n.armed ? ", armed" : ", NOT armed: the estimator is converging, motors at zero");
+    } else if (n.mode == CTL_MODE_KILLED) {
+        printf(": a stop arrived; 'hold off' gives the motors back");
+    }
+    printf("\nestimator: %s (still %.0f of 60 s)\n", n.converging ? "converging" : "converged",
+           (double)n.still_s);
+    printf("heading: estimate %+.1f deg (0 = the nose at arming), rate %+.1f deg/s",
+           (double)(n.yaw * HOLD_RAD_DEG), (double)(n.yaw_rate * HOLD_RAD_DEG));
+    if (h.heading_held) {
+        printf("; held at %+.1f deg, error %+.1f deg", (double)(h.heading_rad * HOLD_RAD_DEG),
+               (double)(n.demand.tz * HOLD_RAD_DEG));
+    } else {
+        printf("; not held");
+    }
+    printf("\naltitude: estimate %.2f m (%s)", (double)n.altitude,
+           n.altitude_valid ? "ToF" : "no source");
+    if (h.altitude_held) {
+        printf("; held at %.2f m", (double)h.altitude_m);
+    } else {
+        printf("; not held");
+    }
+    printf("\nsurge: %.1f gf\n", (double)(h.surge_n / HOLD_GF_N));
+    printf("output: fx %.2f gf  fz %.2f gf  tz %.3f mN m;  throttle FL %.3f RL %.3f FR %.3f RR %.3f%s\n",
+           (double)(n.out.fx / HOLD_GF_N), (double)(n.out.fz / HOLD_GF_N), (double)(n.out.tz * 1000.0f),
+           (double)n.throttle[MOTOR_FL], (double)n.throttle[MOTOR_RL], (double)n.throttle[MOTOR_FR],
+           (double)n.throttle[MOTOR_RR], n.act.clamped_yaw ? "  (yaw clamped)" : "");
+    if (n.link_seen) {
+        printf("ground link: last packet %" PRIu32 " ms ago; core/ zeroes the hold after %.1f s of silence\n",
+               n.link_age_ms, (double)s.b.params.link_timeout_s);
+    } else {
+        printf("ground link: no packet yet; the hold needs a ground tool sending (blimp_link.py status)\n");
+    }
+    printf("gains: yaw.kp %.4g N m/rad, yaw.kd %.4g N m s/rad, alt.kp %.4g N/m, alt.kd %.4g N s/m "
+           "('param yaw.' and 'param alt.' to change)\n",
+           (double)s.params.yaw.kp, (double)s.params.yaw.kd, (double)s.params.alt.kp,
+           (double)s.params.alt.kd);
+}
+
+static int hold_usage(void)
+{
+    printf("hold                     the state of the bench hold\n"
+           "hold heading <deg>|off   hold a heading, + counter-clockwise from above, from the nose at arming\n"
+           "hold altitude <m>|off    hold a height above the floor (ToF), %.1f to %.1f m\n"
+           "hold surge <gf>|off      a constant forward push, 0 to %.0f gf\n"
+           "hold off                 end it: the motors coast and go back to the link and the console\n"
+           "hold kill                coast now and latch KILLED, like a STOP from the link\n",
+           (double)HOLD_ALT_MIN_M, (double)HOLD_ALT_MAX_M, (double)HOLD_SURGE_MAX_GF);
+    return 1;
+}
+
+static int do_hold_cmd(int argc, char **argv)
+{
+    if (s.task == NULL) {
+        printf("control task not running - see the boot log for why\n");
+        return 1;
+    }
+    if (argc == 1) {
+        print_hold();
+        return 0;
+    }
+    const char *what = argv[1];
+    if (strcasecmp(what, "off") == 0 && argc == 2) {
+        portENTER_CRITICAL(&s.mux);
+        s.want_hold = false;
+        s.hold_req = (blimp_hold_t){0};
+        portEXIT_CRITICAL(&s.mux);
+        printf("hold off: the motors coast and go back to the link and the console\n");
+        return 0;
+    }
+    if (strcasecmp(what, "kill") == 0 && argc == 2) {
+        motors_coast();         /* the stop hook latches KILLED if the loop holds them */
+        printf("all motors coasting%s\n", motors_loop_owns() ? "; the hold is KILLED until 'hold off'" : "");
+        return 0;
+    }
+    if (argc != 3) {
+        return hold_usage();
+    }
+
+    const char *val = argv[2];
+    const bool off = strcasecmp(val, "off") == 0;
+    float v = 0.0f;
+    if (!off) {
+        char *end = NULL;
+        v = strtof(val, &end);
+        if (end == val || *end != '\0' || !isfinite(v)) {
+            printf("'%s' is not a number\n", val);
+            return 1;
+        }
+    }
+
+    hold_snap_t n;
+    blimp_hold_t req;
+    bool want;
+    portENTER_CRITICAL(&s.mux);
+    n = s.snap;
+    req = s.hold_req;
+    want = s.want_hold;
+    portEXIT_CRITICAL(&s.mux);
+
+    if (n.mode == CTL_MODE_KILLED) {
+        printf("refused: KILLED by a stop; 'hold off' first, then start again\n");
+        return 1;
+    }
+
+    if (strcasecmp(what, "heading") == 0) {
+        req.heading_held = !off;
+        req.heading_rad  = v / HOLD_RAD_DEG;
+    } else if (strcasecmp(what, "altitude") == 0) {
+        if (!off && (v < HOLD_ALT_MIN_M || v > HOLD_ALT_MAX_M)) {
+            printf("refused: altitude %.2f m is outside %.1f..%.1f m\n", (double)v,
+                   (double)HOLD_ALT_MIN_M, (double)HOLD_ALT_MAX_M);
+            return 1;
+        }
+        req.altitude_held = !off;
+        req.altitude_m    = v;
+    } else if (strcasecmp(what, "surge") == 0) {
+        if (!off && (v < 0.0f || v > HOLD_SURGE_MAX_GF)) {
+            printf("refused: surge %.1f gf is outside 0..%.0f gf\n", (double)v, (double)HOLD_SURGE_MAX_GF);
+            return 1;
+        }
+        req.surge_n = off ? 0.0f : v * HOLD_GF_N;
+    } else {
+        return hold_usage();
+    }
+
+    const bool starting = !want && !off;
+    if (starting) {
+        if (n.converging) {
+            printf("refused: the estimator needs the gondola still for 60 s before it arms "
+                   "(%.0f s so far)\n", (double)n.still_s);
+            return 1;
+        }
+        for (int m = 0; m < MOTOR_COUNT; m++) {
+            if (motor_get((motor_id_t)m) != 0.0f) {
+                printf("refused: motor %s is driven (%+.3f); stop it first\n",
+                       motor_name((motor_id_t)m), (double)motor_get((motor_id_t)m));
+                return 1;
+            }
+        }
+        if (!n.link_seen || n.link_age_ms > HOLD_LINK_FRESH_MS) {
+            printf("refused: no packet from the ground in the last %u ms; the hold runs only while a "
+                   "ground tool keeps the link alive (blimp_link.py status, the ground station)\n",
+                   (unsigned)HOLD_LINK_FRESH_MS);
+            return 1;
+        }
+    }
+
+    portENTER_CRITICAL(&s.mux);
+    s.hold_req = req;
+    if (starting) {
+        s.want_hold = true;
+    }
+    portEXIT_CRITICAL(&s.mux);
+
+    if (starting) {
+        printf("hold starting: armed at the next tick, heading 0 = where the nose points now\n");
+    }
+    printf("held: heading %s, altitude %s, surge %.1f gf\n",
+           req.heading_held ? "on" : "off", req.altitude_held ? "on" : "off",
+           (double)(req.surge_n / HOLD_GF_N));
     return 0;
 }
 
@@ -587,4 +1136,14 @@ void register_ctl(void)
         .argtable = &ctl_args
     };
     ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
+
+    const esp_console_cmd_t hold = {
+        .command = "hold",
+        .help = "The bench hold: core/'s loops on a commanded heading, altitude or surge. "
+                "'hold' alone shows the state; 'hold heading 30', 'hold off', 'hold kill'",
+        .hint = "[heading|altitude|surge <value>|off] | off | kill",
+        .func = &do_hold_cmd,
+        .argtable = NULL
+    };
+    ESP_ERROR_CHECK(esp_console_cmd_register(&hold));
 }

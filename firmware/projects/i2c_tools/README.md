@@ -57,7 +57,8 @@ written down, but it has not run on hardware.
 | Wi-Fi AP, UDP link | **Measured** 2026-10-24 | The laptop joined `ICARUS-…` and the ground station page (`software/ground_station/`) received telemetry. 2026-10-30 (`docs/history/bench-2026-10-30.md`): the console over UDP; 0.0 % loss over 582 packets, the blimp's longest wait 66 ms, a command echoed in 47 ms median; with the heartbeat on, the motors stop 0.50 s after the last `MOTOR_SET`, and the link falls 0.45 s after the last packet; `motor --failsafe` refused over the air. Still open from `docs/wireless-link.md` §8: current, range |
 | Sensor stream (`sensors`, the `SENSORS` packet) | **Built, not run on hardware** | Written 2026-10-24 on the four drivers above. The ground station decodes the same packet from `software/mock_blimp.py` |
 | PING))) ultrasonic | **Parked, not tested** | Not in the build (§8) |
-| Controller parameters (`param`) | **Measured** 2026-10-30 | `software/param_check.py --reboot`, 13 of 13: the 45-row listing (2959 bytes) arrives whole over the air, a set reaches the loop at its next tick, the refusals hold, core/'s validator clamps on the S3, no overrun or skipped tick during 20 sets, a power cycle returns to params.c (`docs/history/bench-2026-10-30.md`). Nothing reads the values until increment 3 |
+| Controller parameters (`param`) | **Measured** 2026-10-30 | `software/param_check.py --reboot`, 13 of 13: the 45-row listing (2959 bytes) arrives whole over the air, a set reaches the loop at its next tick, the refusals hold, core/'s validator clamps on the S3, no overrun or skipped tick during 20 sets, a power cycle returns to params.c (`docs/history/bench-2026-10-30.md`). `blimp_step()` reads them since the bench hold |
+| Bench hold (`hold`), motor map (`motormap`) | **Built, not run on hardware** | 2026-10-30, branch `control-inc3`: `core/` 0.2.0's hold tested on the host (`core/tests/test_blimp.c`), the firmware builds clean. The mounting maps and the map's positions come from the rope-rig session of the same day (`docs/history/rig-2026-10-30.md`) |
 
 ## 2. Hardware and wiring
 
@@ -411,15 +412,18 @@ ctl --stats on      print that timing line once a second until reset (--stats of
 `ctl_task.c` is the fixed-rate control task: one task on core 1, priority 20,
 woken every 20 ms by an `esp_timer` dispatched from the timer interrupt, running
 the pipeline read sensors, estimate, control, mixer, saturate, PWM, log, with
-the typed records of `ctl_types.h`. **In the current increment the middle
-stages are empty:** the read stage peeks the sensor stream's latest sample
-(the stream still owns the chips) and samples the battery ADC (`battery`
-below), the log stage feeds `capture` below, and
+the typed records of `ctl_types.h`. The read stage peeks the sensor stream's
+latest sample (the stream still owns the chips) and samples the battery ADC
+(`battery` below); since 2026-10-30 (`control-inc3`) the estimate stage
+converts to SI in `core/`'s body frame through the mounting maps
+(`CONFIG_CTL_IMU_AXES`, `CONFIG_CTL_MAG_AXES`), the control stage runs
+`blimp_step()` every tick, and mixer, saturate and PWM drive the motors only
+in the bench hold (`hold` below); the log stage feeds `capture` below, and
 the task measures its own period and execution time in one-second windows
 (`ctl: 50 ticks   period 20.00/20.00/20.00 ms ...`). The line is off at boot,
 because once a second it buries the console; `ctl --stats on` turns it on, or
-`CONFIG_CTL_STATS_AT_BOOT` (menuconfig, "Control task") from boot. Nothing drives the
-bus or the motors through it yet. It also takes the `param` set at the top of a
+`CONFIG_CTL_STATS_AT_BOOT` (menuconfig, "Control task") from boot. Nothing
+drives the bus through it yet. It also takes the `param` set at the top of a
 tick, and `ctl` says after which change. The plan, the design decisions and the
 bench checks per increment are in `docs/control-loop-plan.md`.
 
@@ -507,6 +511,65 @@ accepted, and whatever a set leaves passes the validator. On the board,
 (the listing arriving whole, a set reaching the loop, the refusals, the
 validator, the loop's timing during a burst of sets, a power cycle) and leaves
 every value as it found it.
+
+### `hold`: the controller on a commanded heading (the bench hold)
+
+Built 2026-10-30 (branch `control-inc3`), not yet run on the board. The
+control task runs `core/`'s `blimp_step()` every tick; this command arms it
+on setpoints given here instead of guidance's (`blimp_hold_t`,
+`core/include/blimp/blimp.h`), for the closed-loop tests of
+`docs/pid-tuning-plan.md` (C1–C4). Gains come from `param`.
+
+```
+hold                       state: mode, estimator, heading, output, link, gains
+hold heading 30            hold 30 deg counter-clockwise (from above) of the nose at arming
+hold heading -45           (a negative value is a value, not an option: parsed by hand)
+hold altitude 1.5          hold 1.5 m above the floor on the ToF (0.2 to 3.0)
+hold surge 2               a constant 2 gf forward push (0 to 30)
+hold heading off           stop holding that axis (it outputs nothing)
+hold off                   end it: the motors coast and go back to the link and the console
+hold kill                  coast and latch KILLED, as a STOP from the link does
+```
+
+An axis not held outputs nothing, the hover feed-forward included, so a
+heading hold on a tether never runs the heave pair. Starting is refused
+unless `core/`'s estimator has converged (60 s still since boot or since the
+last hold), no motor is driven, and a ground packet arrived in the last
+0.5 s: `core/`'s link watchdog zeroes the hold after `link_timeout_s` (1 s)
+of silence, so a ground tool has to keep the link alive.
+`python software/hold_test.py` does that, steps the heading, kills the hold
+from the ground when the gyro passes `--max-rate`, records a capture and ends
+with `hold off`. While the hold runs, the loop owns the motors: `MOTOR_SET`
+is counted and dropped (`link` shows how many), `motor -t` is refused, and
+any stop (`MOTOR_STOP`, `motor -s`, `hold kill`) latches KILLED until
+`hold off`. The capture's setpoint slots carry the wrench given to the motors
+and the heading error (`ctl_types.h`, `software/blimp_log.py`'s `hold_*`
+columns). Thrust becomes throttle as T / `motor_max_thrust_n`, then the
+deadband: set both for the vehicle on the bench (`param motor_max_thrust_n`,
+`motor --deadband`).
+
+### `motormap`: each motor's name, position and sign
+
+Which name (FL/RL/FR/RR: what the link, the console and the ground use),
+which position in `core/`'s frame (seen from behind the blimp; what the
+control loop drives) and which direction sign each of the four driver
+outputs carries (`cmd_motor.h`). Name and position are kept apart because on
+2026-10-30 the rope rig found the team's names mirrored against `core/`'s
+frame (the output named FL sits on the blimp's right) and the team kept the
+names: the defaults are `CONFIG_MOTOR_POSITIONS` = "FR RR FL RL" and
+`CONFIG_MOTOR_SIGNS` = "+ + + +".
+
+```
+motormap                    the map, outputs 1-4 in Kconfig's pin order
+motormap name 1 FR          rename output 1 (the output that had FR takes its old name)
+motormap position 3 FL      where output 3's motor sits (swaps the same way)
+motormap sign 2 -           the command direction that pushes forward (surge) or up (heave)
+motormap reset              Kconfig's map, and forget the saved one
+```
+
+Every change is checked, refused while a motor turns or the hold runs,
+applied at once and saved in NVS (a map is a fact about the airframe, not a
+value to try). The boot log and `motor` show the map in use.
 
 ### `exit` / `quit`: how to leave
 
@@ -786,7 +849,8 @@ i2c_tools/
     ├── cmd_baro.c/.h             BMP180, BMP280 or BME280 driver, auto-detected, + `baro`
     ├── cmd_tof.c/.h              VL53L1X driver + `tof`
     ├── sensor_stream.c/.h        samples every sensor for the SENSORS packet + `sensors`
-    ├── ctl_task.c/.h             fixed-rate control task (core 1, 20 ms), timing statistics + `ctl`
+    ├── ctl_task.c/.h             fixed-rate control task (core 1, 20 ms): blimp_step(), timing + `ctl`, `hold`
+    ├── motor_map.c/.h            the motor map in NVS + `motormap` (the map itself is cmd_motor's)
     ├── ctl_types.h               the pipeline's records: sensors_raw_t ... log_record_t
     ├── capture.c/.h              the loop's records kept in PSRAM + `capture`; read out by the link
     ├── cmd_battery.c/.h          battery divider on ADC1, sampled by the control task, + `battery`

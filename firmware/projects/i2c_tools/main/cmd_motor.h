@@ -4,6 +4,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 #include "esp_err.h"
 
 #ifdef __cplusplus
@@ -64,11 +65,13 @@ esp_err_t motors_init(void);
 /**
  * Set one motor's signed thrust command, -1.0 to +1.0. Exactly 0.0 coasts.
  *
- * Positive drives IN1 of that pair high, which is a direction in the wiring,
- * not a direction on the airframe - whether it pushes the nose forward
- * depends on how the motor leads and the prop are fitted. Establish the sign
- * per thruster on the bench, and correct it by swapping that motor's two
- * GPIOs in Kconfig rather than by negating commands in the controller.
+ * Positive drives IN1 of that pair high times the map's sign (below), which
+ * is a direction in the wiring, not a direction on the airframe - whether it
+ * pushes the nose forward depends on how the motor leads and the prop are
+ * fitted. Establish the sign per thruster on the bench and set it in the map
+ * ('motormap'), rather than by negating commands in the controller. On
+ * 2026-10-30 a positive command pushed forward on FL and FR and up on RL
+ * and RR, so every default sign is +1.
  *
  * The magnitude is mapped through the break-away deadband (see
  * motors_set_deadband). With the default deadband of 0 the magnitude is the
@@ -141,6 +144,75 @@ const char *motor_name(motor_id_t motor);
 
 /** Which driver and input pair this motor sits on, e.g. "#1 IN1/IN2". */
 const char *motor_where(motor_id_t motor);
+
+/*
+ * The motor map (2026-10-30), so that renaming or moving a motor is a console
+ * line and not a rebuild. The four driver outputs are the four pin pairs of
+ * Kconfig's MOTOR_*_IN*_GPIO, numbered 1-4 in the order FL, RL, FR, RR of
+ * those settings. Each output carries three things:
+ *
+ *   name      FL/RL/FR/RR: what MOTOR_SET, motor_set(), the console and the
+ *             ground use. A name is only a label.
+ *   position  the same four labels in core/'s frame, seen from behind the
+ *             blimp (FL is the surge motor on the blimp's own left): what the
+ *             control loop drives, through motor_at_position(). Kept apart
+ *             from the name because the loop must push with the motor that
+ *             is physically there, whatever the team calls it: a mirrored
+ *             name turns the heading loop into positive feedback.
+ *   sign      +1 or -1: which command direction pushes the way core/ expects
+ *             (forward for the surge pair, up for the heave pair). Applied
+ *             to every command, so a flipped propeller or reversed leads is
+ *             corrected here instead of by rewiring.
+ *
+ * Names and positions are each a permutation of the four labels. Defaults
+ * come from Kconfig (MOTOR_POSITIONS, MOTOR_SIGNS); motor_map.c keeps a
+ * changed map in NVS and the 'motormap' command edits it.
+ */
+typedef struct {
+    uint8_t name[MOTOR_COUNT];      /* per output: a motor_id_t                 */
+    uint8_t position[MOTOR_COUNT];  /* per output: a motor_id_t, core/'s frame */
+    int8_t  sign[MOTOR_COUNT];      /* per output: +1 or -1                     */
+} motor_map_t;
+
+/** The map as Kconfig gives it. */
+void motors_default_map(motor_map_t *out);
+
+/** The map in use. */
+void motors_get_map(motor_map_t *out);
+
+/**
+ * Replace the map. ESP_ERR_INVALID_ARG unless names and positions are
+ * permutations and every sign is +1 or -1; ESP_ERR_INVALID_STATE while any
+ * motor is driven or the control loop owns the motors.
+ */
+esp_err_t motors_set_map(const motor_map_t *map);
+
+/** The name of the motor at a position in core/'s frame. */
+motor_id_t motor_at_position(motor_id_t position);
+
+/** The output, 0-3, that a name drives. */
+int motor_output_of(motor_id_t motor);
+
+/*
+ * The control loop's claim on the motors (ctl_task.c, the bench hold). While
+ * it holds them, motor_set() and motors_set_all() return
+ * ESP_ERR_INVALID_STATE, so neither the link's MOTOR_SET nor the console can
+ * fight the loop, and only motors_loop_set_all() writes the bridges.
+ * motors_coast() and motors_brake() always work: a stop never waits for an
+ * owner. Releasing the claim leaves the motors coasting.
+ */
+void motors_loop_claim(bool on);
+bool motors_loop_owns(void);
+esp_err_t motors_loop_set_all(const float throttle[MOTOR_COUNT]);
+
+/*
+ * Called by motors_coast() and motors_brake() before they write the pins,
+ * whenever the loop holds the motors: a stop from anyone (the link's
+ * MOTOR_STOP, 'motor -s') is then a kill the loop latches, not a pause it
+ * overrides at its next tick. The loop registers it; called from whichever
+ * task stopped the motors, so it must only set a flag.
+ */
+void motors_set_stop_hook(void (*hook)(void));
 
 /** Register the 'motor' command with the console. */
 void register_motor(void);

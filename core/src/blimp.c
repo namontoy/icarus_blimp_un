@@ -12,6 +12,8 @@
  *   4. failsafe: link staleness, ceiling breach, estimator invalid
  *   5. guidance: b->state (+ in->target, contact) -> b->demand
  *   6. PID loops: b->demand (guidance's setpoints) -> a final wrench
+ *      (5-6 with in->hold.active: the bench hold's commanded setpoints
+ *      through the same loops, guidance not stepped; blimp.h)
  *   7. mixer: final wrench -> *out
  *   8. *out is written on EVERY path, including every early return.
  *
@@ -191,7 +193,7 @@ const char *blimp_version(void)
      * rule 6 bans time-of-day/non-determinism, and this must be identical
      * for identical source. Bump the number when this file's behaviour
      * changes in a way worth distinguishing in a flight log. */
-    return "blimp-core-0.1.0";
+    return "blimp-core-0.2.0";   /* 0.2.0: the bench hold (blimp_hold_t) */
 }
 
 /* Resets every control-loop PID. Used whenever the next tick's error signal
@@ -202,6 +204,80 @@ static void reset_control_loops(blimp_t *b)
     blimp_pid_reset(&b->pid_alt);
     blimp_pid_reset(&b->pid_yaw);
     blimp_pid_reset(&b->pid_surge);
+}
+
+/* Altitude: PID on the height error PLUS the hover feed-forward - the rear
+ * pair has to carry the trim weight before it can do anything else. The
+ * PID's output clamp is narrowed every tick to the rear pair's REAL range
+ * around the feed-forward, [-hover, heave_budget - hover], so conditional
+ * integration sees the actuator limit instead of the nominal one in params.
+ * Done on a local copy: params stay the single source of truth and are never
+ * mutated here. Shared by guidance's run and the bench hold. */
+static float altitude_loop(blimp_t *b, float err_m, float dt)
+{
+    blimp_pid_params_t alt_p = b->params.alt;
+    const float hover    = b->params.hover_thrust_n;
+    const float heave_hi = b->params.heave_budget_n - hover;
+    if (alt_p.out_min < -hover)    { alt_p.out_min = -hover; }
+    if (alt_p.out_max > heave_hi)  { alt_p.out_max = heave_hi; }
+    if (alt_p.out_max < alt_p.out_min) { alt_p.out_max = alt_p.out_min; }
+    /* Damping from the estimator's fused vertical rate rather than from
+     * differentiating the (vision-noisy) altitude error; only while the
+     * altitude is actually known, otherwise the accel-only dead-reckoned vz
+     * drifts and would be fought for no reason. */
+    const uint32_t fix_age_us = b->state.t_us - b->est.last_abs_us;
+    const bool fix_fresh = b->est.abs_ever && fix_age_us < 500000u;
+    const float d_alt = (b->state.altitude_valid && fix_fresh)
+                            ? -b->state.vz : 0.0f;
+    return blimp_pid_step_d(&b->pid_alt, &alt_p, err_m, d_alt, dt) + hover;
+}
+
+/* Heading: P(+I) on the heading error, with the derivative term taken from
+ * the GYRO yaw rate rather than by differentiating the error (pid.h's
+ * blimp_pid_step_d exists for exactly this). The error shrinks as the nose
+ * swings toward the setpoint, so d(error)/dt = -yaw_rate. */
+static float heading_loop(blimp_t *b, float err_rad, float dt)
+{
+    return blimp_pid_step_d(&b->pid_yaw, &b->params.yaw, blimp_wrap_pi(err_rad),
+                            -b->state.yaw_rate, dt);
+}
+
+/* The bench hold (blimp.h): the run's own loops on commanded setpoints.
+ * Guidance is not stepped, so its state stays where arming or a failsafe
+ * left it; b->demand carries the errors the loops ran on (decision 1's
+ * convention: fz the height error, tz the heading error), fx the commanded
+ * surge itself, since no range error exists here. */
+static void hold_wrench(blimp_t *b, const blimp_hold_t *h, float dt,
+                        blimp_wrench_t *w)
+{
+    *w = BLIMP_SAFE_WRENCH;
+    b->demand = BLIMP_SAFE_WRENCH;
+
+    /* Surge is open loop here: a constant push, never reverse, never above
+     * the run's own cruise cap. */
+    blimp_pid_reset(&b->pid_surge);
+    if (isfinite(h->surge_n) && h->surge_n > 0.0f) {
+        const float cap = b->params.surge.out_max;
+        w->fx = (isfinite(cap) && h->surge_n > cap) ? cap : h->surge_n;
+        if (!(w->fx >= 0.0f)) {
+            w->fx = 0.0f;
+        }
+        b->demand.fx = w->fx;
+    }
+
+    if (h->altitude_held && isfinite(h->altitude_m) && b->state.altitude_valid) {
+        b->demand.fz = h->altitude_m - b->state.altitude;
+        w->fz = altitude_loop(b, b->demand.fz, dt);
+    } else {
+        blimp_pid_reset(&b->pid_alt);
+    }
+
+    if (h->heading_held && isfinite(h->heading_rad)) {
+        b->demand.tz = blimp_wrap_pi(h->heading_rad - b->state.yaw);
+        w->tz = heading_loop(b, b->demand.tz, dt);
+    } else {
+        blimp_pid_reset(&b->pid_yaw);
+    }
 }
 
 /* Every early-return path (b non-NULL) funnels through here so *out is
@@ -373,58 +449,36 @@ void blimp_step(blimp_t *b, const blimp_input_t *in, blimp_actuators_t *out)
         return;
     }
 
-    /* ---- 5. guidance: b->state (+ target, contact) -> b->demand --------- */
-    (void)blimp_guidance_step(&b->guid, &b->params, &b->state, &in->target,
-                              in->contact_detected, dt, &b->demand);
-
-    /* ---- 6. PID loops: b->demand's setpoints -> a final wrench ----------
-     * See decision 1 above for why fx/fz/tz are treated as pre-PID errors
-     * and fy is passed straight through as an already-final force. */
     blimp_wrench_t final_wrench;
 
-    /* Surge: P on the range error. The mixer discards anything negative
-     * (no reverse thrust), and the PID's own out_min is 0 so its anti-windup
-     * bookkeeping agrees with that. */
-    final_wrench.fx = blimp_pid_step(&b->pid_surge, &b->params.surge,
-                                     b->demand.fx, dt);
+    if (in->hold.active) {
+        /* ---- 5-6 (bench hold): commanded setpoints through the same loops
+         * (blimp.h's blimp_hold_t) instead of guidance's. */
+        hold_wrench(b, &in->hold, dt, &final_wrench);
+    } else {
+        /* ---- 5. guidance: b->state (+ target, contact) -> b->demand ----- */
+        (void)blimp_guidance_step(&b->guid, &b->params, &b->state, &in->target,
+                                  in->contact_detected, dt, &b->demand);
 
-    /* No lateral actuator exists (types.h). */
-    final_wrench.fy = 0.0f;
+        /* ---- 6. PID loops: b->demand's setpoints -> a final wrench ------
+         * See decision 1 above for why fx/fz/tz are treated as pre-PID
+         * errors and fy is passed straight through as an already-final
+         * force. */
 
-    /* Altitude: PID on the height error PLUS the hover feed-forward - the
-     * rear pair has to carry the trim weight before it can do anything
-     * else. The PID's output clamp is narrowed every tick to the rear
-     * pair's REAL range around the feed-forward, [-hover, heave_budget -
-     * hover], so conditional integration sees the actuator limit instead of
-     * the nominal one in params. Done on a local copy: params stay the
-     * single source of truth and are never mutated here. */
-    {
-        blimp_pid_params_t alt_p = b->params.alt;
-        const float hover    = b->params.hover_thrust_n;
-        const float heave_hi = b->params.heave_budget_n - hover;
-        if (alt_p.out_min < -hover)    { alt_p.out_min = -hover; }
-        if (alt_p.out_max > heave_hi)  { alt_p.out_max = heave_hi; }
-        if (alt_p.out_max < alt_p.out_min) { alt_p.out_max = alt_p.out_min; }
-        /* Damping from the estimator's fused vertical rate rather than
-         * from differentiating the (vision-noisy) altitude error; only
-         * while the altitude is actually known, otherwise the accel-only
-         * dead-reckoned vz drifts and would be fought for no reason. */
-        const uint32_t fix_age_us = b->state.t_us - b->est.last_abs_us;
-        const bool fix_fresh = b->est.abs_ever && fix_age_us < 500000u;
-        const float d_alt = (b->state.altitude_valid && fix_fresh)
-                                ? -b->state.vz : 0.0f;
-        final_wrench.fz = blimp_pid_step_d(&b->pid_alt, &alt_p,
-                                           b->demand.fz, d_alt, dt) + hover;
+        /* Surge: P on the range error. The mixer discards anything negative
+         * (no reverse thrust), and the PID's own out_min is 0 so its
+         * anti-windup bookkeeping agrees with that. */
+        final_wrench.fx = blimp_pid_step(&b->pid_surge, &b->params.surge,
+                                         b->demand.fx, dt);
+
+        /* No lateral actuator exists (types.h). */
+        final_wrench.fy = 0.0f;
+
+        final_wrench.fz = altitude_loop(b, b->demand.fz, dt);
+
+        /* Heading on the vision bearing error (guidance's demand.tz). */
+        final_wrench.tz = heading_loop(b, b->demand.tz, dt);
     }
-
-    /* Heading: P(+I) on the vision bearing error, with the derivative term
-     * taken from the GYRO yaw rate rather than by differentiating the
-     * bearing (pid.h's blimp_pid_step_d exists for exactly this). The
-     * bearing error shrinks as the nose swings toward the target, so
-     * d(error)/dt = -yaw_rate. */
-    final_wrench.tz = blimp_pid_step_d(&b->pid_yaw, &b->params.yaw,
-                                       blimp_wrap_pi(b->demand.tz),
-                                       -b->state.yaw_rate, dt);
 
     /* ---- 7. mixer: final wrench -> *out ----------------------------------
      * ---- 8. *out is written here, on the only path that isn't an early

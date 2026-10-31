@@ -32,11 +32,20 @@ typedef struct {
     uint32_t rx_ok;
     uint32_t rx_bad;
     uint32_t rx_stale;      /* MOTOR_SETs dropped as older than the last    */
+    uint32_t rx_refused;    /* MOTOR_SETs refused: the control loop holds the motors */
     uint32_t tx;            /* every packet sent, telemetry and sensors     */
     uint32_t tx_sensors;    /* SENSORS packets among them                   */
 } net_link_status_t;
 
 void net_link_get_status(net_link_status_t *out);
+
+/*
+ * The time of the last valid packet of any type, esp_timer microseconds cut
+ * to 32 bits (the control task's clock), and whether there was one. The
+ * control task hands it to core/'s link watchdog (blimp_notify_link), which
+ * zeroes the bench hold when the ground goes quiet for link_timeout_s.
+ */
+bool net_link_last_rx(uint32_t *t_us);
 
 /** Register the 'link' command with the console. */
 void register_link(void);

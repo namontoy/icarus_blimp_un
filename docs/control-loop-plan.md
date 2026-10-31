@@ -285,6 +285,26 @@ fresh when the frame sequence number moved.
    commanded altitude or heading is a `core/` change (the core-change skill, the ctypes mirror
    in `sim/blimp_ffi.py`), and the firmware then needs a way to send it: `MODE_SET`'s payload
    or a console command. Plan it with this increment.
+   **Built 2026-10-30, the bench slice (branch `control-inc3`; host-tested, not yet run on the
+   board).** What the PID tests need, ahead of the rest of the increment:
+   - `core/` 0.2.0: `blimp_input_t.hold` (`blimp_hold_t`), setpoints for heading, altitude and a
+     constant surge in place of guidance's, through the same loops, limits and failsafes; an axis
+     not held outputs nothing, the hover feed-forward included. The open item above, answered.
+   - `estimate()`: counts to SI in the body frame through `CONFIG_CTL_IMU_AXES` and
+     `CONFIG_CTL_MAG_AXES` (the mounting rotations of D10, as Kconfig strings until `params_t`
+     exists), the tilt-corrected ToF; the barometer is withheld from `core/` (docs/10).
+   - `control()` runs `blimp_step()` every tick; only the `hold` console command arms it, as
+     mode CLOSED_LOOP. `mixer()` places `core/`'s thrusts by position through the motor map
+     (`cmd_motor.h`, `motormap`, kept in NVS), `saturate()` divides by `motor_max_thrust_n`,
+     `pwm_out()` writes through the loop's claim on the motors. Rule 13 stays `core/`'s.
+   - D5, narrowed for now: the latch applies to the hold only. Any stop while the loop holds the
+     motors (`MOTOR_STOP`, `motor -s`, `hold kill`) latches KILLED until `hold off`; MANUAL keeps
+     today's behaviour, so the tools and the ground station are unchanged. D6, narrowed too:
+     `core/`'s link watchdog (`link_timeout_s`, fed by every valid packet) zeroes the hold, a
+     bench rule; Rule 1's "the autonomous modes do not stop on link loss" comes with the race
+     mode.
+   - Not built: `MODE_SET`, the mode and latch fields of `CONTROL`, the ground station's side of
+     D5, the battery latch, and everything of increment 2.
 4. **Logging** (built 2026-10-27, ahead of 2 and 3): `capture.c` (the buffer in PSRAM, the
    `capture` command), `LOG_CMD`/`LOG_INFO`/`LOG_CHUNK` in `net_link.c`, the chunked download
    with re-request in `blimp_link.py capture`, `software/blimp_log.py` (decode, summary, CSV),

@@ -489,5 +489,215 @@ int main(void)
                  violations, samples);
     }
 
+    /* ==================== the bench hold (blimp.h, blimp_hold_t) ========== */
+    TEST_GROUP("bench hold: heading only, no heave, the right motor turns CCW");
+    {
+        /* 20 ms ticks after arming; the link kept fresh. The vehicle is
+         * still, so the yaw estimate stays at the arm-time origin (0). */
+        blimp_t b;
+        uint32_t t_us = force_arm(&b);
+        blimp_actuators_t out = {0};
+        blimp_hold_t h = {0};
+        h.active = true;
+        h.heading_held = true;
+
+        h.heading_rad = 0.5f;               /* turn left: CCW, +tz */
+        for (int i = 0; i < 3; i++) {
+            t_us += 20000u;
+            blimp_input_t in = {0};
+            in.imu = stationary_imu(t_us);
+            in.arm_request = true;
+            in.t_us = t_us;
+            in.hold = h;
+            blimp_notify_link(&b, t_us);
+            blimp_step(&b, &in, &out);
+        }
+        CHECK(b.armed);
+        CHECK(b.demand.tz > 0.49f && b.demand.tz < 0.51f);
+        CHECK(out.thrust_fr > out.thrust_fl);           /* mixer.h: right harder = CCW */
+        CHECK_NEAR(out.thrust_rl, 0.0f, 1e-9);          /* altitude not held: */
+        CHECK_NEAR(out.thrust_rr, 0.0f, 1e-9);          /* no hover feed-forward */
+        CHECK(actuator_violations(&out) == 0);
+
+        h.heading_rad = -0.5f;              /* turn right: CW, -tz */
+        t_us += 20000u;
+        blimp_input_t in = {0};
+        in.imu = stationary_imu(t_us);
+        in.arm_request = true;
+        in.t_us = t_us;
+        in.hold = h;
+        blimp_notify_link(&b, t_us);
+        blimp_step(&b, &in, &out);
+        CHECK(out.thrust_fl > out.thrust_fr);
+        CHECK(actuator_violations(&out) == 0);
+
+        h.heading_rad = 0.0f;               /* on the setpoint, at rest */
+        for (int i = 0; i < 3; i++) {
+            t_us += 20000u;
+            in.imu = stationary_imu(t_us);
+            in.t_us = t_us;
+            in.hold = h;
+            blimp_notify_link(&b, t_us);
+            blimp_step(&b, &in, &out);
+        }
+        CHECK_NEAR(out.thrust_fl, 0.0f, 1e-6);
+        CHECK_NEAR(out.thrust_fr, 0.0f, 1e-6);
+
+        /* A setpoint across the +-pi seam takes the short way round:
+         * -3.0 rad from 0 is a CCW turn of 3.28 rad the long way, so the
+         * wrapped error is -3.0 (CW), not +3.28. */
+        h.heading_rad = -3.0f;
+        t_us += 20000u;
+        in.imu = stationary_imu(t_us);
+        in.t_us = t_us;
+        in.hold = h;
+        blimp_notify_link(&b, t_us);
+        blimp_step(&b, &in, &out);
+        CHECK(b.demand.tz < -2.9f && b.demand.tz > -3.1f);
+
+        /* Non-finite setpoint: the axis outputs nothing. */
+        h.heading_rad = NAN;
+        t_us += 20000u;
+        in.imu = stationary_imu(t_us);
+        in.t_us = t_us;
+        in.hold = h;
+        blimp_notify_link(&b, t_us);
+        blimp_step(&b, &in, &out);
+        CHECK_NEAR(out.thrust_fl, 0.0f, 1e-9);
+        CHECK_NEAR(out.thrust_fr, 0.0f, 1e-9);
+        CHECK(actuator_violations(&out) == 0);
+    }
+
+    TEST_GROUP("bench hold: altitude, surge, and what is not held");
+    {
+        blimp_t b;
+        uint32_t t_us = force_arm(&b);
+        blimp_actuators_t out = {0};
+        blimp_input_t in = {0};
+        blimp_hold_t h = {0};
+        h.active = true;
+
+        /* Altitude held but no altitude source: nothing on the rear pair. */
+        h.altitude_held = true;
+        h.altitude_m = 1.5f;
+        t_us += 20000u;
+        in.imu = stationary_imu(t_us);
+        in.arm_request = true;
+        in.t_us = t_us;
+        in.hold = h;
+        blimp_notify_link(&b, t_us);
+        blimp_step(&b, &in, &out);
+        CHECK(!b.state.altitude_valid);
+        CHECK_NEAR(out.thrust_rl + out.thrust_rr, 0.0f, 1e-9);
+
+        /* With the ToF at 1.0 m: below the setpoint, the pair climbs, with
+         * the hover feed-forward in it; the front pair stays off. */
+        for (int i = 0; i < 25; i++) {
+            t_us += 20000u;
+            in.imu = stationary_imu(t_us);
+            in.imu.range_alt = 1.0f;
+            in.imu.range_valid = true;
+            in.t_us = t_us;
+            in.hold = h;
+            blimp_notify_link(&b, t_us);
+            blimp_step(&b, &in, &out);
+        }
+        CHECK(b.state.altitude_valid);
+        CHECK(out.thrust_rl + out.thrust_rr > b.params.hover_thrust_n);
+        CHECK_NEAR(out.thrust_fl + out.thrust_fr, 0.0f, 1e-9);
+        CHECK(actuator_violations(&out) == 0);
+
+        /* Above the setpoint: the pair backs off below the feed-forward,
+         * never below zero. */
+        h.altitude_m = 0.5f;
+        for (int i = 0; i < 5; i++) {
+            t_us += 20000u;
+            in.imu = stationary_imu(t_us);
+            in.imu.range_alt = 1.0f;
+            in.imu.range_valid = true;
+            in.t_us = t_us;
+            in.hold = h;
+            blimp_notify_link(&b, t_us);
+            blimp_step(&b, &in, &out);
+        }
+        CHECK(out.thrust_rl + out.thrust_rr < b.params.hover_thrust_n);
+        CHECK(actuator_violations(&out) == 0);
+
+        /* Surge alone: an even push on the front pair, capped at the
+         * cruise cap however large the request. */
+        h.altitude_held = false;
+        h.surge_n = 0.05f;
+        t_us += 20000u;
+        in.imu = stationary_imu(t_us);
+        in.t_us = t_us;
+        in.hold = h;
+        blimp_notify_link(&b, t_us);
+        blimp_step(&b, &in, &out);
+        CHECK_NEAR(out.thrust_fl + out.thrust_fr, 0.05f, 1e-5);
+        CHECK_NEAR(out.thrust_fl, out.thrust_fr, 1e-6);
+        CHECK_NEAR(out.thrust_rl + out.thrust_rr, 0.0f, 1e-9);
+        h.surge_n = 1.0e6f;
+        t_us += 20000u;
+        in.imu = stationary_imu(t_us);
+        in.t_us = t_us;
+        in.hold = h;
+        blimp_notify_link(&b, t_us);
+        blimp_step(&b, &in, &out);
+        CHECK(out.thrust_fl + out.thrust_fr <= b.params.surge.out_max + 1e-5f);
+        CHECK(actuator_violations(&out) == 0);
+
+        /* Active but nothing held: all zero, guidance not consulted. */
+        h = (blimp_hold_t){0};
+        h.active = true;
+        t_us += 20000u;
+        in.imu = stationary_imu(t_us);
+        in.t_us = t_us;
+        in.hold = h;
+        blimp_notify_link(&b, t_us);
+        blimp_step(&b, &in, &out);
+        CHECK_NEAR(out.thrust_fl + out.thrust_fr + out.thrust_rl + out.thrust_rr, 0.0f, 1e-9);
+    }
+
+    TEST_GROUP("bench hold: failsafes and disarm still win");
+    {
+        blimp_t b;
+        uint32_t t_us = force_arm(&b);
+        blimp_actuators_t out = {0};
+        blimp_hold_t h = {0};
+        h.active = true;
+        h.heading_held = true;
+        h.heading_rad = 1.0f;
+        h.surge_n = 0.05f;
+
+        /* Link silent past link_timeout_s: zero. */
+        t_us += 5000000u;
+        blimp_input_t in = {0};
+        in.imu = stationary_imu(t_us);
+        in.arm_request = true;
+        in.t_us = t_us;
+        in.hold = h;
+        blimp_step(&b, &in, &out);
+        CHECK(b.guid.state == BLIMP_GUID_FAILSAFE);
+        CHECK_NEAR(out.thrust_fl + out.thrust_fr + out.thrust_rl + out.thrust_rr, 0.0f, 1e-9);
+
+        /* Link back: the hold resumes (guidance stays parked, not stepped). */
+        t_us += 20000u;
+        in.imu = stationary_imu(t_us);
+        in.t_us = t_us;
+        blimp_notify_link(&b, t_us);
+        blimp_step(&b, &in, &out);
+        CHECK(out.thrust_fr > out.thrust_fl);
+
+        /* Disarm request: zero, whatever the hold says. */
+        t_us += 20000u;
+        in.imu = stationary_imu(t_us);
+        in.arm_request = false;
+        in.t_us = t_us;
+        blimp_notify_link(&b, t_us);
+        blimp_step(&b, &in, &out);
+        CHECK(!b.armed);
+        CHECK_NEAR(out.thrust_fl + out.thrust_fr + out.thrust_rl + out.thrust_rr, 0.0f, 1e-9);
+    }
+
     TEST_REPORT();
 }

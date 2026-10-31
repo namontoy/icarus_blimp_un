@@ -96,6 +96,9 @@ static struct {
     uint16_t           motor_seq;
     bool               have_motor;
     volatile uint32_t  rx_stale;      /* MOTOR_SETs dropped as out of date   */
+    volatile uint32_t  rx_refused;    /* MOTOR_SETs refused while the loop holds the motors */
+    volatile uint32_t  last_rx_u32;   /* last_rx_us cut to 32 bits: one atomic word
+                                         for the control task (net_link_last_rx) */
 } s;
 
 /* The one LOG_CHUNK under construction; the link task alone touches it. */
@@ -152,6 +155,14 @@ static void note_motor_packet(uint16_t seq, const struct sockaddr_in *from, int6
 
 static bool handle_motor_set(const link_motor_set_t *p)
 {
+    /* The bench hold (ctl_task.c) owns the motors: a MOTOR_SET is counted and
+       dropped, without the error line motors_set_all() would earn 20 times a
+       second, and it is not a motor packet for the link timeout either. A
+       MOTOR_STOP still lands: it kills the hold (cmd_motor.h, the stop hook). */
+    if (motors_loop_owns()) {
+        s.rx_refused++;
+        return false;
+    }
     /* Copy out of the packed struct: the driver takes a float array and the
        compiler is right that a pointer into a packed struct may not be
        aligned for one. */
@@ -362,6 +373,7 @@ static void handle_datagram(uint8_t *buf, int n, const struct sockaddr_in *from,
     s.peer = *from;
     s.have_peer = true;
     s.last_rx_us = now;
+    s.last_rx_u32 = (uint32_t)now;
     s.rx_ok++;
 }
 
@@ -540,6 +552,7 @@ void net_link_get_status(net_link_status_t *out)
     out->rx_ok       = s.rx_ok;
     out->rx_bad      = s.rx_bad;
     out->rx_stale    = s.rx_stale;
+    out->rx_refused  = s.rx_refused;
     out->tx          = s.tx;
     out->tx_sensors  = s.tx_sensors;
     out->have_motor  = s.have_motor;
@@ -555,6 +568,12 @@ void net_link_get_status(net_link_status_t *out)
         inet_ntoa_r(s.peer.sin_addr, ip, sizeof(ip));
         snprintf(out->peer, sizeof(out->peer), "%s:%u", ip, (unsigned)ntohs(s.peer.sin_port));
     }
+}
+
+bool net_link_last_rx(uint32_t *t_us)
+{
+    *t_us = s.last_rx_u32;
+    return s.have_peer;
 }
 
 /* --------------------------------------------------------------- console */
@@ -580,6 +599,10 @@ static int do_link_cmd(int argc, char **argv)
     printf("rx ok %" PRIu32 "   rx rejected %" PRIu32 "   motor commands out of date %" PRIu32
            "   tx %" PRIu32 " (of which sensors %" PRIu32 ")\n",
            st.rx_ok, st.rx_bad, st.rx_stale, st.tx, st.tx_sensors);
+    if (st.rx_refused) {
+        printf("motor commands refused while the control loop held the motors: %" PRIu32 "\n",
+               st.rx_refused);
+    }
     printf("motors %s", st.link_motors ? "driven over the link" : "not driven over the link");
     if (st.have_motor) {
         printf(", last motor command %" PRIu32 " ms ago", st.motor_age_ms);

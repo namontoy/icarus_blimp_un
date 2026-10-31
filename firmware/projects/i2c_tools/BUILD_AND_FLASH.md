@@ -16,8 +16,10 @@ What the firmware does, its commands and its wiring are in this folder's
   component does not compile (`docs/wireless-link.md` §10).
 - Internet access for the first build. It downloads the `espressif/led_strip`
   component.
-- The code: `git clone git@github.com:namontoy/icarus_blimp_un.git`, then
-  `git checkout s3-wireless-link`.
+- The code: `git clone git@github.com:namontoy/icarus_blimp_un.git`; `master` has
+  everything since `s3-wireless-link` was merged into it on 2026-10-30 (the
+  branch is gone). Work in progress sits on its own branch (`control-inc3`, the
+  bench hold).
 
 **Safety:** if the board is wired into the blimp, take the propellers off. At
 boot the firmware takes control of the motor driver pins first, but motor

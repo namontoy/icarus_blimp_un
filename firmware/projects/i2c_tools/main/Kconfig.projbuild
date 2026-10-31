@@ -89,6 +89,28 @@ menu "Motor driver (DRV8833)"
         range 0 48
         default 9
 
+    config MOTOR_POSITIONS
+        string "Default position of the outputs FL RL FR RR, in core/'s frame"
+        default "FR RR FL RL"
+        help
+            Where each of the four outputs above physically sits, named in
+            core/'s frame seen from behind the blimp (FL = the surge motor on
+            the blimp's own left). The control loop drives positions, not
+            names (cmd_motor.h, the motor map), so a name can be anything the
+            team likes and the heading loop still turns the right way.
+            Measured 2026-10-30 on the rope rig: the IMU's axes and the yaw
+            each surge motor produced put the output named FL on the blimp's
+            right, so the names are mirrored against core/'s frame and the
+            positions are "FR RR FL RL". 'motormap' changes this at run time
+            and keeps it in NVS; this is the default after 'motormap reset'.
+
+    config MOTOR_SIGNS
+        string "Default direction sign of the outputs FL RL FR RR"
+        default "+ + + +"
+        help
+            Per output, + or -: the command sign that pushes forward (surge
+            pair) or up (heave pair). Measured 2026-10-30: + on all four.
+
     config MOTOR_NSLEEP_GPIO
         int "nSLEEP GPIO, or -1 if strapped high in hardware"
         range -1 48
@@ -260,6 +282,27 @@ menu "Control task"
             'ctl' shows the last window on demand, and 'ctl --stats on'
             turns the line on until the next reset (the increment 1 bench
             check). Say y for a session spent watching the timing.
+
+    config CTL_IMU_AXES
+        string "IMU mounting: the chip axis along body x, y, z"
+        default "-Y +X +Z"
+        help
+            How the MPU-6050 sits on the gondola, as the chip axis (with its
+            sign) that points along core/'s body x (forward), y (left) and
+            z (up), in that order. "-Y +X +Z" means forward is the chip's -y,
+            left its +x and up its +z: measured 2026-10-30 on the rope rig
+            (nose up, left side up and a counter-clockwise turn, gyro and
+            accelerometer agreeing). Re-measure after any remount: a wrong
+            map turns the heading loop round.
+
+    config CTL_MAG_AXES
+        string "Magnetometer mounting: the chip axis along body x, y, z"
+        default "+X +Y +Z"
+        help
+            As CTL_IMU_AXES, for the magnetometer. Fitted 2026-10-30 from the
+            gyro during the same moves: its axes already point forward, left
+            and up. The fit cannot tell this map from its mirror image; the
+            mirror needs a left-handed chip, so this one is taken.
 
 endmenu
 

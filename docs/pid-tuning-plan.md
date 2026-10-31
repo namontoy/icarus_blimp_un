@@ -1,8 +1,8 @@
 # PID tuning: what to measure, how, and the tests that produce the gains
 
 **Date:** 2026-10-28
-**Branch:** written on `pid-tuning`, from `s3-wireless-link`, and merged back into it; work
-from `s3-wireless-link` until it reaches `master` (§7)
+**Branch:** written on `pid-tuning`, merged with `s3-wireless-link` into `master` on
+2026-10-30; the closed-loop tests' firmware (the bench hold) is on `control-inc3` (§4, C1–C4)
 **Status:** plan, with its instruments written (2026-10-28). Measured so far: the rear pair's
 thrust on a scale (P0, `docs/history/pid-bench-2026-10-28/`); nothing on the vehicle yet. `software/thrust_map.py` (the thrust stand, P0), `software/step_test.py` (the step
 schedules of Y1, Y2, H1 and H2, with the capture and the fits) and `software/step_response.py`
@@ -226,10 +226,17 @@ yaw-surge coupling, the asymmetric altitude response) and the margins, not the f
 Pass: the Rule 13 sweep still passes; no sustained oscillation on either loop at the chosen ω_n;
 the lap-time tables updated with the settings stated.
 
-**C1–C4, closed loop on the vehicle.** Need control-loop plan increment 3 (`blimp_step()` on the
-S3, `MODE_SET`, the kill latch) and a setpoint the tests can step, which `blimp_step()` does not
-take today (control-loop plan, increment 3's open item). A gain change is a `param` line, not a
-flash, since 2026-10-30.
+**C1–C4, closed loop on the vehicle.** Run on the bench hold (control-loop plan, increment 3's
+slice, built 2026-10-30 on `control-inc3`, not yet run on the board): `blimp_step()` on the S3
+with `core/`'s `blimp_hold_t` setpoints, started by the `hold` console command, killed by any
+STOP. `python software/hold_test.py --steps 0 90 0 -90 0 --dwell 10 --go` steps the heading
+from the ground, keeps the link alive that the hold needs, kills it from the ground above
+`--max-rate`, records a capture (the wrench and the heading error in the record's setpoint
+slots) and prints overshoot, settling and the final error per step. A gain change is a `param`
+line, not a flash, since 2026-10-30. On the rope rig without the envelope the same loop runs on
+about 1/40 of the yaw inertia (2026-10-30: about 2e-4 kg·m², from the yaw kick of one surge
+motor at 0.2 duty), so its gains there check the loop's signs, latch and delay, not the flight
+values.
 - C1, altitude alone, yaw held by the Y1 thread: setpoint steps 1.2 → 1.7 → 1.2 m. Pass: 95 %
   within 4 s, overshoot under 0.1 m, holds within ±0.05 m for 30 s, no limit cycle; the sink
   side slower, as H2 predicts.
@@ -279,9 +286,8 @@ thrust on the front pair is worth a mixer change (a pure yaw torque without surg
 
 ## 7. Bench runbook: the session's commands, in order (2026-10-28)
 
-Before anything: the branch `s3-wireless-link` checked out (the tools and the motor remap of
-2026-10-29 are there; the old `pid-tuning` branch was deleted on 2026-10-30, and a fresh one is
-made from `master` once `s3-wireless-link` is merged), the ground
+Before anything: `master` checked out (the tools and the motor remap of 2026-10-29 reached it
+with `s3-wireless-link` on 2026-10-30), the ground
 station **closed** while a tool drives the motors (one client at a time; the tools refuse to
 start while the GUI holds the motors, and the blimp answers whoever sent the last packet), the
 laptop on the blimp's Wi-Fi (`ICARUS-…`, from the system's Wi-Fi menu or the ground station's

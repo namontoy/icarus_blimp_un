@@ -245,8 +245,10 @@ typedef struct {
  * calibration needs from flight logs, and keep the humidity. The cost
  * is about one minute of a ten-minute buffer. The barometer's pressure and
  * temperature take three bytes each. The setpoint is the four link commands
- * in MANUAL (x 32767) or fx, fz, tz, roll trim in milli-newtons and
- * milli-newton-metres otherwise; mode says which.
+ * in MANUAL (x 32767); otherwise (the bench hold, 2026-10-30) the wrench the
+ * motors were given, fx and fz in 0.1 mN and tz in 10 uN m, and the heading
+ * error the yaw loop ran on in mrad. mode says which. (The plan's whole-mN
+ * units were too coarse for the bench: the rope rig turns on 1 mN m.)
  */
 typedef struct __attribute__((packed)) {
     uint32_t t_us;

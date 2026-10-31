@@ -39,6 +39,32 @@ typedef struct {
     bool              armed;
 } blimp_t;
 
+/* Bench hold: setpoints commanded from the ground in place of guidance, for
+ * the closed-loop tests of docs/pid-tuning-plan.md (C1-C4), which step a
+ * heading or an altitude that guidance would otherwise choose itself. The
+ * loops, gains, limits, failsafes and mixer are the run's own; only the
+ * source of the setpoints changes, so a gain that passes here is the gain
+ * that flies.
+ *
+ * An axis that is not held outputs nothing, the hover feed-forward included:
+ * a heading test with the gondola on a tether must not run the heave pair.
+ * Its loop is reset, so taking it up later starts without a derivative kick.
+ * A held altitude with no altitude source this tick also outputs nothing,
+ * which lets the vehicle sink on its trim (the failsafe posture, blimp.c).
+ *
+ * All-zero (active = false, what `blimp_input_t in = {0}` gives) is a
+ * normal run, unchanged. */
+typedef struct {
+    bool  active;          /* these setpoints replace guidance this tick     */
+    bool  heading_held;    /* yaw loop on heading_rad; else tz = 0           */
+    bool  altitude_held;   /* altitude loop on altitude_m; else fz = 0       */
+    float heading_rad;     /* rad, +CCW from above, relative to the heading
+                            * latched at arming (blimp_estimator_zero)       */
+    float altitude_m;      /* m above the floor, as the estimator reports it */
+    float surge_n;         /* N, a constant forward thrust, clipped to
+                            * [0, surge.out_max]; 0 for the C tests          */
+} blimp_hold_t;
+
 /* Inputs to one control tick. */
 typedef struct {
     blimp_imu_sample_t  imu;
@@ -46,6 +72,7 @@ typedef struct {
     bool                contact_detected;
     bool                arm_request;
     uint32_t            t_us;
+    blimp_hold_t        hold;
 } blimp_input_t;
 
 /* Initialises everything, loads default params. Call once before any step. */

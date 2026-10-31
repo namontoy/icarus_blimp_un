@@ -29,6 +29,7 @@
 #include "capture.h"
 #include "cmd_battery.h"
 #include "cmd_param.h"
+#include "motor_map.h"
 
 static const char *TAG = "i2c-tools";
 
@@ -154,6 +155,7 @@ void app_main(void)
     register_baro();
     register_tof();
     register_motor();     /* already initialised above */
+    register_motormap();
     register_wifi();
     register_link();
     register_sensors();
@@ -181,6 +183,13 @@ void app_main(void)
             ESP_LOGE(TAG, "console over UDP unavailable");
         }
     }
+
+    /*
+     * The motor map saved by 'motormap' (motor_map.c) replaces Kconfig's once
+     * NVS is up, which the Wi-Fi bring-up above did (or motor_map_load()
+     * does itself without it), and before the control task can drive by it.
+     */
+    motor_map_load();
 
     /*
      * The sensor stream feeds the link's SENSORS packet, so it starts after
@@ -254,7 +263,9 @@ void app_main(void)
     printf(" | 15. Try 'capture' to record a minute of the loop's records |\n");
     printf(" | 16. Try 'battery' for the motor cell's voltage on GPIO1    |\n");
     printf(" | 17. Try 'param' for the controller's gains, changed live   |\n");
-    printf(" | 18. Type 'exit' or 'quit' to see how to leave the monitor  |\n");
+    printf(" | 18. Try 'hold' to run the controller on a set heading      |\n");
+    printf(" | 19. Try 'motormap' for each motor's name, place and sign   |\n");
+    printf(" | 20. Type 'exit' or 'quit' to see how to leave the monitor  |\n");
     printf(" |                                                            |\n");
     printf(" ==============================================================\n\n");
 
