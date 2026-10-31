@@ -155,7 +155,7 @@ def main(argv: list[str] | None = None) -> int:
         ok &= r.step("build libblimp for the simulation",
                      [host, "tools/build.py", "dll"])
     if gate():
-        ok &= r.step("S3 firmware's param table + camera rows, host",
+        ok &= r.step("S3 firmware's param table, camera rows, soft start (host)",
                      [host, "tools/fw_host_test.py"])
 
     print(f"{DIM}simulation{OFF}")

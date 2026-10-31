@@ -341,7 +341,7 @@ because ambient IR is what limits long-range performance (§8).
 motor -m <FL|RL|FR|RR|0-3> -t <-1..1> [-d <ms>] [--hold]
 motor --sweep -m <id> [-t <negative for reverse>] [-d <ms per step>]
 motor -s | -b
-motor [--decay slow|fast] [--deadband <percent>] [--max-duty <percent>] [--failsafe <ms>]
+motor [--decay slow|fast] [--deadband <percent>] [--max-duty <percent>] [--ramp-ms <ms>] [--failsafe <ms>]
 motor [--status]
 ```
 
@@ -357,8 +357,9 @@ motor [--status]
 | `--decay` | PWM decay mode. Default `slow` |
 | `--deadband` | Break-away duty in percent, 0–90 |
 | `--max-duty` | Duty ceiling in percent, 10–100 (2026-10-30): commands map onto [deadband, ceiling], so 1.0 gives this duty and nothing gives more. The team's limit is 30; the default (`CONFIG_MOTOR_MAX_DUTY_PERCENT`) stays 100, which keeps a command equal to its duty for the ground station and the thrust stand. With a ceiling, set `param motor_max_thrust_n` to the thrust at the ceiling. `--sweep` lifts it while it ramps |
+| `--ramp-ms` | Soft start in ms, 0–2000, default 200 (`CONFIG_MOTOR_RAMP_MS`, 2026-10-31): a start from rest begins at the deadband and reaches a full command after this long, a rise on a running motor keeps the same slope, a stop or a decrease lands at once, and turning the other way waits until the motor has coasted this long (`main/motor_ramp.h`, host-tested). A motor at rest draws several times its running current: at the 40 % ceiling a stalled start asked an estimated 1.8 A of a channel kept under 1.2 A, and the rear pair stopped starting above 28–34 % duty (`docs/history/envelope-2026-10-31.md`). 0 lands every command at once, as before. `--sweep` switches it off while it ramps |
 | `--failsafe` | Failsafe timeout in ms. 0 disables it |
-| `--status` | Pins, PWM frequency and resolution, decay, deadband, failsafe state, standing commands. A bare `motor` prints the same |
+| `--status` | Pins, PWM frequency and resolution, decay, deadband, soft start, failsafe state, standing commands and the duty on the pins (which trails a command while a start climbs). A bare `motor` prints the same |
 
 Settings options can go on the same line as a run, for example
 `motor --deadband 15 -m FL -t 0.2`. The console can't interrupt a running

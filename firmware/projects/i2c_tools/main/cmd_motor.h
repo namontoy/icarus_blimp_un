@@ -120,6 +120,23 @@ float motors_get_deadband(void);
 esp_err_t motors_set_max_duty(float max_duty);
 float motors_get_max_duty(void);
 
+/** The soft start's longest setting, ms. */
+#define MOTOR_RAMP_MAX_MS 2000
+
+/**
+ * Soft start, 0 to MOTOR_RAMP_MAX_MS ms (Kconfig MOTOR_RAMP_MS, 200 by
+ * default; 0 switches it off): a start from rest begins at the deadband and
+ * reaches a full command after this long, a rise on a running motor is held
+ * to the same slope, a stop or a decrease is immediate, and turning the other
+ * way waits until the motor has coasted this long (motor_ramp.h). It keeps a
+ * start's current near the running current: 2026-10-31 a stalled start at the
+ * 40 % ceiling asked an estimated 1.8 A of a channel kept under 1.2 A, and
+ * the rear pair stopped starting. The commands, their readback and the
+ * capture are unchanged by it; only the pins trail during a climb.
+ */
+esp_err_t motors_set_ramp_ms(int ms);
+int motors_get_ramp_ms(void);
+
 /**
  * Coast every motor if motors_failsafe_feed() has not been called for
  * timeout_ms. 0 disables it.

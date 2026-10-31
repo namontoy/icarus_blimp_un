@@ -85,6 +85,7 @@
 #include "sdkconfig.h"
 #include "soc/soc_caps.h"
 #include "cmd_motor.h"
+#include "motor_ramp.h"
 #include "net_console.h"
 
 static const char *TAG = "cmd_motor";
@@ -102,6 +103,12 @@ static const char *TAG = "cmd_motor";
 /* How often the failsafe looks at the clock. Fine enough that the overshoot
    past the configured timeout is small, coarse enough to be free. */
 #define MOTOR_FAILSAFE_TICK_MS  50
+
+/* How often the soft start climbs between commands (motor_ramp.h). The link
+   repeats a command at 20 Hz and the console sets one once, so without this
+   a start would rise only as often as a new command arrived. 5 ms against a
+   200 ms ramp is 40 steps of under 1 % duty each. */
+#define MOTOR_RAMP_TICK_MS      5
 
 #define MOTOR_CONSOLE_MAX_MS    30000
 
@@ -157,6 +164,12 @@ static float             s_cmd[MOTOR_COUNT];
 static float             s_out[MOTOR_COUNT];
 static SemaphoreHandle_t s_lock;
 
+/* The soft start (motor_ramp.h), one per output: the duty actually on its
+   pins, which trails a command's while a start climbs. Under s_lock. */
+static float              s_ramp_s = CONFIG_MOTOR_RAMP_MS / 1000.0f;
+static motor_ramp_t       s_ramp[MOTOR_COUNT];
+static esp_timer_handle_t s_ramp_timer;
+
 static esp_timer_handle_t s_fs_timer;
 static int                s_fs_timeout_ms = CONFIG_MOTOR_FAILSAFE_MS;
 static volatile int64_t   s_fs_last_feed_us;
@@ -193,7 +206,8 @@ static int pick_resolution_bits(int freq_hz)
 }
 
 /*
- * Write one motor's pin pair from a signed command.
+ * Write one output's pin pair for a signed duty, a fraction of the period
+ * already mapped onto [deadband, ceiling] and signed for the motor map.
  *
  * The duty register is one bit wider than the resolution - ledc.c documents
  * the range as [0, 2^duty_res] - so 2^bits is a genuine, notch-free 100%.
@@ -201,21 +215,14 @@ static int pick_resolution_bits(int freq_hz)
  * not 2047/2048, or every PWM period puts a short glitch into an H-bridge
  * input and the bridge spends part of its life in a state nobody asked for.
  *
- * m is a name; the map picks the output and its sign. s_out keeps the
- * command as given, before the sign, so an unchanged command is still
- * recognised as one.
- *
  * Call with the lock held.
  */
-static void motor_write(motor_id_t m, float throttle)
+static void pins_write(int o, float duty)
 {
-    const int o = s_out_of[m];
     const motor_pins_t *p = &s_pins[o];
-    const float given = throttle;
     uint32_t d1, d2;
 
-    throttle *= (float)s_map.sign[o];
-    float mag = fabsf(throttle);
+    float mag = fabsf(duty);
     if (mag < MOTOR_ZERO_EPS) {
         /* Coast, not brake. A zero command should stop driving the prop, not
            hold it against the airflow: on an airship the freewheeling prop is
@@ -223,22 +230,12 @@ static void motor_write(motor_id_t m, float throttle)
            on every zero crossing would heat the drivers for nothing. */
         d1 = d2 = 0;
     } else {
-        if (mag > 1.0f) {
-            mag = 1.0f;
-        }
-        /* Map (0,1] onto [deadband,1]. Without this the bottom slice of the
-           controller's output range produces duty that only warms the
-           winding, and the plant looks dead until the command clears
-           break-away - a nonlinearity the integrator would wind up against. */
-        /* ... and onto [deadband, ceiling] when a duty ceiling is set: a
-           full command is then the ceiling, never more. */
-        float duty = s_deadband + (s_max_duty - s_deadband) * mag;
-        uint32_t d = (uint32_t)lrintf(duty * (float)s_duty_full);
+        uint32_t d = (uint32_t)lrintf(mag * (float)s_duty_full);
         if (d > s_duty_full) {
             d = s_duty_full;
         }
 
-        bool fwd = throttle > 0.0f;
+        bool fwd = duty > 0.0f;
         if (s_decay == MOTOR_DECAY_FAST) {
             /* Alternate drive (1,0) and coast (0,0): modulate the leading
                input, hold the other low. */
@@ -257,13 +254,95 @@ static void motor_write(motor_id_t m, float throttle)
     ledc_set_duty(LEDC_LOW_SPEED_MODE, p->ch_in2, d2);
     ledc_update_duty(LEDC_LOW_SPEED_MODE, p->ch_in1);
     ledc_update_duty(LEDC_LOW_SPEED_MODE, p->ch_in2);
+}
+
+/* The soft start's settings as they stand. Call with the lock held. */
+static motor_ramp_cfg_t ramp_cfg(void)
+{
+    const motor_ramp_cfg_t c = { s_ramp_s, s_deadband, s_max_duty };
+    return c;
+}
+
+/*
+ * One motor's command, as a signed throttle, onto its pins.
+ *
+ * m is a name; the map picks the output and its sign. s_out keeps the
+ * command as given, before the sign, so an unchanged command is still
+ * recognised as one. The duty goes through the soft start (motor_ramp.h): a
+ * stop or a decrease lands at once, a rise climbs, and ramp_tick() carries
+ * the climb on between commands.
+ *
+ * Call with the lock held.
+ */
+static void motor_write(motor_id_t m, float throttle)
+{
+    const int o = s_out_of[m];
+    const float given = throttle;
+    float duty = 0.0f;
+
+    throttle *= (float)s_map.sign[o];
+    float mag = fabsf(throttle);
+    if (mag >= MOTOR_ZERO_EPS) {
+        if (mag > 1.0f) {
+            mag = 1.0f;
+        }
+        /* Map (0,1] onto [deadband,1]. Without this the bottom slice of the
+           controller's output range produces duty that only warms the
+           winding, and the plant looks dead until the command clears
+           break-away - a nonlinearity the integrator would wind up against. */
+        /* ... and onto [deadband, ceiling] when a duty ceiling is set: a
+           full command is then the ceiling, never more. */
+        duty = s_deadband + (s_max_duty - s_deadband) * mag;
+        if (duty > 1.0f) {
+            duty = 1.0f;
+        }
+        if (throttle < 0.0f) {
+            duty = -duty;
+        }
+    }
+
+    const motor_ramp_cfg_t c = ramp_cfg();
+    pins_write(o, motor_ramp_set(&s_ramp[o], duty, esp_timer_get_time(), &c));
     s_out[m] = given;
+}
+
+/*
+ * Carries the soft start on between commands. The unlocked look first keeps
+ * the idle case free; a stale answer only costs one 5 ms tick, and everything
+ * that changes a ramp does so under the lock.
+ */
+static void ramp_tick(void *arg)
+{
+    (void)arg;
+    if (!s_ready) {
+        return;
+    }
+    bool any = false;
+    for (int o = 0; o < MOTOR_COUNT; o++) {
+        any = any || motor_ramp_busy(&s_ramp[o]);
+    }
+    if (!any) {
+        return;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    const motor_ramp_cfg_t c = ramp_cfg();
+    const int64_t now = esp_timer_get_time();
+    for (int o = 0; o < MOTOR_COUNT; o++) {
+        if (motor_ramp_busy(&s_ramp[o])) {
+            pins_write(o, motor_ramp_step(&s_ramp[o], now, &c));
+        }
+    }
+    xSemaphoreGive(s_lock);
 }
 
 /* Both inputs to the same level on every motor: 0 coasts, full brakes. */
 static void motor_write_all_static(uint32_t duty)
 {
+    const int64_t now = esp_timer_get_time();
     for (int m = 0; m < MOTOR_COUNT; m++) {
+        /* Nothing left to climb, and a reversal after this still waits for
+           the coast (motor_ramp.h). m indexes the outputs here. */
+        motor_ramp_stop(&s_ramp[m], now);
         ledc_set_duty(LEDC_LOW_SPEED_MODE, s_pins[m].ch_in1, duty);
         ledc_set_duty(LEDC_LOW_SPEED_MODE, s_pins[m].ch_in2, duty);
         ledc_update_duty(LEDC_LOW_SPEED_MODE, s_pins[m].ch_in1);
@@ -569,6 +648,23 @@ esp_err_t motors_init(void)
         return err;
     }
 
+    for (int o = 0; o < MOTOR_COUNT; o++) {
+        motor_ramp_init(&s_ramp[o], esp_timer_get_time());
+    }
+    const esp_timer_create_args_t ramp_args = {
+        .callback = ramp_tick,
+        .name = "motor_ramp",
+        .dispatch_method = ESP_TIMER_TASK,
+    };
+    err = esp_timer_create(&ramp_args, &s_ramp_timer);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = esp_timer_start_periodic(s_ramp_timer, MOTOR_RAMP_TICK_MS * 1000);
+    if (err != ESP_OK) {
+        return err;
+    }
+
     s_ready = true;
 
     /* Report the frequency LEDC actually produced, not the one requested -
@@ -580,10 +676,11 @@ esp_err_t motors_init(void)
                  o + 1, s_pins[o].gpio_in1, s_pins[o].gpio_in2, s_pins[o].where,
                  s_names[s_map.name[o]], s_names[s_map.position[o]], s_map.sign[o] > 0 ? '+' : '-');
     }
-    ESP_LOGI(TAG, "PWM %" PRIu32 " Hz (asked %d), %d bit, %s decay, deadband %.1f%%, ceiling %.0f%%",
+    ESP_LOGI(TAG, "PWM %" PRIu32 " Hz (asked %d), %d bit, %s decay, deadband %.1f%%, ceiling %.0f%%, "
+                  "soft start %d ms",
              actual, s_freq_hz, s_res_bits,
              s_decay == MOTOR_DECAY_SLOW ? "slow" : "fast",
-             s_deadband * 100.0f, s_max_duty * 100.0f);
+             s_deadband * 100.0f, s_max_duty * 100.0f, (int)lrintf(s_ramp_s * 1000.0f));
     if (s_fs_timeout_ms > 0) {
         ESP_LOGI(TAG, "failsafe armed only while a motor is driven, then coasts "
                       "all of them after %d ms without a command", s_fs_timeout_ms);
@@ -873,6 +970,33 @@ float motors_get_max_duty(void)
     return s_max_duty;
 }
 
+esp_err_t motors_set_ramp_ms(int ms)
+{
+    if (ms < 0 || ms > MOTOR_RAMP_MAX_MS) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!s_ready) {
+        s_ramp_s = ms / 1000.0f;
+        return ESP_OK;
+    }
+    /* A climb under way carries on at the new rate from its next step; 0
+       lands every standing command at once. */
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_ramp_s = ms / 1000.0f;
+    if (ms == 0) {
+        for (int m = 0; m < MOTOR_COUNT; m++) {
+            motor_write((motor_id_t)m, s_cmd[m]);
+        }
+    }
+    xSemaphoreGive(s_lock);
+    return ESP_OK;
+}
+
+int motors_get_ramp_ms(void)
+{
+    return (int)lrintf(s_ramp_s * 1000.0f);
+}
+
 /* --------------------------------------------------------------- console */
 
 static struct {
@@ -886,6 +1010,7 @@ static struct {
     struct arg_str *decay;
     struct arg_dbl *deadband;
     struct arg_dbl *max_duty;
+    struct arg_int *ramp;
     struct arg_int *failsafe;
     struct arg_lit *status;
     struct arg_end *end;
@@ -912,6 +1037,12 @@ static void print_status(void)
            ledc_get_freq(LEDC_LOW_SPEED_MODE, LEDC_TIMER_0), s_res_bits,
            s_duty_full, s_decay == MOTOR_DECAY_SLOW ? "slow" : "fast",
            s_deadband * 100.0f, s_max_duty * 100.0f);
+    if (s_ramp_s > 0.0f) {
+        printf("soft start %d ms: rest to a full command; reversing waits as long\n",
+               motors_get_ramp_ms());
+    } else {
+        printf("soft start off: a command lands on the pins at once\n");
+    }
     if (s_fs_timeout_ms <= 0) {
         printf("failsafe off\n");
     } else if (s_fs_tripped) {
@@ -936,9 +1067,9 @@ static void print_status(void)
         const int o = s_out_of[m];
         char pins[12];
         snprintf(pins, sizeof(pins), "%d/%d", s_pins[o].gpio_in1, s_pins[o].gpio_in2);
-        float mag = fabsf(s_cmd[m]);
-        float duty = (mag < MOTOR_ZERO_EPS) ? 0.0f
-                   : (s_deadband + (s_max_duty - s_deadband) * mag) * 100.0f;
+        /* What is on the pins now, which trails the command while a soft
+           start climbs. */
+        float duty = fabsf(s_ramp[o].applied) * 100.0f;
         printf("%-6s %-7d %-12s %-9s %-9s %-5c %+10.3f %9.1f%%\n",
                s_names[m], o + 1, s_pins[o].where, pins, s_names[s_map.position[o]],
                s_map.sign[o] > 0 ? '+' : '-', s_cmd[m], duty);
@@ -963,17 +1094,19 @@ static void run_for(int ms)
  * which the prop breaks away can simply be read off. That number is the
  * deadband: feed it back with --deadband.
  *
- * The deadband mapping and the duty ceiling are removed for the duration,
- * because measuring break-away through the correction that is supposed to
- * compensate for it would just return the correction, and the printed duty
- * must be the duty.
+ * The deadband mapping, the duty ceiling and the soft start are removed for
+ * the duration, because measuring break-away through the correction that is
+ * supposed to compensate for it would just return the correction, and the
+ * printed duty must be the duty.
  */
 static void run_sweep(motor_id_t m, bool reverse, int dwell_ms)
 {
     const int steps = 20;
     float saved = s_deadband;
     float saved_max = s_max_duty;
+    int saved_ramp = motors_get_ramp_ms();
 
+    motors_set_ramp_ms(0);
     motors_set_deadband(0.0f);
     motors_set_max_duty(1.0f);
     printf("Ramping motor_%s %s in %d steps, %d ms each.\n",
@@ -994,6 +1127,7 @@ static void run_sweep(motor_id_t m, bool reverse, int dwell_ms)
     motors_coast();
     motors_set_max_duty(saved_max);
     motors_set_deadband(saved);
+    motors_set_ramp_ms(saved_ramp);
     printf("\nStopped. Set the break-away duty with: motor --deadband <percent>\n");
 }
 
@@ -1058,6 +1192,18 @@ static int do_motor_cmd(int argc, char **argv)
             return 1;
         }
         printf("deadband: %.1f%%\n", db * 100.0f);
+    }
+    if (motor_args.ramp->count) {
+        int ms = motor_args.ramp->ival[0];
+        if (motors_set_ramp_ms(ms) != ESP_OK) {
+            printf("--ramp-ms takes 0..%d (0 switches the soft start off)\n", MOTOR_RAMP_MAX_MS);
+            return 1;
+        }
+        if (ms > 0) {
+            printf("soft start: %d ms from rest to a full command\n", ms);
+        } else {
+            printf("soft start: off\n");
+        }
     }
     if (motor_args.failsafe->count) {
         int ms = motor_args.failsafe->ival[0];
@@ -1153,6 +1299,7 @@ void register_motor(void)
     motor_args.decay    = arg_str0(NULL, "decay", "<slow|fast>", "PWM decay mode (default slow)");
     motor_args.deadband = arg_dbl0(NULL, "deadband", "<percent>", "Break-away duty, 0..90");
     motor_args.max_duty = arg_dbl0(NULL, "max-duty", "<percent>", "Duty ceiling: what a command of 1.0 gives, 10..100");
+    motor_args.ramp     = arg_int0(NULL, "ramp-ms", "<ms>", "Soft start: rest to a full command in this long; 0 = off");
     motor_args.failsafe = arg_int0(NULL, "failsafe", "<ms>", "Coast if idle this long; 0 disables");
     motor_args.status   = arg_lit0(NULL, "status", "Print pins, PWM and standing commands");
     motor_args.end      = arg_end(2);

@@ -167,6 +167,24 @@ menu "Motor driver (DRV8833)"
             to its duty, which is what the ground station's sliders, the
             readback and the thrust stand (software/thrust_map.py) assume.
 
+    config MOTOR_RAMP_MS
+        int "Soft start: rest to a full command, ms; 0 disables"
+        range 0 2000
+        default 200
+        help
+            A motor at rest has no back-EMF, so at a given duty it draws
+            several times its running current. With this set, a start
+            begins at the deadband and the duty climbs to the command over
+            this long (a rise on a running motor keeps the same slope), a
+            stop or a decrease lands at once, and turning the other way
+            waits until the motor has coasted this long (main/motor_ramp.h).
+            Added 2026-10-31: at the team's 40 % ceiling a stalled start
+            asked an estimated 1.8 A of a driver channel the team keeps
+            under 1.2 A, and the rear pair stopped starting above 28-34 %
+            duty. 200 ms is twice the ~0.1 s a motor takes to spin up.
+            'motor --ramp-ms' changes it until the next reset; 0 lands every
+            command on the pins at once, as before.
+
     config MOTOR_FAILSAFE_MS
         int "Coast all motors after this long with no command; 0 disables"
         range 0 60000
