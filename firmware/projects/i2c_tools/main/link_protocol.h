@@ -51,6 +51,7 @@ typedef enum {
     LINK_PKT_SENSORS    = 0x82,  /* every sensor on the bench, see below       */
     LINK_PKT_LOG_INFO   = 0x83,  /* the capture's state, the reply to LOG_CMD  */
     LINK_PKT_LOG_CHUNK  = 0x84,  /* 16 log records, the reply to LOG_CMD GET   */
+    LINK_PKT_CAMERA     = 0x85,  /* the forward camera's latest row, see below */
 } link_pkt_type_t;
 
 typedef struct __attribute__((packed)) {
@@ -164,6 +165,90 @@ typedef struct __attribute__((packed)) {
 } link_sensors_t;
 
 _Static_assert(sizeof(link_sensors_t)    == 76, "sensors layout");
+
+/*
+ * The forward camera, relayed. The ESP32-CAM (namontoy's target_cam) prints
+ * one CSV row per frame on its UART to the S3 (cam_link.c, cam_row.c); this
+ * packet carries the latest row to the ground station for its camera panel,
+ * plus the health of that UART. No frames travel: the camera sends the S3
+ * rows only. The control path does not use this packet; the loop reads the
+ * same row from cam_link.c's mailbox.
+ *
+ * Sent by net_link.c after each SENSORS, under the same peer gate, by this
+ * rule: a row not sent before goes out with LINK_CAM_ROW set, once and never
+ * resent (a lost one is a gap in frame_seq on the ground, not a frozen
+ * number); with no new row, a health-only packet (LINK_CAM_ROW clear) goes out
+ * if nothing was sent for LINK_CAM_IDLE_MS, so an unplugged camera, a silent
+ * one, or a UART that did not start shows up at 1 Hz instead of as silence.
+ * At most one packet per link tick: at the default 20 Hz against the camera's
+ * 12.5 rows/s no row is skipped, and if one ever is, frame_seq shows it.
+ *
+ * A health-only packet has every field from row_t_us through loop_us zero
+ * except frame_seq and csv_version; the health block (bytes ... bearing_sign)
+ * is filled in every packet.
+ *
+ * blimp -> host only, and it keeps nothing alive: the blimp never reads it
+ * back, and the host does not count it as link liveness either.
+ *
+ * az_deg and el_deg are in the camera's own frame: az is + to the RIGHT of the
+ * image centre, el + above it. core/'s bearing is + to the LEFT, so core's
+ * bearing = bearing_sign x az_deg, with the sign the firmware uses
+ * (CONFIG_CAM_FWD_BEARING_SIGN, or `cam --sign`) sent in every packet.
+ * range_mm comes from the apparent size and is uncalibrated; -1 means unknown
+ * (clipped, nothing detected, or no target size). conf is -1 while the
+ * camera's classifier is a stub, which is always today, and on a CSV v1 row.
+ * b_*[0..2] are blobs 2..4, with 0, 0, -1 for an absent blob.
+ *
+ * Adding this packet type did not change LINK_PROTO_VERSION: an older
+ * receiver rejects it by type. software/blimp_link.py and mock_blimp.py
+ * mirror this layout.
+ */
+#define LINK_CAM_ROW            (1u << 0)  /* carries a row not sent before          */
+#define LINK_CAM_DETECTED       (1u << 1)  /* the row's ok = 1 (only with ROW)       */
+#define LINK_CAM_CLIPPED        (1u << 2)  /* the row's clipped = 1 (only with ROW)  */
+#define LINK_CAM_UART           (1u << 3)  /* the camera UART and its reader run     */
+#define LINK_CAM_STREAMING_OFF  (1u << 4)  /* the camera's last '#' line: streaming off */
+
+/* A health-only CAMERA packet goes out after this long without any. */
+#define LINK_CAM_IDLE_MS        1000
+
+typedef struct __attribute__((packed)) {
+    link_header_t h;
+    uint32_t t_us;             /* S3 clock when this packet was built            */
+    uint32_t row_t_us;         /* S3 clock when the row's newline arrived; 0 without ROW */
+    uint32_t frame_seq;        /* rows parsed since boot; in every packet        */
+    uint32_t cam_t_ms;         /* the camera's own boot clock; 0 without ROW     */
+    uint8_t  flags;            /* LINK_CAM_*                                     */
+    uint8_t  csv_version;      /* 1 or 2; 0 until a row has arrived              */
+    uint8_t  blobs;            /* at or above the camera's minimum area, saturating */
+    uint8_t  stage;            /* v2 stage; 0 on a v1 row                        */
+    float    cx_px, cy_px;     /* centroid, origin top-left                      */
+    float    az_deg;           /* + to the RIGHT; core's bearing = bearing_sign x this */
+    float    el_deg;           /* + above the image centre                       */
+    float    area_px;
+    uint16_t w_px, h_px;       /* bounding box                                   */
+    float    fill;             /* area / (w x h)                                 */
+    float    range_mm;         /* uncalibrated; -1 unknown                       */
+    float    conf;             /* -1: not computed                               */
+    float    b_az_deg[3];      /* blobs 2..4                                     */
+    float    b_el_deg[3];
+    float    b_range_mm[3];    /* -1 unknown                                     */
+    float    b_conf[3];        /* -1 not computed                                */
+    uint32_t matched_px;       /* matching pixels in the whole frame             */
+    float    dt_ms;            /* camera: since the previous capture             */
+    uint32_t proc_us;          /* camera: detection time                         */
+    uint32_t loop_us;          /* v2; 0 on v1                                    */
+    uint32_t bytes;            /* health: UART bytes since boot                  */
+    uint32_t rejected;         /* lines that were neither a row nor a '#' line   */
+    uint32_t overflows;        /* lines longer than the buffer                   */
+    uint32_t info_lines;       /* '#' lines                                      */
+    uint16_t row_age_ms;       /* t_us minus the row's arrival, saturating; 65535 also = no row yet */
+    uint8_t  rows_last_s;      /* rows in the last whole second, saturating      */
+    int8_t   bearing_sign;     /* -1 or +1                                       */
+    uint32_t crc32;
+} link_camera_t;
+
+_Static_assert(sizeof(link_camera_t)     == 152, "camera layout");
 
 /*
  * The capture: the control loop's log records (log_record_t in ctl_types.h,

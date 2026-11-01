@@ -119,6 +119,15 @@ with 0.3.0 is identical to 0.2.1's in every cell. The same review made the firmw
 checks signed: a sensor sample stamped by another task just after the tick began read as stale,
 the same wrap as the link watchdog's.
 
+**2026-11-01, the camera rows to the ground (`LINK_PKT_CAMERA` 0x85; built, not yet run against the blimp).**
+The S3 relays each row `cam_link.c` parses to the ground station (`net_link.c`, counted as
+`tx_camera`), with a health-only packet once a second when no new row came, so an unplugged camera
+or a UART that did not start shows on the ground. The control path is untouched (`hold follow`
+still reads `cam_link.c`). Run against `mock_blimp.py --camera` and in `--demo`; no row from the real
+camera has been relayed yet. Rows only: Grab and Live stay
+demo-only, and the downward camera has no packet. The range on the panel is the camera's own
+uncalibrated figure; `core/` still gets none.
+
 **2026-10-29, the link and the window reviewed.** Four reviewers and the team settled how the
 window and the link may affect the motors: `docs/link-robustness-review.md`. The ground station
 changed on branch `link-robustness`: a change leaves at once and the repeat holds 20 Hz on

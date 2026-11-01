@@ -105,6 +105,7 @@ u32 crc32   over the whole struct with this field zeroed; zlib/PNG CRC-32
 | `0x04 LOG_CMD` | host → blimp | `u8 cmd` (0 info, 1 start, 2 stop, 3 clear, 4 get), `u8 count` (get: chunks, up to 8), `u16 seconds` (start), `u32 first` (get: record index) | 20 B |
 | `0x83 LOG_INFO` | blimp → host | `u8 state` (0 idle, 1 running, 2 done), `u8 result` (0 ok, 1 no buffer, 2 busy, 3 range, 4 bad command, 5 longer than the buffer), `u8 record_size` (72), `u8 format` (1), `u16 capture_id`, `u16 period_us`, `u32 count`, `u32 capacity`, `u32 wanted`, `u32 t_start_us`, `u16 imu_accel_g`, `u16 imu_gyro_dps`, `f32 mag_lsb_per_gauss`, `u8 mag_chip`, `u8 baro_chip`, `u16 max_seconds`, `char fw[16]` | 64 B |
 | `0x84 LOG_CHUNK` | blimp → host | `u16 capture_id`, `u8 count` (records present), `u8 reserved`, `u32 first`, `u8 data[16 × 72]` (one `log_record_t` of `ctl_types.h` each, zero past `count`) | 1172 B |
+| `0x85 CAMERA` | blimp → host | the forward camera's latest row (centroid, azimuth and elevation, area, box, range, up to three more blobs, `matched_px`, the camera's timings), the S3's UART counters, `flags` (`ROW`, `DETECTED`, `CLIPPED`, `UART`, `STREAMING_OFF`), `row_age_ms`, `rows_last_s`, `bearing_sign`; layout in `link_camera_t` | 152 B |
 
 Anything with the wrong size for its type, another magic or version, or a bad CRC is counted in
 `rx_bad` and ignored. There are no acknowledgements: the telemetry's `motor_cmd` readback is
@@ -116,6 +117,18 @@ stop and clear are each answered by one `LOG_INFO`; `get` by up to eight `LOG_CH
 back, or a `LOG_INFO` with result 3 at the end of the data. The host asks again for chunks that
 did not arrive. `LOG_CHUNK` is the one packet larger than `LINK_MAX_PACKET_BYTES`; it only ever
 travels blimp to host, so the firmware's receive buffer is unchanged.
+
+`CAMERA` (2026-11-01) relays what `cam_link.c` parses from target_cam's CSV on UART1, for the
+ground station's camera panel. It goes out after the `SENSORS` packet of a tick, once per
+new row (`LINK_CAM_ROW`); with no new row for a second it sends a health-only packet (flag
+clear, row fields zero) so a silent camera, a UART that did not start and a camera that is
+printing something else are told apart on the ground. It is blimp to host only and keeps
+nothing alive on either side: the blimp's 500 ms timeout does not see it, and the host does
+not count it as link liveness. Adding it did not change `LINK_PROTO_VERSION`; an older receiver
+rejects the unknown type by type. The `link` command counts the packets as `tx_camera`. The UART
+codes `0x81..` of `docs/inter-board-link-plan.md` belong to a different link (CAM to S3) and
+only look like these. The control loop does not read this packet: `hold follow` takes the same
+row from `cam_link.c` directly. Rows only; no frames cross the link.
 
 The blimp replies to whoever sent the last valid packet of any type, so the first heartbeat
 starts the telemetry and a reconnect is just sending again. Telemetry continues for ten
@@ -222,6 +235,16 @@ Props off. USB console open in a second window so the logs are visible.
     fill within a second of the link coming up. Type `imu -n 3` in the page's console: the
     panels show the orange "paused" notice while the command runs, then resume with the same
     numbers the command printed. `link` on USB counts the `SENSORS` packets separately.
+12. Camera relay (needs the UART1 wires to the forward ESP32-CAM; the firmware README §1 records the
+    UART link alone as measured 2026-10-31, the relay has not run on it): `cam` on USB shows rows/s and no rejects. `python software/blimp_link.py camera`
+    prints about three lines a second with the verdict, azimuth, elevation and `frame_seq`
+    counting up. The ground station's camera panel fills within a second and the Cam pill
+    reads UP. Unplug the camera's wire into S3 GPIO6: about 2 s later (a row stays fresh for
+    2 s) the pill reads NO ROWS and the panel says "rows stopped: none from the camera for
+    2 s"; "the S3 hears nothing from the camera" appears instead only when no row has arrived
+    since the station started. `link` counts `tx_camera`.
+    Check the sign with a hand-held balloon: the panel's az is + right, the line's
+    "bearing" (core's, + left) the opposite.
 
 ## 9. What is proven and what is not
 
@@ -233,6 +256,7 @@ Props off. USB console open in a second window so the logs are visible.
 | CRC-32 implementation in C matches zlib | reasoned: same algorithm; the check value in the header is the test to run on target |
 | Access point comes up, laptop associates, DHCP works | ✅ 2026-10-24: the laptop joined and the ground station page received telemetry |
 | `SENSORS` packet carries the real readings (`sensor_stream.c`) | ❓ built 2026-10-24, not run on hardware; the page decodes the same layout from the mock |
+| `CAMERA` packet relays the forward camera's rows (`net_link.c`, `cam_link_latest_row()`) | ❓ built 2026-11-01, not run on hardware: against `mock_blimp.py --camera` and in `--demo` only; no row has yet been relayed from the real camera (item 12) |
 | Console sensor commands and the stream share the chips by turns (`sensor_stream_pause()`) | reasoned from the `i2c_master` and ULD port sources; ❓ not run |
 | Per-task `stdout` redirection captures command output | reasoned from the newlib/FreeRTOS sources; ❓ not run |
 | `ESP_LOGx` printed inside a command reaches the UDP console | ❓ depends on the log sink being `vprintf` on the calling task; verify with `imu -c 0x69` (deliberate wrong address) |
@@ -245,7 +269,7 @@ Props off. USB console open in a second window so the logs are visible.
 
 Built since the first cut: the sensor stream (`sensor_stream.c` sampling through the
 attach/read/detach drivers lifted out of `cmd_imu.c`, `cmd_mag.c`, `cmd_baro.c` and `cmd_tof.c`,
-sent as the `SENSORS` packet, 2026-10-24) and the ground station page
+sent as the `SENSORS` packet, 2026-10-24), the camera relay (`CAMERA` packet, 2026-11-01) and the ground station page
 (`software/ground_station/`, design in `docs/ground-station-plan.md`, 2026-10-23). Still
 planned: an arm step if the key alone turns out to be too little.
 

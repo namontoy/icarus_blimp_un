@@ -6,7 +6,8 @@
 deadman and `mock_blimp.py` runs pass offscreen, and the user ran the demo on screen; the bench
 run with the S3 is pending). Amended the same day: `--cam PORT`, `SerialCamera` and pyserial are removed,
 because the cameras talk only to the S3 (`docs/ground-station-plan.md` §7); the `camera.py` and `app.py` rows
-of §2 and the camera buttons of §5 below describe the first implementation. It supersedes the stack
+of §2 and the camera buttons of §5 below describe the first implementation (2026-11-01: `camera.py` now holds `LinkCamera`, fed by the
+CAMERA packet, and `DemoCamera` is gone; see `docs/ground-station-plan.md` §5 and §7). It supersedes the stack
 choice in `docs/ground-station-plan.md` §2. That document's design brief (§3), safety chain (§6)
 and camera notes (§7) still apply.
 

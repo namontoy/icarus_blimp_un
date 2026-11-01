@@ -9,6 +9,7 @@ the firmware's "Wireless link" menuconfig settings). The blimp is 192.168.4.1.
 
     python software/blimp_link.py selftest                     # no hardware needed
     python software/blimp_link.py status                       # telemetry for 5 s
+    python software/blimp_link.py camera --seconds 30          # the forward camera's rows, as the blimp relays them
     python software/blimp_link.py console                      # interactive console over the air
     python software/blimp_link.py console "motor --status"     # one command
     python software/blimp_link.py console "param alt.kp 0.4"   # a controller gain, live, RAM only
@@ -48,11 +49,14 @@ PKT_TELEMETRY = 0x81
 PKT_SENSORS = 0x82
 PKT_LOG_INFO = 0x83
 PKT_LOG_CHUNK = 0x84
+PKT_CAMERA = 0x85
 
 MOTOR_ORDER = ('FL', 'RL', 'FR', 'RR')      # motor_id_t order, as on the wire
 FAILSAFE = {0: 'off', 1: 'idle', 2: 'armed', 3: 'TRIPPED'}
 SENSORS_IMU, SENSORS_MAG, SENSORS_BARO, SENSORS_TOF = 1, 2, 4, 8     # link_sensors_t.valid
 EOT = b'\x04'                   # closes every console response
+# link_camera_t.flags (link_protocol.h)
+CAM_ROW, CAM_DETECTED, CAM_CLIPPED, CAM_UART, CAM_STREAMING_OFF = 1, 2, 4, 8, 16
 
 _HDR = struct.Struct('<HBBHH')              # magic, version, type, seq, reserved
 _CRC = struct.Struct('<I')
@@ -63,6 +67,12 @@ _TELEMETRY = struct.Struct('<I4f4B3IHH')    # t_us, cmd[4], failsafe, alive, lin
 _SENSORS = struct.Struct('<I3f3ff3fffffHBB')    # t_us, acc[3] g, gyro[3] dps, imu temp,
                                                 # mag[3] gauss, heading deg, pressure Pa,
                                                 # baro temp, baro alt m, tof mm, tof status, valid
+# link_camera_t (net_link.c's send_camera): the forward ESP32-CAM's latest CSV row as cam_link.c parsed
+# it, plus the UART's health. Body fields in wire order: t_us, row_t_us, frame_seq, cam_t_ms; flags,
+# csv_version, blobs, stage; cx, cy, az, el, area; w_px, h_px; fill, range_mm, conf; b_az[3], b_el[3],
+# b_range_mm[3], b_conf[3]; matched_px, dt_ms; proc_us, loop_us; bytes, rejected, overflows, info_lines;
+# row_age_ms, rows_last_s, bearing_sign.
+_CAMERA = struct.Struct('<4I4B5f2H3f12fIf2I4IHBb')
 # The capture (capture.c on the blimp): LOG_CMD out, LOG_INFO or LOG_CHUNKs back.
 LOG_CMD_INFO, LOG_CMD_START, LOG_CMD_STOP, LOG_CMD_CLEAR, LOG_CMD_GET = 0, 1, 2, 3, 4
 LOG_STATE = {0: 'idle', 1: 'running', 2: 'done'}
@@ -85,6 +95,7 @@ assert _HDR.size + _MOTOR_SET.size + _CRC.size == 28
 assert _HDR.size + _MOTOR_STOP.size + _CRC.size == 16
 assert _HDR.size + _TELEMETRY.size + _CRC.size == 52
 assert _HDR.size + _SENSORS.size + _CRC.size == 76
+assert _HDR.size + _CAMERA.size + _CRC.size == 152
 assert _HDR.size + _LOG_CMD.size + _CRC.size == 20
 assert _HDR.size + _LOG_INFO.size + _CRC.size == 64
 assert _HDR.size + _LOG_CHUNK_HEAD.size + LOG_CHUNK_RECORDS * LOG_RECORD_BYTES + _CRC.size == 1172
@@ -169,6 +180,50 @@ def format_telemetry(t):
         t['free_heap'] // 1024))
 
 
+def decode_camera(body):
+    """One CAMERA packet as a dict of a fixed shape: every key is always there.
+    The row keys carry target_cam's CSV column names (what the ground station
+    reads) and are zero, or the -1 'unknown' of the wire, when 'row' is False
+    (a health-only packet: the camera is silent, unplugged or not started)."""
+    f = _CAMERA.unpack(body)
+    (t_us, row_t_us, frame_seq, cam_t_ms, flags, csv_v, blobs, stage, cx, cy, az, el, area, w, h, fill,
+     range_mm, conf) = f[:18]
+    b_az, b_el, b_rng, b_conf = f[18:21], f[21:24], f[24:27], f[27:30]
+    (matched, dt_ms, proc_us, loop_us, nbytes, rejected, overflows, info_lines, age, rows_s, sign) = f[30:]
+    d = {'t_us': t_us, 'row_t_us': row_t_us, 'frame_seq': frame_seq, 'flags': flags,
+         'row': bool(flags & CAM_ROW), 'uart': bool(flags & CAM_UART),
+         'streaming_off': bool(flags & CAM_STREAMING_OFF), 'csv_v': csv_v, 'bearing_sign': sign,
+         'row_age_ms': None if age == 65535 else age, 'rows_last_s': rows_s, 'bytes': nbytes,
+         'rejected': rejected, 'overflows': overflows, 'info_lines': info_lines,
+         't_ms': cam_t_ms, 'ok': int(bool(flags & CAM_DETECTED)), 'cx_px': cx, 'cy_px': cy, 'az_deg': az,
+         'el_deg': el, 'area_px': int(round(area)), 'w_px': w, 'h_px': h, 'fill': fill, 'range_mm': range_mm,
+         'clipped': int(bool(flags & CAM_CLIPPED)), 'blobs': blobs, 'matched_px': matched,
+         'dt_ms': dt_ms, 'proc_us': proc_us, 'stage': stage, 'conf': conf, 'loop_us': loop_us}
+    for k in range(3):
+        d['b%d_az' % (k + 2)] = b_az[k]
+        d['b%d_el' % (k + 2)] = b_el[k]
+        d['b%d_range_mm' % (k + 2)] = b_rng[k]
+        d['b%d_conf' % (k + 2)] = b_conf[k]
+    return d
+
+
+def format_camera(c):
+    """One line for the 'camera' command and 'status'."""
+    state = 'uart %s' % ('up' if c['uart'] else 'DOWN')
+    if c['streaming_off']:
+        state += ', camera says streaming off'
+    link = 'seq %d  rows/s %d  bytes %d  rejected %d  %s' % (
+        c['frame_seq'], c['rows_last_s'], c['bytes'], c['rejected'], state)
+    if not c['row']:
+        return 'no row (%s)  %s' % ('camera silent' if c['bytes'] == 0 else 'none new', link)
+    if not c['ok']:
+        return 'NO TARGET  %s' % link
+    rng = '%.2f m' % (c['range_mm'] / 1000.0) if c['range_mm'] >= 0 else 'range -'
+    return '%s  az %+6.1f el %+6.1f  %s  blobs %d  core bearing %+6.1f (sign %+d)  %s' % (
+        'CLIPPED' if c['clipped'] else 'TARGET ', c['az_deg'], c['el_deg'], rng, c['blobs'],
+        c['bearing_sign'] * c['az_deg'], c['bearing_sign'], link)
+
+
 def decode_log_info(body):
     d = dict(zip(LOG_INFO_FIELDS, _LOG_INFO.unpack(body)))
     d['fw'] = d['fw'].split(b'\0', 1)[0].decode('ascii', 'replace')
@@ -217,6 +272,9 @@ class BlimpLink:
         self.last_rx = 0.0
         self.rx_count = 0
         self.sensors_count = 0
+        self.camera = None              # latest decoded CAMERA packet (health-only ones included)
+        self.camera_count = 0
+        self.camera_t = 0.0             # monotonic time of the last CAMERA packet
         self.rx_bad = 0
         self._hb_period = 1.0 / heartbeat_hz
         self._stop = threading.Event()
@@ -302,6 +360,15 @@ class BlimpLink:
                 self.sensors_count += 1
                 if self.on_packet:
                     self.on_packet('sensors', self.sensors)
+            elif ptype == PKT_CAMERA and len(body) == _CAMERA.size:
+                # Not a sign of life: last_rx stays with telemetry, sensors and
+                # the log replies, so a side stream cannot keep a dead link
+                # looking alive (docs/link-robustness-review.md).
+                self.camera = decode_camera(body)
+                self.camera_count += 1
+                self.camera_t = time.monotonic()
+                if self.on_packet:
+                    self.on_packet('camera', self.camera)
             elif ptype == PKT_LOG_INFO and len(body) == _LOG_INFO.size:
                 self.log_info = decode_log_info(body)
                 self.last_rx = time.monotonic()
@@ -565,9 +632,43 @@ def cmd_status(args):
                 print(format_telemetry(link.telemetry))
                 if link.sensors:
                     print('   ', format_sensors(link.sensors))
+                if link.camera:
+                    print('    camera:', format_camera(link.camera))
             elif not link.alive:
                 print('no telemetry for 1 s')
             time.sleep(args.interval)
+    finally:
+        link.close()
+
+
+def cmd_camera(args):
+    """Watch the forward camera's rows as the blimp relays them. Run
+    'cam_watch.py' instead to see the UART directly over USB."""
+    link = _need_link(args)
+    try:
+        # The camera packet is sent at 1 Hz at least, so 3 s without one means
+        # the firmware does not send them, or the blimp no longer has a peer.
+        deadline = time.monotonic() + 3.0
+        while link.camera is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if link.camera is None:
+            sys.exit('no CAMERA packet in 3 s: a firmware from before the camera relay, or no peer '
+                     '(telemetry is arriving, so the link itself is up)')
+        end = time.monotonic() + args.seconds if args.seconds > 0 else float('inf')
+        min_gap = 1.0 / args.rate if args.rate > 0 else 0.0
+        shown, next_print, warned = -1, 0.0, False
+        while time.monotonic() < end:
+            now = time.monotonic()
+            c, n = link.camera, link.camera_count
+            if n != shown and now >= next_print:
+                shown, next_print, warned = n, now + min_gap, False
+                print('t=%8.3fs  %s' % (c['t_us'] / 1e6, format_camera(c)))
+            elif not warned and now - link.camera_t > 3.0:
+                warned = True
+                print('no CAMERA packet for 3 s')
+            time.sleep(0.02)
+    except KeyboardInterrupt:
+        print()
     finally:
         link.close()
 
@@ -717,6 +818,41 @@ def cmd_selftest(args):
     assert not s2['imu_valid'] and s2['tof_valid']
     format_sensors(s)
 
+    # CAMERA: a ROW packet and a health-only one, plus the wire offsets of a few
+    # fields against link_protocol.h's table (the packet's offsets include the
+    # 8-byte header, the body's start 8 bytes later).
+    row_flags = CAM_ROW | CAM_DETECTED | CAM_UART
+    cam = pack(PKT_CAMERA, 12, _CAMERA.pack(
+        5000000, 4999000, 321, 987654, row_flags, 2, 3, 1, 61.5, 40.25, -12.5, 7.75, 640.0, 30, 28, 0.76,
+        1530.0, -1.0, 5.0, 6.0, 7.0, -1.0, -2.0, -3.0, 800.0, -1.0, 2000.0, 0.9, -1.0, -1.0, 4321, 80.0,
+        21500, 61000, 123456, 2, 1, 9, 17, 12, -1))
+    assert len(cam) == 152
+    c = decode_camera(unpack(cam)[2])
+    assert c['row'] and c['uart'] and c['ok'] == 1 and c['clipped'] == 0 and not c['streaming_off']
+    assert c['frame_seq'] == 321 and c['t_ms'] == 987654 and c['csv_v'] == 2 and c['blobs'] == 3
+    assert c['stage'] == 1 and c['area_px'] == 640 and c['w_px'] == 30 and c['h_px'] == 28
+    assert abs(c['az_deg'] + 12.5) < 1e-6 and abs(c['range_mm'] - 1530.0) < 1e-3 and c['conf'] == -1.0
+    assert c['b2_az'] == 5.0 and c['b4_el'] == -3.0 and c['b3_range_mm'] == -1.0 and c['b4_range_mm'] == 2000.0 and abs(c['b2_conf'] - 0.9) < 1e-6
+    assert c['matched_px'] == 4321 and c['proc_us'] == 21500 and c['loop_us'] == 61000
+    assert (c['bytes'], c['rejected'], c['overflows'], c['info_lines']) == (123456, 2, 1, 9)
+    assert c['row_age_ms'] == 17 and c['rows_last_s'] == 12 and c['bearing_sign'] == -1
+    off = lambda o: cam[o:o + 4]
+    assert struct.unpack('<I', off(8))[0] == 5000000 and struct.unpack('<I', off(16))[0] == 321
+    assert struct.unpack('<I', off(20))[0] == 987654 and cam[24] == row_flags and cam[25] == 2
+    assert struct.unpack('<f', off(36))[0] == -12.5 and struct.unpack('<H', cam[48:50])[0] == 30
+    assert struct.unpack('<f', off(56))[0] == 1530.0 and struct.unpack('<f', off(64))[0] == 5.0
+    assert abs(struct.unpack('<f', off(100))[0] - 0.9) < 1e-6 and struct.unpack('<I', off(112))[0] == 4321
+    assert struct.unpack('<I', off(128))[0] == 123456 and struct.unpack('<H', cam[144:146])[0] == 17
+    assert cam[146] == 12 and struct.unpack('<b', cam[147:148])[0] == -1
+    format_camera(c)
+    health = pack(PKT_CAMERA, 13, _CAMERA.pack(
+        5000000, 0, 321, 0, CAM_UART, 2, 0, 0, *([0.0] * 5), 0, 0, 0.0, 0.0, 0.0, *([0.0] * 12), 0, 0.0, 0, 0,
+        0, 0, 0, 0, 65535, 0, -1))
+    h = decode_camera(unpack(health)[2])
+    assert not h['row'] and h['uart'] and h['ok'] == 0 and h['row_age_ms'] is None and h['frame_seq'] == 321
+    assert set(h) == set(c)
+    format_camera(h)
+
     lc = pack(PKT_LOG_CMD, 9, _LOG_CMD.pack(LOG_CMD_GET, 8, 0, 160))
     assert len(lc) == 20 and _LOG_CMD.unpack(unpack(lc)[2]) == (LOG_CMD_GET, 8, 0, 160)
     li = pack(PKT_LOG_INFO, 10, _LOG_INFO.pack(2, 0, 72, 1, 7, 20000, 3000, 6000, 3000, 123456, 2, 250, 12000.0,
@@ -818,6 +954,11 @@ def main(argv=None):
     st = sub.add_parser('stop', help='coast (or --brake) all four motors')
     st.add_argument('--brake', action='store_true')
     st.set_defaults(fn=cmd_stop)
+
+    ca = sub.add_parser('camera', help="watch the forward camera's rows as the blimp relays them")
+    ca.add_argument('--seconds', type=float, default=30.0, help='0 = until Ctrl+C (default %(default)s)')
+    ca.add_argument('--rate', type=float, default=3.0, help='most lines per second (default %(default)s)')
+    ca.set_defaults(fn=cmd_camera)
 
     cp = sub.add_parser('capture', help="record the control loop's records on the blimp and fetch them")
     cp.add_argument('action', choices=('status', 'start', 'stop', 'clear', 'download'))

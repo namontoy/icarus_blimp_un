@@ -187,7 +187,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{DIM}ground station (offscreen){OFF}")
         for label, script in (("the bridge's motor rules", "test_bridge.py"),
                               ("the window, GUI thread blocked", "test_window.py"),
-                              ("the Control page", "test_control.py")):
+                              ("the Control page", "test_control.py"),
+                              ("the camera link and panel", "test_camera.py")):
             if not gate():
                 break
             ok &= r.step(label, [sim, f"software/ground_station/tests/{script}"])

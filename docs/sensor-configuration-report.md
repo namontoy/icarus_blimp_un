@@ -47,6 +47,8 @@ one I2C bus, SDA 4, SCL 5, internal pull-ups, each device at 100 kHz.
 | Cameras | 2 × ESP32-CAM | **not linked to the S3**: no packet carries them; the camera fields of the record are 0 and the GUI's camera panel runs on demo data. | `docs/inter-board-link-plan.md` |
 | Radio | S3 as access point, WPA2, channel 1 | UDP 7200 packets, UDP 7201 console; link timeout 500 ms; telemetry 20 Hz; esp_timer task dispatch (ISR dispatch stalls Wi-Fi's timers on ESP-IDF v5.5.x, `docs/wifi-drop-report.md`) | `net_wifi.c`, `net_link.c` |
 
+**Update 2026-11-01 (the text above is as written 2026-10-28).** The Cameras row is out of date: the forward camera's rows have been read over UART1 since 2026-10-30 (`cam_link.c`; `docs/inter-board-link-plan.md`) and, since 2026-11-01, relayed to the ground station as `LINK_PKT_CAMERA` (0x85), so the GUI's camera panel shows them instead of demo data. Built; run against `mock_blimp.py` and in `--demo`, not yet against the blimp. The record's camera fields are still 0 and the downward camera is not linked. The relay is a side stream and configures nothing on the camera.
+
 ## 3. Rates, layer by layer
 
 How often each layer produces a value, and what a consumer sees. "Repeat" means the consumer

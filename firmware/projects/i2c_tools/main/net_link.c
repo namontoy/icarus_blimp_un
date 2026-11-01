@@ -57,6 +57,7 @@
 #include "lwip/sockets.h"
 #include "sdkconfig.h"
 #include "capture.h"
+#include "cam_link.h"
 #include "cmd_motor.h"
 #include "ctl_task.h"
 #include "link_protocol.h"
@@ -89,6 +90,9 @@ static struct {
     volatile bool      link_motors;   /* standing commands came over the air */
     uint32_t           sensors_seq;   /* the stream's sample last sent       */
     volatile uint32_t  tx_sensors;
+    uint32_t           camera_seq;    /* the camera row last sent (frame_seq)   */
+    int64_t            camera_tx_us;  /* when the last CAMERA packet went out   */
+    volatile uint32_t  tx_camera;
     /* The last accepted MOTOR_SET or MOTOR_STOP: the link timeout runs from
        it, and the next MOTOR_SET from the same sender must be newer. */
     volatile int64_t   last_motor_rx_us;
@@ -103,6 +107,10 @@ static struct {
 
 /* The one LOG_CHUNK under construction; the link task alone touches it. */
 static link_log_chunk_t s_chunk;
+
+/* The CAMERA packet is 152 bytes and the link task's stack is 4096, which the
+   sockets already use a good part of; the chunk is static for the same reason. */
+static link_camera_t s_camera;
 
 /* --------------------------------------------------------------- receive */
 
@@ -479,6 +487,103 @@ static void send_sensors(int64_t now)
     }
 }
 
+/*
+ * The forward camera's latest row (LINK_PKT_CAMERA), see link_protocol.h. A
+ * row cam_link.c has parsed since the last packet goes out once with
+ * LINK_CAM_ROW; it is not resent, because a repeated number would look like a
+ * live camera when it is a dead one, and a lost row is visible on the ground
+ * as a gap in frame_seq. With no new row, a health-only packet goes out once
+ * a second (LINK_CAM_IDLE_MS), which is how the ground station tells a
+ * camera that stopped, or a UART that never started, from a blimp that
+ * predates this packet. One packet per tick at most: rows come at 12.5/s and
+ * the tick at 20 Hz, so none is skipped unless the tick is slowed below that.
+ * The packet is blimp -> host only and touches no liveness state.
+ */
+static void send_camera(int64_t now)
+{
+    int64_t age_ms = 0;
+    if (!peer_listening(now, &age_ms)) {
+        return;
+    }
+    cam_link_row_t lr;
+    const bool have = cam_link_latest_row(&lr);
+    const bool fresh = have && lr.frame_seq != s.camera_seq;
+    if (!fresh && (now - s.camera_tx_us) < (int64_t)LINK_CAM_IDLE_MS * 1000) {
+        return;
+    }
+    cam_link_status_t st;
+    cam_link_status(&st);
+
+    link_camera_t *p = &s_camera;
+    memset(p, 0, sizeof(*p));
+    p->h.magic   = LINK_PROTO_MAGIC;
+    p->h.version = LINK_PROTO_VERSION;
+    p->h.type    = LINK_PKT_CAMERA;
+    p->h.seq     = s.tx_seq++;
+    p->t_us      = (uint32_t)now;
+    p->frame_seq = have ? lr.frame_seq : 0u;
+    p->csv_version = have ? (uint8_t)lr.row.version : 0u;
+    p->flags = (st.running ? LINK_CAM_UART : 0u) | (st.streaming_off ? LINK_CAM_STREAMING_OFF : 0u);
+    p->bytes      = st.bytes;
+    p->rejected   = st.rejected;
+    p->overflows  = st.overflows;
+    p->info_lines = st.info_lines;
+    p->rows_last_s   = st.rows_last_s > 255u ? 255u : (uint8_t)st.rows_last_s;
+    p->bearing_sign  = (int8_t)cam_link_bearing_sign();
+    if (have) {
+        /* Unsigned difference: t_us was stamped by the camera task and may be
+           a hair after this tick's clock; that is age 0, not 71 minutes. Only
+           a skew under 65 ms counts as that: a signed cast would have turned
+           a row older than 2^31 us (36 min, a camera unplugged on an idle
+           bench) into age 0 as well. */
+        const uint32_t d_us = (uint32_t)now - lr.t_us;
+        const uint32_t age_row_ms = d_us >= 0xFFFF0000u ? 0u : d_us / 1000u;
+        p->row_age_ms = age_row_ms > 65534u ? 65534u : (uint16_t)age_row_ms;
+    } else {
+        p->row_age_ms = 65535;
+    }
+    if (fresh) {
+        const cam_row_t *r = &lr.row;
+        p->flags |= LINK_CAM_ROW | (r->detected ? LINK_CAM_DETECTED : 0u) |
+                    (r->clipped ? LINK_CAM_CLIPPED : 0u);
+        p->row_t_us = lr.t_us;
+        p->cam_t_ms = r->cam_t_ms;
+        p->blobs    = r->blobs > 255u ? 255u : (uint8_t)r->blobs;
+        p->stage    = r->stage;
+        p->cx_px = r->cx_px;
+        p->cy_px = r->cy_px;
+        p->az_deg = r->az_deg;
+        p->el_deg = r->el_deg;
+        p->area_px = r->area_px;
+        p->w_px = r->w_px;
+        p->h_px = r->h_px;
+        p->fill = r->fill;
+        p->range_mm = r->range_mm;
+        p->conf = r->conf;
+        for (int k = 0; k < 3; k++) {
+            p->b_az_deg[k]   = r->b_az_deg[k];
+            p->b_el_deg[k]   = r->b_el_deg[k];
+            p->b_range_mm[k] = r->b_range_mm[k];
+            p->b_conf[k]     = r->b_conf[k];
+        }
+        p->matched_px = r->matched_px;
+        p->dt_ms      = r->dt_ms;
+        p->proc_us    = r->proc_us;
+        p->loop_us    = r->loop_us;
+    }
+    p->crc32 = link_crc32(p, sizeof(*p));
+
+    int sent = sendto(s.sock, p, sizeof(*p), 0, (struct sockaddr *)&s.peer, sizeof(s.peer));
+    if (sent == (int)sizeof(*p)) {
+        s.tx++;
+        s.tx_camera++;
+        s.camera_tx_us = now;
+        if (fresh) {
+            s.camera_seq = lr.frame_seq;
+        }
+    }
+}
+
 /* ------------------------------------------------------------------ task */
 
 static void link_task(void *arg)
@@ -500,6 +605,7 @@ static void link_task(void *arg)
         if (now >= next_tx_us) {
             send_telemetry(now);
             send_sensors(now);
+            send_camera(now);
             next_tx_us += period_us;
             if (next_tx_us < now) {     /* fell behind: resync, don't burst */
                 next_tx_us = now + period_us;
@@ -555,6 +661,7 @@ void net_link_get_status(net_link_status_t *out)
     out->rx_refused  = s.rx_refused;
     out->tx          = s.tx;
     out->tx_sensors  = s.tx_sensors;
+    out->tx_camera   = s.tx_camera;
     out->have_motor  = s.have_motor;
     if (s.have_motor) {
         int64_t age = (esp_timer_get_time() - s.last_motor_rx_us) / 1000;
@@ -597,8 +704,8 @@ static int do_link_cmd(int argc, char **argv)
                st.alive ? "alive" : "STALE", st.age_ms);
     }
     printf("rx ok %" PRIu32 "   rx rejected %" PRIu32 "   motor commands out of date %" PRIu32
-           "   tx %" PRIu32 " (of which sensors %" PRIu32 ")\n",
-           st.rx_ok, st.rx_bad, st.rx_stale, st.tx, st.tx_sensors);
+           "   tx %" PRIu32 " (of which sensors %" PRIu32 ", camera %" PRIu32 ")\n",
+           st.rx_ok, st.rx_bad, st.rx_stale, st.tx, st.tx_sensors, st.tx_camera);
     if (st.rx_refused) {
         printf("motor commands refused while the control loop held the motors: %" PRIu32 "\n",
                st.rx_refused);

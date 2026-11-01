@@ -343,7 +343,7 @@ class BlobTable(QWidget):
                 lb.setVisible(b is not None)
                 if b is None:
                     continue
-                lb.setText((str(b['k']), sfmt(b['az'], 1), sfmt(b['el'], 1), fmt(b['r'] / 1000, 2),
+                lb.setText((str(b['k']), sfmt(b['az'], 1), sfmt(b['el'], 1), fmt(b['r'] / 1000, 2) if isnum(b['r']) and b['r'] >= 0 else '—',
                             fmt(b['c'], 2) if isnum(b['c']) and b['c'] >= 0 else '—')[c])
                 set_color(lb, T.UN_GREEN if b.get('main') else T.FG)
 
@@ -395,6 +395,7 @@ class CameraPanel(Panel):
         ro.setVerticalSpacing(6)
         for i, k in enumerate(('az', 'el', 'range', 'conf')):
             ro.addWidget(self.ro[k], i // 2, i % 2)
+        self.ro['az'].setToolTip("the camera's own azimuth, + to the right; core's bearing is the core sign times this")
         self.fov = FovPlot()
         self.blobs = BlobTable()
         self.health = label('link: —', 11, color=T.FAINT, mono=True, wrap=True)
@@ -417,10 +418,17 @@ class CameraPanel(Panel):
         self.status = st
         src = st.get('source')
         have = bool(src) and src != 'none'
-        # Until the S3 relays camera data there is nothing to grab outside the demo
-        self.note.setText('source: %s' % src if have else 'no camera data on the link yet')
-        self.b_grab.setEnabled(have)
-        self.b_live.setEnabled(have)
+        # The link carries the camera's rows, not its frames (target_cam sends the S3 rows only), so
+        # Grab and Live exist only where a painter draws frames, in the demo
+        frames = bool(st.get('frames'))
+        self.note.setText(('source: %s · frames painted from the rows' % src if frames
+                           else 'source: %s · rows only, no frames on the link' % src) if have
+                          else 'no camera source')
+        self.b_grab.setEnabled(frames)
+        self.b_live.setEnabled(frames)
+        tip = '' if frames else 'the link carries no frames: target_cam sends the S3 rows only'
+        self.b_grab.setToolTip(tip)
+        self.b_live.setToolTip(tip)
         self.b_live.setChecked(bool(st.get('live')))
         self.render_side()
 
@@ -432,6 +440,7 @@ class CameraPanel(Panel):
     def on_row(self, row):
         now = time.monotonic()
         self.row, self.row_at = row, now
+        self.view.set_row(row)
         self.row_times.append(now)
         while self.row_times and now - self.row_times[0] > CAM_ROW_STALE_S:
             self.row_times.popleft()
@@ -442,7 +451,7 @@ class CameraPanel(Panel):
         """Frame timer: the side goes to NO DATA once, when the rows stop."""
         if self.row is not None and not self._aged and time.monotonic() - self.row_at > CAM_ROW_STALE_S:
             self._aged = True
-            self.render_side()
+            self.render_side()      # also tells the view why there is no row
 
     def render_side(self):
         row = self.row
@@ -450,9 +459,8 @@ class CameraPanel(Panel):
         ok = fresh and bool(row.get('ok'))
         if not fresh:
             state, word, color = 'idle', 'NO DATA', T.MUTED
-            sub = 'no rows from the camera for 2 s' if self.status.get('connected') else 'camera not connected'
-            if row is None and self.status.get('connected'):
-                sub = "waiting for the camera's rows"
+            sub = self.no_data_reason()
+            self.view.set_row(None, sub)
         elif ok:
             n = row.get('blobs', 0)
             state, word, color = 'target', 'TARGET', T.UN_GREEN
@@ -469,7 +477,7 @@ class CameraPanel(Panel):
         self.v_sub.setText(sub)
         self.ro['az'].set(sfmt(row['az_deg'], 1) if ok else '—')
         self.ro['el'].set(sfmt(row['el_deg'], 1) if ok else '—')
-        self.ro['range'].set(fmt(row['range_mm'] / 1000, 2) if ok else '—')
+        self.ro['range'].set(fmt(row['range_mm'] / 1000, 2) if ok and row.get('range_mm', -1) >= 0 else '—')
         conf = row.get('conf') if ok else None
         self.ro['conf'].set(fmt(conf, 2) if isnum(conf) and conf >= 0 else '—')
         blobs = []
@@ -486,10 +494,35 @@ class CameraPanel(Panel):
         st = self.status
         if st.get('source') and st['source'] != 'none':
             rps = len(self.row_times) / CAM_ROW_STALE_S
-            self.health.setText('link: %s · %.1f rows/s · frames ok %d, bad %d' % (
-                'up' if st.get('connected') else 'down', rps, st.get('frames_ok') or 0, st.get('frames_bad') or 0))
+            sign = st.get('bearing_sign')
+            self.health.setText(
+                'link: %s · rows/s %.1f here, %s on the S3 · skipped %s · rejected %s · csv %s · core sign %s%s' % (
+                    'up' if st.get('connected') else 'down', rps, st.get('rows_s', '—'), st.get('skipped', 0),
+                    st.get('rejected', 0), 'v%d' % st['csv_v'] if st.get('csv_v') else '—', '%+d' % sign if sign else '—',
+                    ' · frames ok %d, bad %d' % (st.get('frames_ok') or 0, st.get('frames_bad') or 0)
+                    if st.get('frames') else ''))
         else:
             self.health.setText('link: no camera source')
+
+    def no_data_reason(self):
+        """Why there is no fresh row, from the one place each cause shows: the
+        relay's packets, the S3's camera UART, its byte count, the rows."""
+        st = self.status
+        if not st.get('source') or st['source'] == 'none':
+            return 'no camera source'
+        if not st.get('packets'):
+            return 'no camera packets from the blimp: firmware before the camera relay?'
+        if not st.get('connected'):
+            return 'the blimp stopped sending camera packets'
+        if not st.get('uart'):
+            return 'the S3 camera UART is not running'
+        if self.row is None:
+            if not st.get('bytes'):
+                return 'the S3 hears nothing from the camera: wiring or power'
+            return 'bytes arrive but no rows: baud, or not target_cam'
+        if st.get('streaming_off'):
+            return 'rows stopped: the camera says streaming off'
+        return 'rows stopped: none from the camera for 2 s'
 
 
 # ---------------------------------------------------------------- sensors

@@ -24,6 +24,7 @@ FW = ROOT / "firmware" / "projects" / "i2c_tools"
 TESTS = {
     "param_table": [ROOT / "core" / "src" / "params.c", FW / "main" / "param_table.c"],
     "cam_row": [FW / "main" / "cam_row.c"],
+    "link_protocol": [],
     "motor_ramp": [FW / "main" / "motor_ramp.c"],
 }
 

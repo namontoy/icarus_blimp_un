@@ -45,6 +45,7 @@ static struct {
     portMUX_TYPE      mux;              /* guards everything below but the line buffer */
     cam_link_status_t st;
     cam_result_t      latest;
+    cam_link_row_t    latest_row;       /* the same row, every column kept */
     bool              have;
     int               sign;
     uint32_t          window_start_us, window_rows;
@@ -75,12 +76,13 @@ static void keep(kept_line_t *ring, size_t size, uint32_t *n, const char *text, 
 }
 
 /* A row into the control task's mailbox format; false for anything else. */
-static bool parse_row(const char *line, cam_result_t *r, int *version)
+static bool parse_row(const char *line, cam_result_t *r, cam_row_t *row_out)
 {
     cam_row_t row;
     if (!cam_row_parse(line, &row)) {
         return false;
     }
+    *row_out = row;
     memset(r, 0, sizeof(*r));
     r->detected = row.detected;
     r->cx_px    = (uint16_t)lroundf(row.cx_px);
@@ -89,7 +91,6 @@ static bool parse_row(const char *line, cam_result_t *r, int *version)
     r->az_deg   = row.az_deg;
     r->el_deg   = row.el_deg;
     /* width_px / height_px: the frame size is not in the row; 0 = unknown. */
-    *version = row.version;
     return true;
 }
 
@@ -103,9 +104,9 @@ static void handle_line(char *line, size_t len)
     }
     const uint32_t t = now_us();
     cam_result_t r;
-    int version = 0;
+    cam_row_t parsed;
     const bool info = line[0] == '#';
-    const bool row = !info && parse_row(line, &r, &version);
+    const bool row = !info && parse_row(line, &r, &parsed);
 
     portENTER_CRITICAL(&s.mux);
     keep(s.recent, CAM_RECENT, &s.recent_n, line, t);
@@ -121,11 +122,14 @@ static void handle_line(char *line, size_t len)
         r.frame_seq = s.latest.frame_seq + 1u;
         r.t_us = t;
         s.latest = r;
+        s.latest_row.frame_seq = r.frame_seq;
+        s.latest_row.t_us = t;
+        s.latest_row.row = parsed;
         s.have = true;
         s.st.rows++;
         s.st.rows_detected += r.detected ? 1u : 0u;
         s.st.last_row_us = t;
-        s.st.csv_version = version;
+        s.st.csv_version = parsed.version;
         s.st.streaming_off = false;
         if (s.window_start_us == 0u || (uint32_t)(t - s.window_start_us) >= 1000000u) {
             s.st.rows_last_s = s.window_rows;
@@ -220,6 +224,15 @@ bool cam_link_latest(cam_result_t *out)
     portENTER_CRITICAL(&s.mux);
     const bool have = s.have;
     *out = s.latest;
+    portEXIT_CRITICAL(&s.mux);
+    return have;
+}
+
+bool cam_link_latest_row(cam_link_row_t *out)
+{
+    portENTER_CRITICAL(&s.mux);
+    const bool have = s.have;
+    *out = s.latest_row;
     portEXIT_CRITICAL(&s.mux);
     return have;
 }

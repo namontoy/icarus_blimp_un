@@ -128,5 +128,116 @@ int main(void)
         CHECK(!cam_row_parse("1000,1,80,60,nan,0,50,12,11,0.9,-1,0,1,130,0,0,-1,0,0,-1,0,0,-1,80.0,12345", &r));
     }
 
+    TEST_GROUP("every kept column round-trips, v2");
+    {
+        make_row(line, sizeof(line), 2, 123456, 1, 95.25f, 50.10f, -12.34f, 4.56f, 120, 1500.0f);
+        CHECK(cam_row_parse(line, &r));
+        CHECK(r.w_px == 12 && r.h_px == 11);
+        CHECK_NEAR(r.fill, 0.91f, 1e-3);
+        CHECK(!r.clipped);
+        CHECK(r.blobs == 1);
+        CHECK(r.matched_px == 130u);
+        for (int k = 0; k < 3; k++) {
+            CHECK_NEAR(r.b_az_deg[k], 0.0f, 1e-6);
+            CHECK_NEAR(r.b_el_deg[k], 0.0f, 1e-6);
+            CHECK_NEAR(r.b_range_mm[k], -1.0f, 1e-6);
+        }
+        CHECK_NEAR(r.dt_ms, 80.0f, 1e-3);
+        CHECK(r.proc_us == 12345u);
+        CHECK(r.stage == 1);
+        CHECK_NEAR(r.conf, 0.93f, 1e-3);
+        CHECK_NEAR(r.b_conf[0], -1.0f, 1e-6);
+        CHECK_NEAR(r.b_conf[1], -1.0f, 1e-6);
+        CHECK_NEAR(r.b_conf[2], 1e-05f, 1e-7);   /* the fourth %.3g of make_row */
+        CHECK(r.loop_us == 45000u);
+    }
+
+    TEST_GROUP("a v1 row: the v2 columns take their defaults");
+    {
+        make_row(line, sizeof(line), 1, 99, 1, 120.0f, 60.0f, 20.5f, -3.0f, 300, 800.0f);
+        CHECK(cam_row_parse(line, &r));
+        CHECK(r.w_px == 12 && r.h_px == 11);
+        CHECK(r.matched_px == 130u);
+        CHECK_NEAR(r.dt_ms, 80.0f, 1e-3);
+        CHECK(r.proc_us == 12345u);
+        CHECK(r.stage == 0);
+        CHECK_NEAR(r.conf, -1.0f, 1e-6);
+        for (int k = 0; k < 3; k++) {
+            CHECK_NEAR(r.b_conf[k], -1.0f, 1e-6);
+        }
+        CHECK(r.loop_us == 0u);
+    }
+
+    TEST_GROUP("a real ok = 0 row, as the learned detector prints it");
+    {
+        const char *row0 = "73920,0,0.00,0.00,0.00,0.00,0,0,0,0.00,-1,0,0,4,0.00,0.00,-1,0.00,0.00,-1,"
+                           "0.00,0.00,-1,80.0,9816,1,-1,-1,-1,-1,1180,310,0,43000,2";
+        CHECK(cam_row_parse(row0, &r));
+        CHECK(!r.detected);
+        CHECK(r.blobs == 0 && r.w_px == 0 && r.h_px == 0 && !r.clipped);
+        CHECK(r.matched_px == 4u);
+        CHECK_NEAR(r.range_mm, -1.0f, 1e-6);
+        CHECK_NEAR(r.conf, -1.0f, 1e-6);
+        CHECK(r.loop_us == 43000u);
+    }
+
+    TEST_GROUP("the camera's clock is exact beyond 2^24 ms");
+    {
+        make_row(line, sizeof(line), 2, 16777217LL, 0, 0.0f, 0.0f, 0.0f, 0.0f, 0, -1.0f);
+        CHECK(cam_row_parse(line, &r));
+        CHECK(r.cam_t_ms == 16777217u);        /* 2^24 + 1: a float cannot hold it */
+        make_row(line, sizeof(line), 2, 4000000001LL, 0, 0.0f, 0.0f, 0.0f, 0.0f, 0, -1.0f);
+        CHECK(cam_row_parse(line, &r));
+        CHECK(r.cam_t_ms == 4000000001u);
+    }
+
+    TEST_GROUP("each new range check refuses");
+    {
+        /* Replace column `col` of a valid v2 row with `value`. */
+        static const struct { int col; const char *value; const char *what; } bad[] = {
+            {7, "2001", "w_px"}, {8, "-1", "h_px"}, {9, "2.5", "fill"}, {11, "2", "clipped"},
+            {11, "0.5", "clipped fractional"}, {12, "10001", "blobs"}, {13, "1000001", "matched_px"},
+            {10, "-2", "range below -1"}, {10, "20000000", "range"},
+            {14, "91", "b2 az"}, {15, "-91", "b2 el"}, {16, "-2", "b2 range"},
+            {17, "91", "b3 az"}, {19, "20000000", "b3 range"}, {20, "-91", "b4 az"}, {22, "-3", "b4 range"},
+            {23, "-1", "dt_ms"}, {23, "2000000", "dt_ms"}, {24, "-1", "proc_us"}, {24, "200000000", "proc_us"},
+            {25, "16", "stage"}, {25, "-1", "stage"}, {26, "1.5", "conf"}, {26, "-2", "conf"},
+            {27, "2", "b2 conf"}, {28, "-1.5", "b3 conf"}, {29, "9", "b4 conf"},
+            {33, "-1", "loop_us"}, {33, "200000000", "loop_us"},
+        };
+        for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            make_row(line, sizeof(line), 2, 1000, 1, 80.0f, 60.0f, 0.5f, 0.0f, 50, 900.0f);
+            char out[512];
+            size_t o = 0;
+            int col = 0;
+            for (const char *p = line;; p++) {
+                if (col == bad[i].col) {
+                    o += (size_t)snprintf(out + o, sizeof(out) - o, "%s", bad[i].value);
+                    while (*p && *p != ',') {
+                        p++;
+                    }
+                    col++;
+                    if (!*p) {
+                        break;
+                    }
+                    out[o++] = ',';
+                    continue;
+                }
+                if (!*p) {
+                    break;
+                }
+                out[o++] = *p;
+                if (*p == ',') {
+                    col++;
+                }
+            }
+            out[o] = '\0';
+            CHECK_MSG(!cam_row_parse(out, &r), "accepted bad %s: %s", bad[i].what, out);
+        }
+        /* The untouched row still parses, so the loop above rejects by the column, not by the harness. */
+        make_row(line, sizeof(line), 2, 1000, 1, 80.0f, 60.0f, 0.5f, 0.0f, 50, 900.0f);
+        CHECK(cam_row_parse(line, &r));
+    }
+
     TEST_REPORT();
 }

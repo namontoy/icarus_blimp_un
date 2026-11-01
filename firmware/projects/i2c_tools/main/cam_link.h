@@ -8,8 +8,9 @@
  *   t_ms,ok,cx_px,cy_px,az_deg,el_deg,area_px,w_px,h_px,fill,range_mm,...
  *
  * 25 columns in its CSV v1, 35 in v2 (the learned detector's, which ends in
- * the version number). Only the first eleven are read here, and they are
- * the same in both. Lines starting with '#' are its banner and replies; the
+ * the version number). The control loop reads the first eleven (they are the
+ * same in both) through cam_link_latest(); every column the UDP link relays
+ * (cam_row.h, LINK_PKT_CAMERA) goes through cam_link_latest_row(). Lines starting with '#' are its banner and replies; the
  * boot ROM's log and anything else that is not a row are counted and
  * dropped. The wiring (the Cableado, docs/inter-board-link-plan.md): CAM U0T
  * (GPIO1) -> 470 ohm -> S3 GPIO6, S3 GPIO2 -> 470 ohm -> CAM U0R (GPIO3), and
@@ -26,6 +27,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "esp_err.h"
+#include "cam_row.h"
 #include "ctl_types.h"
 
 #ifdef __cplusplus
@@ -57,6 +59,20 @@ esp_err_t cam_link_start(void);
 
 /** The latest row; false until one has arrived. Any task, no waiting. */
 bool cam_link_latest(cam_result_t *out);
+
+/**
+ * The same row with every column kept, for net_link.c's CAMERA packet. Its
+ * frame_seq and t_us are the ones cam_link_latest() reports for that row (one
+ * parse, one stamp), so the ground station's rows line up with the control
+ * loop's. False until a row has arrived.
+ */
+typedef struct {
+    uint32_t  frame_seq;    /* rows parsed since boot                        */
+    uint32_t  t_us;         /* S3 clock when the row's newline arrived       */
+    cam_row_t row;
+} cam_link_row_t;
+
+bool cam_link_latest_row(cam_link_row_t *out);
 
 /** core/'s bearing = this x the camera's az: CONFIG_CAM_FWD_BEARING_SIGN,
     or what 'cam --sign' set since boot. */

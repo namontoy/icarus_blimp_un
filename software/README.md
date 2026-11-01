@@ -9,6 +9,7 @@ then:
 ```
 python software/blimp_link.py selftest                     # no hardware
 python software/blimp_link.py status                       # telemetry
+python software/blimp_link.py camera --seconds 10          # the forward camera's rows, relayed by the S3 (2026-11-01)
 python software/blimp_link.py console                      # the firmware console, over the air
 python software/blimp_link.py console "param alt."         # the controller's gains; "param alt.kp 0.4" sets one
 python software/param_check.py --reboot                    # the 'param' bench checks, then a power cycle
@@ -28,6 +29,15 @@ packet).
 `mock_blimp.py` serves the same protocol on localhost for development without hardware
 (`--host 127.0.0.1` on the commands above). Protocol, safety timers and the bring-up
 checklist: `docs/wireless-link.md`.
+
+`blimp_link.py camera` watches the `CAMERA` packets (`LINK_PKT_CAMERA`, 0x85): at most `--rate`
+lines a second (default 3) with the verdict, azimuth, elevation, range, `frame_seq`, rows/s, the S3's
+rejected count, the UART and streaming state and the bearing `core/` would steer on (`bearing_sign`
+x az, + left); `--seconds 0` runs until Ctrl-C. It says so if no `CAMERA` packet arrives in 3 s
+(a firmware from before the relay, or no peer). `mock_blimp.py --camera rows|silent|off` fakes the
+camera: a drifting red balloon at 12.5 rows a second (default), a camera that sends nothing
+(`silent`: health-only packets), or a firmware without the relay (`off`). Built 2026-11-01; run
+against the mock only, not yet against the blimp.
 
 ## The PID tuning plan's instruments
 
@@ -78,7 +88,7 @@ balloon was in view and the yaw error while it was.
 
 ## The ground station: `ground_station/`
 
-The GUI for the bench and the arena: motors, sensors, the camera and the console in one
+The GUI for the bench and the arena: motors, sensors, the forward camera's rows (relayed by the S3) and the console in one
 window (or a browser page), started with `python -m software.ground_station` (`--demo` needs
 no hardware). Dependencies: `pip install -r software/ground_station/requirements.txt`. Its own
 README covers installing on Windows and Linux, the differences between the two (the window

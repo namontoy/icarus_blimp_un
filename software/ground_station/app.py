@@ -80,7 +80,7 @@ class Header(QWidget):
             'link': Pill('Link', 'UDP link to the blimp: age of the last packet'),
             'fs': Pill('Failsafe', 'motor driver failsafe on the blimp'),
             'sta': Pill('STA', "stations on the blimp's access point"),
-            'cam': Pill('Cam', 'camera link'),
+            'cam': Pill('Cam', "the forward camera's rows, relayed by the S3"),
             'demo': Pill('Demo data', 'nothing here touches a real blimp', 'demo', ''),
         }
         self.pills['demo'].setVisible(demo)
@@ -177,12 +177,19 @@ class Header(QWidget):
             self.pills['drive'].set('idle', 'OFF')
 
     def on_cam_status(self, st):
-        if not st.get('source') or st['source'] == 'none':
+        # Rows reach the window through the S3's relay (CAMERA packets): NONE until the first one, UP
+        # while rows are fresh, NO ROWS when the relay is alive but the camera is not delivering, DOWN
+        # when the relay's packets stopped too. LIVE is the demo's painted frames.
+        if not st.get('source') or st['source'] == 'none' or not st.get('packets'):
             self.pills['cam'].set('idle', 'NONE')
-        elif st.get('connected'):
-            self.pills['cam'].set('live' if st.get('live') else 'ok', 'LIVE' if st.get('live') else 'UP')
-        else:
+        elif not st.get('connected'):
             self.pills['cam'].set('warn', 'DOWN')
+        elif st.get('live'):
+            self.pills['cam'].set('live', 'LIVE')
+        elif st.get('rows_fresh'):
+            self.pills['cam'].set('ok', 'UP')
+        else:
+            self.pills['cam'].set('warn', 'NO ROWS')
 
 
 class PageBar(QWidget):

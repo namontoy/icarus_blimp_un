@@ -5,19 +5,21 @@ camera), a Control page (flying by hand from the keyboard or a gamepad, with a P
 Deck input mode; `control.py`, 2026-10-28), a Bench page (captures of the control loop's
 records, with their traces; `bench.py`, 2026-10-27) and the console under all three. It talks to the S3 firmware over its Wi-Fi access
 point and to nothing else. The
-cameras are wired to the S3, which will relay what they extract (detections, optical flow);
-the link has no packet for that yet, so the camera panel runs on demo data only. Design: `docs/ground-station-native-plan.md`; signals and the safety chain:
+cameras are wired to the S3, which relays what they extract. Since 2026-11-01 the forward camera's
+detection rows arrive as `LINK_PKT_CAMERA` and fill the camera panel (rows only, no pictures; run
+against `mock_blimp.py` and in `--demo`, not yet against the blimp); the downward camera's optical
+flow has no packet yet. Design: `docs/ground-station-native-plan.md`; signals and the safety chain:
 `docs/ground-station-plan.md`.
 
 ```
 pip install -r software/ground_station/requirements.txt   # once, on any OS
 
-python -m software.ground_station --demo       # no hardware: mock blimp + demo camera, from the repo root
+python -m software.ground_station --demo       # no hardware: mock blimp with its camera rows, from the repo root
 python -m software.ground_station              # the real blimp; "Join blimp Wi-Fi" is in the header
 ```
 
 The full-screen button in the header (four corner brackets) or F11 toggles full screen. In
-`--demo` the blimp is `mock_blimp.py` on localhost and the camera is drawn, and the header says
+`--demo` the blimp is `mock_blimp.py` on localhost and the camera's frame is drawn, and the header says
 so with an orange DEMO DATA pill. Ctrl-C in the terminal closes the window, which stops the
 motors first. Window size, dock height, tab and collapsed state are kept by Qt's QSettings
 (`~/.config/Icarus/GroundStation.conf` on Linux, the registry on Windows).
@@ -138,7 +140,7 @@ address toward the blimp, so a network joined by hand shows as joined too.
 
 ## Looking at it without hardware
 
-`--demo` runs the mock blimp and the demo camera in-process, so every page carries live-looking
+`--demo` runs the mock blimp, which sends the camera rows too, in-process, so every page carries live-looking
 data on any computer. `--geometry WxH` opens the window at a size instead of the remembered
 one, and `--page` on a page, so the Steam Deck's view can be checked on a laptop:
 
@@ -185,10 +187,16 @@ throwaway settings file, so it never changes the remembered window.
   first reading since the blimp booted.
 - **Camera**: the verdict tile, bearing, elevation, range, confidence, the blob table and the
   field-of-view plot come from the forward camera's detection rows (target_cam's CSV columns).
-  Only `--demo` fills them today; the real rows will come through the S3 once the link has a
-  packet for them. The picture view with Grab frame, Live and Rotate 180° (display only) is
-  kept for the occasional calibration frame the S3 may relay later (`docs/inter-board-link-plan.md`);
-  outside the demo the two buttons are disabled.
+  They arrive from the S3 as `CAMERA` packets (12.5 rows a second), and the panel draws the target
+  from the row alone, on an empty 160 x 120 area. `az` is the camera's own, + to the right; the
+  health line shows the sign the S3 applies for `core/`. The range is the camera's uncalibrated
+  figure (`—` when unknown or clipped). When there is nothing to show, the panel says why: no
+  `CAMERA` packets (a firmware before the relay), the camera UART not running, nothing heard
+  from the camera, bytes but no rows (baud rate, or not target_cam), or rows stopped. The header's
+  Cam pill reads NONE, UP, NO ROWS or DOWN to match. The picture view with Grab frame, Live and
+  Rotate 180° (display only) is kept for the occasional calibration frame the S3 may relay later
+  (`docs/inter-board-link-plan.md`); the link carries no frames, so the two buttons work in
+  `--demo` only, where a painted frame stands in. Built 2026-11-01; not yet run against the blimp.
 - **Control** (the second tab under the header): fly by hand. Pick the input, *PC* (the
   keyboard, plus a gamepad if one is plugged in) or *Steam Deck* (the Deck's own controls; the
   hints leave the screen to fit 1280 × 800), and the stick layout (mode 2: left stick heave and
@@ -249,7 +257,7 @@ throwaway settings file, so it never changes the remembered window.
 | `fonts/` | Titillium Web and IBM Plex Mono with their OFL licences |
 | `blimp_bridge.py` | `blimp_link.BlimpLink` and `BlimpConsole`; owns the standing motor command: a change at once, the 20 Hz repeat, the 3 s watchdog on the GUI thread, the Wi-Fi drop and reboot rules, race mode (`docs/link-robustness-review.md`); `DemoBlimp` runs `mock_blimp.py` in-process |
 | `tests/` | offscreen tests against the in-process mock: the bridge's rules, the window with its GUI thread blocked, the Control page; `python tools/verify.py --gui` runs them (about 1 min) |
-| `camera.py` | `DemoCamera` (rows and frames) and the empty source used until the S3 relays camera data |
+| `camera.py` | `LinkCamera`, fed by the station with each decoded `CAMERA` packet (rows and the S3's counters; in `--demo` it also paints a frame); `paint_demo_frame` |
 | `wifi.py` | joins the blimp's access point: `netsh wlan` on Windows, `nmcli` on Linux; `python wifi.py status` from the command line |
 
 The web version (Tornado, an HTML/CSS/JS page, pywebview) it replaced is in git history up to

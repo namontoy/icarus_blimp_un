@@ -59,12 +59,14 @@ So the only reads that block by design are the barometer's forced conversion and
 Header `magic 0xB1A7, version 1, type, seq, reserved` (8 B), payload, CRC-32 (zlib) over the
 packet with the CRC zeroed. Host to blimp: `HEARTBEAT 0x01`, `MOTOR_SET 0x02` (`f32 cmd[4]`
 FL RL FR RR), `MOTOR_STOP 0x03` (`u8 brake`). Blimp to host: `TELEMETRY 0x81` (52 B: motor
-readback, failsafe, link flags, counters, heap) and `SENSORS 0x82` (76 B, SI units, valid bits).
+readback, failsafe, link flags, counters, heap), `SENSORS 0x82` (76 B, SI units, valid bits) and,
+since 2026-11-01, `CAMERA 0x85` (152 B, the forward camera's row and the S3's UART counters; the
+`LOG_*` types sit beside them, D9).
 `net_link.c` applies `MOTOR_SET` straight to `motors_set_all()`, coasts the motors itself on
 link loss (500 ms without any packet; without a motor packet since 2026-10-29,
 `docs/link-robustness-review.md`) when they were last commanded over the air, and sends the
 stream's latest sample once per telemetry tick. The ground station (`software/ground_station/`)
-and `mock_blimp.py` speak exactly these five packets; the ground station has been the PyQt6
+and `mock_blimp.py` spoke exactly these five packets (plus the `LOG_*` and `CAMERA` ones since); the ground station has been the PyQt6
 window since 2026-10-27 (`blimp_bridge.py`, its side of the link, did not change).
 
 ### 1.4 Pins
@@ -220,15 +222,17 @@ RAM.
 their layouts so the ground station and `mock_blimp.py` keep working. The loop's state travels
 in a new `CONTROL` packet (mode, latches, bus owner, timing statistics, battery). Host to
 blimp: `MODE_SET`, `LOG_CMD`, `PARAM_GET`, `PARAM_SET`, `LOG_BLOCK_REQ`; blimp to host:
-`CONTROL`, `LOG_INFO`, `LOG_CHUNK`, `PARAM_VALUE`, `LOG_BLOCK_DATA` (the three `LOG_*` types were built with the capture on 2026-10-27).
+`CONTROL`, `LOG_INFO`, `LOG_CHUNK`, `PARAM_VALUE`, `LOG_BLOCK_DATA` (the three `LOG_*` types were built with the capture on 2026-10-27), and `CAMERA` (0x85, built 2026-11-01).
 `LINK_PROTO_VERSION` stays 1: an old receiver rejects an unknown type by type, and nothing it already knows moved.
 `CONTROL` arrives in increment 2, with its mode and latch fields at zero until increment 3,
 because the suspended-bus state of D3 has to be visible in telemetry from the moment the loop
 owns the bus. One more type is reserved and not built here: the ground station's plan
 (`docs/ground-station-plan.md`, row 4 of its status table, merged 2026-10-27) expects the S3
-to relay the forward camera's detections and the downward camera's flow in a link packet. Its
-source will be the `cam_result_t` mailbox; the packet belongs to the camera-to-S3 link work
-(`docs/inter-board-link-plan.md`), not to this task.
+to relay the forward camera's detections and the downward camera's flow in a link packet. The
+forward half was built on 2026-11-01 as `CAMERA` (0x85): it relays `cam_link.c`'s latest parsed
+row (`cam_link_latest_row()`, a superset of the `cam_result_t` mailbox the loop reads, which
+stays as it was), keeps nothing alive and is not read by the loop. The downward camera's flow
+has no packet. Not yet run against the blimp.
 
 **D10. Every tunable in one `params_t`, in one file, with its default.** Introduced in
 increment 2 with the first tunables (mounting rotations, DLPF setting, ToF timing, battery

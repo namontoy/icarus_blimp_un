@@ -133,8 +133,8 @@ the GUI thread onto it, so every slot runs on the GUI thread. Station to window:
 | `tel(dict)` | link state (`alive`, `age_s`, `rx`, `bad`, `streaming`) and the telemetry packet decoded (`motor`, `failsafe`, `link_alive`, counters) | 10 Hz |
 | `sen(dict)` | the sensors packet decoded (section 5), one signal per packet from the receive callback (until 2026-10-28 the newest at each tick, which dropped half of a 20 Hz stream) | up to 20 Hz |
 | `cam_frame(QImage, dict)` | one frame, decoded on the camera thread, with `{seq, t_ms, w, h, row}` (the CSV row of the same capture) | per frame |
-| `cam_row(dict)` | a CSV row without a frame (flight data) | per row |
-| `cam_status(dict)` | camera source: `source`, `connected`, `live`, frames ok/bad | on every change or command |
+| `cam_row(dict)` | a CSV row without a frame (flight data); from 2026-11-01 each new `LINK_PKT_CAMERA` row, in target_cam's column names | per row (12.5/s) |
+| `cam_status(dict)` | camera source: `source`, `connected` (a CAMERA packet within 3 s), `uart`, `rows_fresh`, `live`, frames ok/bad, and the S3's counters (`rows_s`, `rejected`, `overflows`, `bytes`, `csv_v`, `streaming_off`, `bearing_sign`, `row_age_ms`) plus the station's own (`packets`, `rows`, `skipped`) | on a change, at least 1 Hz |
 | `con_text(str)` / `con_end()` | console output chunks and the end of a reply | as it arrives |
 | `ev(dict)` | `{ts, level, text}` for the event log (named `ev` because `event` would shadow `QObject.event`) | as they happen |
 | `wifi(dict)` | this computer's Wi-Fi toward the blimp: `backend`, `joined`, `ip`, `ssid`, `busy`, `phase`, `error`, `candidates` | at start, on change (checked every 2 s), after a join or leave |
@@ -171,6 +171,23 @@ orange notice after 1.5 s without a packet. `mock_blimp.py` sends the same packe
 without hardware. The stream has not run on hardware yet; `sensors` on the console reports
 what it found.
 
+Since 2026-11-01 a second blimp-to-host packet carries the forward camera: `LINK_PKT_CAMERA`
+(0x85, 152 bytes, `link_camera_t` in `link_protocol.h`, mirrored by `decode_camera()` in
+`blimp_link.py`). `cam_link.c` keeps the latest row of target_cam's CSV (`cam_link_latest_row()`)
+and `net_link.c` sends each row once, after the SENSORS packet of the same tick, with the
+`LINK_CAM_ROW` flag. When no new row came for a second it sends a health-only packet instead
+(flag clear, row fields zero): the S3's byte, reject and overflow counters, whether the UART
+task runs and the latest row's age, so an unplugged camera, a wrong baud rate and a UART that
+never started look different on the panel. A row is never sent twice, so a gap on the ground
+is a gap and not a frozen number; `frame_seq` gaps count rows skipped between ticks. The packet
+is blimp-to-host only: it keeps nothing alive on the blimp, and the host does not count it as
+link liveness (`docs/link-robustness-review.md`). The 0x85 here is a UDP code; the UART codes
+of `docs/inter-board-link-plan.md` are another link. The azimuth is the camera's own, + to the
+right; `core/`'s bearing is + to the left, and the packet carries `bearing_sign` so the panel
+can show what the controller would steer on. The range is the camera's uncalibrated figure for
+the panel only; `core/` gets none. `mock_blimp.py --camera rows|silent|off` fakes it. Built
+2026-11-01; run against `mock_blimp.py` and in `--demo`; not yet run against the blimp.
+
 ## 6. Safety, end to end
 
 - A thrust command is a standing command only while it keeps arriving at the blimp, and since
@@ -190,17 +207,24 @@ what it found.
 
 ## 7. Camera
 
-**Rewritten 2026-10-27.** The cameras are wired to the S3 and never to this computer
+**Rewritten 2026-10-27, updated 2026-11-01.** The cameras are wired to the S3 and never to this computer
 (`docs/inter-board-link-plan.md`). Each ESP32-CAM extracts what it needs from its own pictures
 and sends the S3 only that: the forward camera its detections (target verdict, bearing,
 elevation, range, blobs, in target_cam's CSV columns), the downward camera its optical flow. The
-station talks only to the S3, over Wi-Fi, so camera data will reach it as a packet on the UDP
-link, which does not exist yet. Until then the camera panel runs on the demo source in `--demo`
-and is empty otherwise.
+station talks only to the S3, over Wi-Fi, so camera data reaches it as a packet on the UDP
+link. Since 2026-11-01 the forward camera's rows do (`LINK_PKT_CAMERA`, section 5): the station
+feeds them to `camera.py`'s `LinkCamera`, which emits `cam_row` per new row and `cam_status`
+with the S3's counters, and the panel draws the target from the row alone (box, centroid,
+range label) on an empty 160 x 120 area. The header's Cam pill reads NONE before any CAMERA
+packet, UP while rows are fresh, NO ROWS when the S3 reports the camera silent, DOWN when the
+packets stopped. Built 2026-11-01; run against `mock_blimp.py` and in `--demo`, where a
+painted frame stands in for the picture; not yet run against the blimp. The downward camera's
+flow has no packet.
 
 The inter-board plan also expects occasional single-frame grabs for calibration, relayed by the
-S3; not implemented on either chip. The panel keeps its picture view, Grab frame and Live for
-that, and the station's `cam_frame` signal carries a frame as a `QImage`, so a future source
+S3; not implemented on either chip. target_cam sends the S3 rows only, so Grab frame and Live
+work in `--demo` alone and answer "the link carries no frames" otherwise. The panel keeps its
+picture view for that, and the station's `cam_frame` signal carries a frame as a `QImage`, so a future source
 only has to deliver PNG bytes (or anything `QImage.fromData` reads).
 
 Earlier versions of this section, and of the code, read the ESP32-CAM directly over a USB
@@ -214,7 +238,7 @@ serial port with the target_cam viewer's parser (`--cam PORT`, pyserial). That w
 | 1 | Sensor packet in the protocol, mock sends it | done 2026-10-23 |
 | 2 | Back end: Tornado server, blimp bridge with the deadman, demo source, console relay | done 2026-10-23 |
 | 3 | Front end: layout, identity, motors, sensors, camera, console, events, keyboard | done 2026-10-23; first run against the blimp 2026-10-24 (link and motors live, sensors empty) |
-| 4 | Camera data through the S3: a link packet for the forward camera's detections (and the downward camera's flow), then a station source for it; calibration frame grabs after that | after the camera-to-S3 link (`docs/inter-board-link-plan.md`); the serial-port version was dropped 2026-10-27 |
+| 4 | Camera data through the S3: a link packet for the forward camera's detections (and the downward camera's flow), then a station source for it; calibration frame grabs after that | the forward camera's rows built 2026-11-01 (`LINK_PKT_CAMERA`, `LinkCamera`; run against `mock_blimp.py` and in `--demo`, not yet against the blimp: no row from the real camera has been relayed); the downward camera's flow and the calibration frame grabs still to come; the serial-port version was dropped 2026-10-27 |
 | 5 | Firmware: sensor task and `LINK_PKT_SENSORS` | done 2026-10-24 (`sensor_stream.c`), not yet run on hardware |
 | 6 | Bench: run against the real blimp with the stream, record what the page gets wrong | next |
 | 7 | Logging to CSV, parameter tuning from the window, Spanish labels if wanted | the capture and its traces on the Bench page done 2026-10-27 (`bench.py`; in demo and against `mock_blimp.py`, not yet against the blimp); parameters and labels later |

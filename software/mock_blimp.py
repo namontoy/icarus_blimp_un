@@ -9,6 +9,9 @@ built on it can be exercised on a laptop alone:
     python software/blimp_link.py --host 127.0.0.1 status
     python software/blimp_link.py --host 127.0.0.1 motor 0.2 0 0 0
     python software/blimp_link.py --host 127.0.0.1 console "motor --status"
+    python software/blimp_link.py --host 127.0.0.1 camera --seconds 5
+    python software/mock_blimp.py --camera silent   # camera unplugged: CAMERA health packets only
+    python software/mock_blimp.py --camera off      # firmware before the camera relay: no CAMERA packets
 
 It is a model of the link, not of the sensors: the console knows 'help',
 'motor --status', 'motor -s', 'wifi', 'link', 'param' (a subset of the
@@ -16,7 +19,12 @@ table, in the firmware's format) and 'ctl' (an ideal loop's figures), and
 answers anything else the way the firmware does ("Unrecognized command"). The capture (LOG_CMD,
 LOG_INFO, LOG_CHUNK) is modelled too: records at 50 Hz from the same toy
 airframe, so 'blimp_link.py capture' and the ground station's Bench page can
-be exercised without a blimp. Keep it in step with link_protocol.h;
+be exercised without a blimp. The forward camera is modelled as the S3 relays
+it (LINK_PKT_CAMERA, built 2026-11-01, not yet run against the blimp): a red
+balloon drifting, coming closer and leaving the frame now and then, as rows at
+the camera's 12.5 per second, sent under net_link.c's rules (a row once, a
+health-only packet at 1 Hz otherwise); --camera silent and off are the two
+failures a ground tool must tell apart. Keep it in step with link_protocol.h;
 blimp_link.py's structs are the shared definition.
 """
 import argparse
@@ -25,6 +33,7 @@ import os
 import socket
 import sys
 import threading
+from collections import deque
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -41,6 +50,11 @@ CAP_MAX_S = 400             # CONFIG_CAPTURE_MAX_SECONDS
 # attach settings: +/-2 g (16384 LSB/g), +/-250 deg/s (131 LSB/(deg/s)), a
 # QMC5883L at 12000 LSB/gauss, a BME280.
 ACC_LSB, GYRO_LSB, MAG_LSB = 16384.0, 131.0, 12000.0
+# The forward camera as target_cam prints it: 160 x 120 pixels, 54 degrees
+# across (target_cam's default), 80 ms per frame at XCLK 20 MHz.
+CAM_W, CAM_H, CAM_FOV_DEG = 160, 120, 54.0
+CAM_PERIOD_S = 0.08
+CAM_IDLE_S = 1.0            # LINK_CAM_IDLE_MS: a health-only packet when no new row went out for this long
 # A subset of the 'param' table (firmware main/param_table.c) with params.c's
 # values of 2026-10-30: the PID gains and the hover feed-forward, enough for
 # the ground station's capture record and its tests. The mock keeps them and
@@ -62,8 +76,12 @@ PARAMS = (      # name, default, accepted min, max, unit
 
 
 class MockBlimp:
-    def __init__(self, host, port, console_port, verbose):
+    def __init__(self, host, port, console_port, verbose, camera='rows'):
+        if camera not in ('rows', 'silent', 'off'):
+            raise ValueError("camera must be 'rows', 'silent' or 'off'")
         self.verbose = verbose
+        self.camera = camera
+        self.cam_reset(time.monotonic())
         self.t0 = time.monotonic()
         self.motor = [0.0] * 4
         self.failsafe_on = True
@@ -134,6 +152,18 @@ class MockBlimp:
         self.last_motor_rx = 0.0
         self.params = {name: default for name, default, *_ in PARAMS}     # RAM only, as on the blimp
         self.param_changes = 0
+        self.cam_reset(self.t0)
+
+    def cam_reset(self, now):
+        # cam_link.c's state: the row counter and the byte count run from boot.
+        self.cam_seq = 0                # rows parsed since boot
+        self.cam_sent_seq = 0           # the last frame_seq sent with a row
+        self.cam_row = None             # the latest row (a dict of link_camera_t's row fields)
+        self.cam_row_at = 0.0
+        self.cam_next = now + CAM_PERIOD_S
+        self.cam_tx_at = -1e9           # the last CAMERA packet of any kind
+        self.cam_times = deque()        # arrival times in the last second, for rows_last_s
+        self.cam_bytes = 0
 
     def failsafe_state(self):
         if not self.failsafe_on:
@@ -257,6 +287,89 @@ class MockBlimp:
         self.tx_seq += 1
         self.link.sendto(bl.pack(bl.PKT_SENSORS, self.tx_seq, body), self.peer)
 
+    # ---- forward camera ---------------------------------------------------
+    @staticmethod
+    def cam_scene(t):
+        """Disc centre and radius at time t: a slow loop that comes closer and
+        goes away, leaving the frame now and then so NO TARGET also shows."""
+        cx = 80 + 62 * math.sin(t * 0.21)
+        cy = 60 + 30 * math.sin(t * 0.33 + 1.0)
+        r = 9 + 11 * (0.5 + 0.5 * math.sin(t * 0.17))
+        return cx, cy, r
+
+    @staticmethod
+    def cam_make_row(cx, cy, r):
+        """The row target_cam would print for that disc, in link_camera_t's
+        terms. An ok=0 row is all zeros with range -1, as the CSV prints it."""
+        W, H = CAM_W, CAM_H
+        visible = -r + 4 < cx < W + r - 4 and -r + 4 < cy < H + r - 4
+        row = {'ok': visible, 'clipped': False, 'cx': 0.0, 'cy': 0.0, 'az': 0.0, 'el': 0.0, 'area': 0.0,
+               'w': 0, 'h': 0, 'fill': 0.0, 'range_mm': -1.0, 'blobs': 0, 'matched': 0}
+        if visible:
+            x0, x1 = max(0.0, cx - r), min(W - 1.0, cx + r)
+            y0, y1 = max(0.0, cy - r), min(H - 1.0, cy + r)
+            area = math.pi * r * r
+            row.update(clipped=x0 == 0 or y0 == 0 or x1 == W - 1 or y1 == H - 1,
+                       cx=cx, cy=cy, az=(cx - W / 2) / W * CAM_FOV_DEG,
+                       el=-(cy - H / 2) / H * CAM_FOV_DEG * 0.75, area=float(int(area)),
+                       w=int(x1 - x0), h=int(y1 - y0), fill=0.78, blobs=1, matched=int(area * 0.9))
+            # 550 mm balloon through a pinhole: range = f * D / w with f such
+            # that 40 px across reads 1.1 m; unknown (-1) when clipped, as
+            # target_cam prints it.
+            if not row['clipped']:
+                row['range_mm'] = float(int(44000 / max(2 * r, 1)))
+        return row
+
+    def cam_tick(self, now):
+        """The camera's own 80 ms timer, independent of any peer: a row per
+        frame, counted by cam_link.c from boot. 'silent' never produces one."""
+        if self.camera != 'rows':
+            return
+        while now >= self.cam_next:
+            self.cam_next += CAM_PERIOD_S
+            if self.cam_next < now:
+                self.cam_next = now + CAM_PERIOD_S
+            self.cam_seq += 1
+            self.cam_row = self.cam_make_row(*self.cam_scene(now - self.t0))
+            self.cam_row_at = now
+            self.cam_bytes += 118       # about a v2 row's length
+            self.cam_times.append(now)
+        while self.cam_times and now - self.cam_times[0] > 1.0:
+            self.cam_times.popleft()
+
+    def camera_packet(self, now):
+        """net_link.c's send_camera(): the latest row once, else a health-only
+        packet when none went out for CAM_IDLE_S; None when nothing is due."""
+        if self.camera == 'off' or self.peer is None or now - self.last_rx > LINK_TIMEOUT_S * PEER_HOLD_MULT:
+            return None
+        new_row = self.cam_row is not None and self.cam_seq != self.cam_sent_seq
+        if not new_row and now - self.cam_tx_at < CAM_IDLE_S:
+            return None
+        self.cam_tx_at = now
+        flags = bl.CAM_UART
+        v = dict(row_t=0, cam_t=0, blobs=0, stage=0, cx=0.0, cy=0.0, az=0.0, el=0.0, area=0.0, w=0, h=0,
+                 fill=0.0, rng=0.0, conf=0.0, matched=0, dt=0.0, proc=0, loop=0)
+        unused = [0.0] * 3              # a health-only packet zeroes the row's fields
+        if new_row:
+            row = self.cam_row
+            flags |= bl.CAM_ROW | (bl.CAM_DETECTED if row['ok'] else 0) | (bl.CAM_CLIPPED if row['clipped'] else 0)
+            self.cam_sent_seq = self.cam_seq
+            unused = [-1.0] * 3         # blobs 2..4 are never there; the CSV prints -1
+            v.update(row_t=int((self.cam_row_at - self.t0) * 1e6) & 0xFFFFFFFF,
+                     cam_t=int((self.cam_row_at - self.t0) * 1000), blobs=row['blobs'], stage=1,
+                     cx=row['cx'], cy=row['cy'], az=row['az'], el=row['el'], area=row['area'], w=row['w'],
+                     h=row['h'], fill=row['fill'], rng=row['range_mm'], conf=-1.0, matched=row['matched'],
+                     dt=CAM_PERIOD_S * 1000.0, proc=21500, loop=61000)
+        age = 65535 if self.cam_row is None else min(65534, int((now - self.cam_row_at) * 1000))
+        body = bl._CAMERA.pack(
+            int((now - self.t0) * 1e6) & 0xFFFFFFFF, v['row_t'], self.cam_seq, v['cam_t'],
+            flags, 2 if self.cam_seq else 0, v['blobs'], v['stage'],
+            v['cx'], v['cy'], v['az'], v['el'], v['area'], v['w'], v['h'], v['fill'], v['rng'], v['conf'],
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, *unused, *unused, v['matched'], v['dt'], v['proc'], v['loop'],
+            self.cam_bytes, 0, 0, 0, age, min(255, len(self.cam_times)), -1)
+        self.tx_seq += 1
+        return bl.pack(bl.PKT_CAMERA, self.tx_seq, body)
+
     # ---- capture ----------------------------------------------------------
     def send_log_info(self, addr, result):
         c = self.cap
@@ -366,10 +479,14 @@ class MockBlimp:
             self.failsafe_tick(now)
             self.step(now)
             self.capture_tick(now)
+            self.cam_tick(now)
             if now >= next_tx:
                 if self.radio_on:
                     self.telemetry(now)
                     self.sensors(now)
+                    pkt = self.camera_packet(now)
+                    if pkt:
+                        self.link.sendto(pkt, self.peer)
                 next_tx += period
                 if next_tx < now:
                     next_tx = now + period
@@ -505,10 +622,15 @@ def main():
     p.add_argument('--port', type=int, default=bl.LINK_PORT)
     p.add_argument('--console-port', type=int, default=bl.CONSOLE_PORT)
     p.add_argument('-q', '--quiet', action='store_true')
+    p.add_argument('--camera', choices=('rows', 'silent', 'off'), default='rows',
+                   help="forward camera: 'rows' sends 12.5 rows/s from a scene (default); 'silent' is a camera "
+                        "that sends nothing (health packets only, bytes 0); 'off' is a firmware without the "
+                        "camera relay (no CAMERA packets)")
     a = p.parse_args()
-    print('mock blimp on %s: link %d, console %d (Ctrl+C stops)' % (a.host, a.port, a.console_port))
+    print('mock blimp on %s: link %d, console %d, camera %s (Ctrl+C stops)'
+          % (a.host, a.port, a.console_port, a.camera))
     try:
-        MockBlimp(a.host, a.port, a.console_port, not a.quiet).serve()
+        MockBlimp(a.host, a.port, a.console_port, not a.quiet, camera=a.camera).serve()
     except KeyboardInterrupt:
         pass
 

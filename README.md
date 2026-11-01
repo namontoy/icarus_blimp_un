@@ -24,7 +24,7 @@ race courses, and the analysis behind the design.
 | **Simulation** · `sim/` | ✅ Completes both courses: every loop with a downward range sensor, about two in three without one |
 | **Bench firmware** · `firmware/projects/i2c_tools/` | 🟡 Runs on the ESP32-S3-Zero: every sensor and the four reversible motors, its own Wi-Fi access point with a UDP link and console, a 50 Hz control task that logs a 400 s capture (its estimate, control and mixer stages still empty), and the controller's gains changed live over the air (`param`). The link's hardening, the motor remap of 2026-10-29 and `param` were checked on the board on 2026-10-30 |
 | **Flight shell, previous board** · `firmware/projects/espfly/` | 🟡 Builds and links for the ESP-FLY board; never flashed; kept as the reference for the S3-Zero control task |
-| **Ground station** · `software/ground_station/` | 🟡 One PyQt6 window on Windows, Linux and the Steam Deck (Gaming mode, checked 2026-10-29): telemetry and sensors, the capture with a trace viewer, flying by hand from the keyboard or a gamepad, a race mode that only watches; using the window cannot change the motors (offscreen tests in `tools/verify.py --gui`). Not yet: the cameras' data, which has no link packet |
+| **Ground station** · `software/ground_station/` | 🟡 One PyQt6 window on Windows, Linux and the Steam Deck (Gaming mode, checked 2026-10-29): telemetry and sensors, the capture with a trace viewer, flying by hand from the keyboard or a gamepad, a race mode that only watches; using the window cannot change the motors (offscreen tests in `tools/verify.py --gui`). The forward camera's detection rows show in its camera panel through `LINK_PKT_CAMERA` (built 2026-11-01; run against `mock_blimp.py` and in `--demo`, not against the blimp); no frames, and nothing from the downward camera yet |
 | **Hardware** | 🟡 ESP32-S3-Zero, two DRV8833, MPU-6050, QMC5883L, BME280, VL53L1X, a battery divider, ESP32-CAMs; the rear pair's thrust swept on a scale through the DRV8833 (2026-10-28), the front pair not yet; the controller still assumes 35 gf per motor |
 
 ### Simulated lap times
@@ -206,7 +206,8 @@ flowchart LR
   (ESP-NOW link, three FreeRTOS tasks calling `blimp_step()` at 200 Hz), kept as the reference. No
   control logic lives in either.
 - **Ground station** (`software/ground_station/`, PyQt6): one window on a laptop or a Steam Deck
-  with three pages. Flight shows the motors, the sensors and the camera panel; Control flies the
+  with three pages. Flight shows the motors, the sensors and the camera panel (the forward
+  camera's rows, relayed by the S3; not yet run against the blimp); Control flies the
   blimp by hand from the keyboard or a gamepad; Bench records and downloads the capture and plots
   it. It talks only to the S3, and the bridge thread that holds the motor command keeps anything
   the window does from reaching the motors
@@ -401,8 +402,10 @@ first built, and keep that history. For the current design, docs/07 and docs/10 
   run. The simulation does not check this yet.
 - **Air currents.** Drafts from ventilation can exceed what 100 gf can fight; test in a large hall
   early.
-- **Perception.** The camera's balloon detector is in development; nothing carries its output to
-  the controller yet.
+- **Perception.** The camera's balloon detector is in development. Its rows reach the controller's
+  balloon follow (`hold follow`) and the ground station's camera panel over UART1 and the link.
+  The UART link was measured on the bench on 2026-10-31; the follow and the relay to the ground
+  station have not run on it yet, and the detector did not yet find the team's balloon there.
 
 The full register is in [docs/04](docs/04-risk-and-troubleshooting.md).
 

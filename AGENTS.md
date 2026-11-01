@@ -49,7 +49,8 @@ CLAUDE.md, and others). Keep it tool-neutral; tool-specific notes belong in that
   `pid-tuning`, first run on the rope rig 2026-10-30) the task calls `blimp_step()` every tick
   and drives the motors in the bench hold (`hold`, `software/hold_test.py`), through the motor
   map (`motormap`); it also reads the forward camera's rows on UART1 (`cam`, namontoy's
-  `target_cam` on the CAM) for `hold follow` (built 2026-10-30, not yet run).
+  `target_cam` on the CAM) for `hold follow` (built 2026-10-30, not yet run) and relays them to the ground station as
+  `LINK_PKT_CAMERA` (built 2026-11-01, run against `mock_blimp.py` only).
 - `firmware/projects/espfly/`: the previous board's shell. `main/main.c` is only an RTOS shell
   around `blimp_step()` (the esp_timer loop pattern); not part of day-to-day builds.
 - `firmware/projects/optflow_cam/`: ESP32-CAM optical-flow experiment. `blink/`: toolchain test.

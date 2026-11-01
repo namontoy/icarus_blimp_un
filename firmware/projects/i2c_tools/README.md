@@ -59,7 +59,7 @@ written down, but it has not run on hardware.
 | PING))) ultrasonic | **Parked, not tested** | Not in the build (§8) |
 | Controller parameters (`param`) | **Measured** 2026-10-30 | `software/param_check.py --reboot`, 13 of 13: the 45-row listing (2959 bytes) arrives whole over the air, a set reaches the loop at its next tick, the refusals hold, core/'s validator clamps on the S3, no overrun or skipped tick during 20 sets, a power cycle returns to params.c (`docs/history/bench-2026-10-30.md`). `blimp_step()` reads them since the bench hold |
 | Bench hold (`hold`), motor map (`motormap`) | **Measured** 2026-10-30, on the rope rig | Branch `pid-tuning`: heading steps of 30° in the hold, the right motor pushing the right way, within about 1° with a 0.5 gf surge (B1–B3, `docs/history/rig-2026-10-30.md`); the mounting maps and the map's positions measured there too. `core/` 0.2.1 fixed two bugs those runs exposed |
-| Forward camera (`cam`), `hold follow` | **Link measured** 2026-10-31; follow not run | target_cam's rows arrive on GPIO6 at 12–13 a second with the camera's IO14 wired to it; its stage 1 did not yet detect the team's balloon in that room, so the follow waits on the detector |
+| Forward camera (`cam`), `hold follow`, `CAMERA` relay | **Link measured** 2026-10-31; follow and relay not run | target_cam's rows arrive on GPIO6 at 12–13 a second with the camera's IO14 wired to it; its stage 1 did not yet detect the team's balloon in that room, so the follow waits on the detector. The relay to the ground station (`LINK_PKT_CAMERA`, §7) was built 2026-11-01 and has run against `mock_blimp.py` only |
 
 ## 2. Hardware and wiring
 
@@ -378,7 +378,8 @@ wifi --stop       radio off (and the UDP console goes with it)
 `link` prints the UDP port, telemetry rate and timeout, the last host that sent
 a valid packet and whether it is alive or STALE, how many packets were received,
 rejected and sent, and whether the motors are currently being driven over the
-link.
+link. It also counts the packets it sent, of which `SENSORS` and (since 2026-11-01)
+`CAMERA` (`tx_camera`) separately.
 
 ### `sensors`: the sensor stream
 
@@ -577,7 +578,9 @@ yaw error while it was; check the bearing's sign first with
 The forward ESP32-CAM runs namontoy's `target_cam` (branches `target-cam-*`)
 and prints one CSV row per frame, 12.5 a second, on its UART0 at 115200
 (`main/cam_row.h` has the columns). The S3 reads them on UART1
-(`cam_link.c`), keeps the latest for the control task's read stage, and
+(`cam_link.c`), keeps the latest for the control task's read stage, relays
+each row to the ground station as a `CAMERA` packet (§7; built 2026-11-01, not
+yet run against the real camera), and
 writes to the camera only when someone types `cam --tx`: target_cam takes
 single-letter commands, and a stray `s` turns its rows off.
 
@@ -607,7 +610,8 @@ an upright, unmirrored camera. A row counts only if it is all numbers, 25
 of them (CSV v1) or 35 ending in 2 (v2), each inside a plausible range
 (`main/cam_row.c`, checked on the host by `host/test_cam_row.c`); a target
 older than 300 ms is not visible to `core/`. The range from the balloon's
-apparent size is not passed on: `core/` would turn a visible target with a
+apparent size is not passed on to `core/` (the `CAMERA` packet does carry it, for
+the ground station's panel): `core/` would turn a visible target with a
 range into an altitude fix (every balloon at 2.0 m, Rule 22) whenever the
 ToF has no reading.
 
@@ -718,6 +722,7 @@ A packet with the wrong size, magic, version or CRC is counted and dropped.
 | LOG_CMD | `0x04` | 20 B | host → blimp | The capture: info, start (with a length in seconds), stop, clear, or get (a first record index and up to 8 chunks) |
 | LOG_INFO | `0x83` | 64 B | blimp → host | The capture's state, result of the command (0 ok, 1 no buffer, 2 busy, 3 range, 4 bad command, 5 longer than the buffer), record count and capacity, `max_seconds`, period, the IMU ranges, the magnetometer's LSB/gauss, the chip ids, the firmware version |
 | LOG_CHUNK | `0x84` | 1172 B | blimp → host | 16 records of 72 bytes with their first index and the capture id; the reply to get, sent back to back |
+| CAMERA | `0x85` | 152 B | blimp → host | The forward camera's latest row (centroid, azimuth + to the right, elevation, area, box, range, three more blobs, the camera's timings), flags (row present, detected, clipped, UART running, streaming off), the S3's UART counters, the row's age and the bearing sign; or the counters alone once a second when no new row came |
 
 - **`MOTOR_SET` is a standing command only while the host keeps repeating it.**
   `net_link.c` has its own timeout (500 ms, reset by any valid packet). When it
@@ -730,6 +735,12 @@ A packet with the wrong size, magic, version or CRC is counted and dropped.
 - One `SENSORS` packet follows each telemetry packet while the sensor stream
   has a new sample (`sensors`, §5); none while the stream is paused or off,
   so the ground station sees a gap rather than a frozen number.
+- One `CAMERA` packet follows when `cam_link.c` has a row not sent before; with none
+  for a second, a health-only one (flag clear, row fields zero), so an unplugged
+  camera and a UART that did not start show on the ground. It keeps nothing alive
+  and the host does not count it as liveness. `link` shows `tx_camera`; the
+  host tool is `blimp_link.py camera`. Built 2026-11-01; run against
+  `mock_blimp.py --camera` only.
 
 ### UDP 7201: console over the air
 
@@ -754,6 +765,7 @@ python software/blimp_link.py console "tof -n 5"    # one command
 python software/blimp_link.py motor 0.2 0 0 0 --seconds 2   # FL RL FR RR
 python software/blimp_link.py stop [--brake]
 python software/blimp_link.py capture start -t 60    # then: capture download [--csv out.csv]
+python software/blimp_link.py camera --seconds 10   # the relayed camera rows, a few lines a second
 ```
 
 `motor` limits commands to ±0.3 unless you pass `--limit`. To try all of this
@@ -902,7 +914,8 @@ i2c_tools/
 │   └── vl53l1x_uld/          ST VL53L1X ULD 3.5.5 + port onto the shared bus
 ├── host/
 │   ├── test_param_table.c    the `param` table on the computer (tools/fw_host_test.py)
-│   └── test_cam_row.c        target_cam's rows, and what must never read as one
+│   ├── test_cam_row.c        target_cam's rows, and what must never read as one
+│   └── test_link_protocol.c  packet sizes and the camera packet's offsets
 └── main/
     ├── i2ctools_example_main.c   app_main: boot order, registration, banner
     ├── Kconfig.projbuild         menuconfig settings (§9)
@@ -920,7 +933,7 @@ i2c_tools/
     ├── cmd_battery.c/.h          battery divider on ADC1, sampled by the control task, + `battery`
     ├── param_table.c/.h          every field of core/'s blimp_params_t by name, with its range
     ├── cmd_param.c/.h            the live parameters, their hand-over to the control task, + `param`
-    ├── cam_link.c/.h             the forward camera's rows on UART1 (RX 6, TX 2) + `cam`
+    ├── cam_link.c/.h             the forward camera's rows on UART1 (RX 6, TX 2) + `cam`; `cam_link_latest_row()` feeds the relay
     ├── cam_row.c/.h              target_cam's CSV row, parsed (portable, host-tested)
     ├── cmd_motor.c/.h            DRV8833 ×2, failsafe
     ├── cmd_ping.c/.h             PING))) ultrasonic, PARKED (not in SRCS)

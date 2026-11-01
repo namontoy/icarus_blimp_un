@@ -55,9 +55,9 @@ def save_capture(info, data, notes, source, folder=None, params=None):
 class Station(QObject):
     tel = pyqtSignal(dict)                  # link state plus the latest telemetry, every tick
     sen = pyqtSignal(dict)                  # a new sensor packet
-    cam_frame = pyqtSignal(QImage, dict)    # frame, {seq, t_ms, w, h, row}
-    cam_row = pyqtSignal(dict)              # a camera CSV row without a frame
-    cam_status = pyqtSignal(dict)
+    cam_frame = pyqtSignal(QImage, dict)    # frame, {seq, t_ms, w, h, row}; demo Grab/Live only
+    cam_row = pyqtSignal(dict)              # a camera row the S3 relayed (blimp_link.decode_camera's dict)
+    cam_status = pyqtSignal(dict)           # LinkCamera.status(): link, UART, row freshness, counters
     con_text = pyqtSignal(str)              # console output, chunk by chunk
     con_end = pyqtSignal()                  # the command finished
     # The plan named this one event(dict); QObject.event() is Qt's event
@@ -139,6 +139,7 @@ class Station(QObject):
                        'link_lost': snap['link_lost'], 'ramp': snap['ramp'], 'race': snap['race'],
                        'gap_max_s': snap['gap_max_s'], 'tel': snap['tel']})
         self._ticks += 1
+        self.camera.poll()                  # status when the camera link changed, and once a second
         if self.radio is not None and self._ticks % WIFI_TICKS == 0:
             st = self.wifi_status()
             if st != self._wifi_last:           # a manual join or drop shows up here too
@@ -153,6 +154,9 @@ class Station(QObject):
         GUI thread by Qt, one per packet."""
         if kind == 'sensors' and not self._closed:
             self.sen.emit(dict(d))
+        elif kind == 'camera' and not self._closed and self.camera is not None:
+            # The camera is made after the bridge starts, so a packet can beat it.
+            self.camera.feed(d)
 
     # --------------------------------------------------------------- motors
 

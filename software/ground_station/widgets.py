@@ -1138,7 +1138,9 @@ class FovPlot(QWidget):
         p.drawText(QPointF(6, H - 6), 'field of view ±%g° × ±%g°' % (hx, hy))
         for b in self.blobs:
             x, y = W / 2 + b['az'] / hx * W / 2, H / 2 - b['el'] / hy * H / 2
-            r = clamp(12000 / max(b['r'], 300), 3, 22)
+            # Nearer is bigger; a range the camera could not measure (-1: clipped, or no size for
+            # that blob) gets a neutral dot, never the biggest one
+            r = clamp(12000 / max(b['r'], 300), 3, 22) if isnum(b['r']) and b['r'] > 0 else 6
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(C(T.UN_GREEN if b.get('main') else T.MUTED, 0.85))
             p.drawEllipse(QPointF(x, y), r, r)
@@ -1150,22 +1152,44 @@ class FovPlot(QWidget):
 
 
 class CameraView(QWidget):
-    """The 160×120 frame scaled without smoothing and letterboxed 4:3, with the
-    detection overlay from the frame's own row: green box, papaya crosshair and
-    range label. Rotate 180° turns frame and overlay together; the faint centre
-    cross stays put. The overlay's line widths follow the page's 640×480
-    canvas, scaled to the drawn size."""
+    """The 160x120 picture area, scaled without smoothing and letterboxed 4:3,
+    with the detection overlay: green box, papaya crosshair and range label.
+
+    The link carries rows, not frames (target_cam sends the S3 rows only), so
+    normally there is no picture: the area is drawn empty from the latest row
+    (set_row) and the overlay shows where the camera says the balloon is. A
+    frame (a demo Grab or Live) is shown with its own row while frames keep
+    coming; a grabbed still holds for STILL_HOLD_S and the view then goes back
+    to the rows, and it goes at once when the rows stop, so the picture never
+    shows a TARGET box the readouts beside it no longer agree with for long.
+    Rotate 180 turns picture and overlay
+    together; the faint centre cross stays put. The overlay's line widths
+    follow the page's 640x480 canvas, scaled to the drawn size."""
+
+    STILL_HOLD_S = 3.0
 
     def __init__(self):
         super().__init__()
         self.img = None
         self.meta = None
+        self.img_at = 0.0
+        self.row = None
+        self.note = ''
         self.rotate = False
         self.setMinimumHeight(120)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
     def set_frame(self, img, meta):
-        self.img, self.meta = img, meta
+        self.img, self.meta, self.img_at = img, meta, time.monotonic()
+        self.update()
+
+    def set_row(self, row, note=''):
+        """The latest row, or None with the reason there is none (shown in the
+        empty area). Drops a frame once it is older than STILL_HOLD_S, or at
+        once when the rows stop."""
+        self.row, self.note = row, note
+        if self.img is not None and (row is None or time.monotonic() - self.img_at > self.STILL_HOLD_S):
+            self.img = self.meta = None
         self.update()
 
     def set_rotate(self, on):
@@ -1177,39 +1201,52 @@ class CameraView(QWidget):
         W, H = self.width(), self.height()
         p.fillRect(QRect(0, 0, W, H), C(T.CAM_BG))
         inner = QRectF(1, 1, W - 2, H - 2)
-        if self.meta is None:
+        if self.img is not None and self.meta is not None:
+            m = self.meta
+            fw, fh, row = m['w'], m['h'], m.get('row')
+            stamp = 'frame %s · t %.1f s · %d×%d' % (m['seq'], m['t_ms'] / 1000, fw, fh)
+        elif self.row is not None:
+            fw, fh, row = 160, 120, self.row
+            stamp = 'row %s · t %.1f s · %d×%d · rows only' % (
+                row.get('frame_seq', '—'), (row.get('t_ms') or 0) / 1000, fw, fh)
+        else:
             f = T.font(13, spacing=0.1, caps=True)
             p.setFont(f)
             p.setPen(C(T.FAINT))
-            p.drawText(inner, Qt.AlignmentFlag.AlignCenter, 'no frame yet · Grab or Live')
+            p.drawText(inner, Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap,
+                       self.note or 'no camera rows yet')
+            self._frame_border(p, W, H)
+            return
+        s = min(inner.width() / fw, inner.height() / fh)
+        r = QRectF(inner.x() + (inner.width() - fw * s) / 2, inner.y() + (inner.height() - fh * s) / 2,
+                   fw * s, fh * s)
+        k = r.width() / 640.0
+        p.save()
+        if self.rotate:
+            p.translate(r.center())
+            p.rotate(180)
+            p.translate(-r.center())
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
+        if self.img is not None and not self.img.isNull():
+            p.drawImage(r, self.img)
         else:
-            m = self.meta
-            fw, fh = m['w'], m['h']
-            s = min(inner.width() / fw, inner.height() / fh)
-            r = QRectF(inner.x() + (inner.width() - fw * s) / 2, inner.y() + (inner.height() - fh * s) / 2,
-                       fw * s, fh * s)
-            k = r.width() / 640.0
-            p.save()
-            if self.rotate:
-                p.translate(r.center())
-                p.rotate(180)
-                p.translate(-r.center())
-            p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
-            if self.img is not None and not self.img.isNull():
-                p.drawImage(r, self.img)
-            row = m.get('row')
-            if row and row.get('ok'):
-                p.setRenderHint(QPainter.RenderHint.Antialiasing)
-                sx = r.width() / fw
-                bx, by = r.x() + (row['cx_px'] - row['w_px'] / 2) * sx, r.y() + (row['cy_px'] - row['h_px'] / 2) * sx
-                bw, bh = row['w_px'] * sx, row['h_px'] * sx
-                p.setPen(QPen(C(T.UN_GREEN), max(1.0, 3 * k)))
-                p.setBrush(Qt.BrushStyle.NoBrush)
-                p.drawRect(QRectF(bx, by, bw, bh))
-                cx, cy = r.x() + row['cx_px'] * sx, r.y() + row['cy_px'] * sx
-                p.setPen(QPen(C(T.PAPAYA), max(1.0, 2 * k)))
-                p.drawLine(QPointF(cx - 10 * k, cy), QPointF(cx + 10 * k, cy))
-                p.drawLine(QPointF(cx, cy - 10 * k), QPointF(cx, cy + 10 * k))
+            p.fillRect(r, C(T.PANEL))
+            p.setPen(QPen(C(T.BORDER), 1))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRect(r)
+        if row and row.get('ok'):
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            sx = r.width() / fw
+            bx, by = r.x() + (row['cx_px'] - row['w_px'] / 2) * sx, r.y() + (row['cy_px'] - row['h_px'] / 2) * sx
+            bw, bh = row['w_px'] * sx, row['h_px'] * sx
+            p.setPen(QPen(C(T.UN_GREEN), max(1.0, 3 * k)))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRect(QRectF(bx, by, bw, bh))
+            cx, cy = r.x() + row['cx_px'] * sx, r.y() + row['cy_px'] * sx
+            p.setPen(QPen(C(T.PAPAYA), max(1.0, 2 * k)))
+            p.drawLine(QPointF(cx - 10 * k, cy), QPointF(cx + 10 * k, cy))
+            p.drawLine(QPointF(cx, cy - 10 * k), QPointF(cx, cy + 10 * k))
+            if row.get('range_mm', -1) >= 0:        # -1: clipped at the edge, or no size to measure by
                 f = T.font(max(8, round(18 * k)), 700)
                 p.setFont(f)
                 p.setPen(C(T.UN_GREEN))
@@ -1217,21 +1254,25 @@ class CameraView(QWidget):
                 if ty - r.y() < 16 * k:
                     ty = by + bh + 20 * k
                 p.drawText(QPointF(bx + 4 * k, ty), '%.2f m' % (row['range_mm'] / 1000))
-            p.restore()
-            p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-            p.setPen(QPen(C(T.FG, 0.25), 1))
-            c = r.center()
-            p.drawLine(QPointF(c.x(), c.y() - 14 * k), QPointF(c.x(), c.y() + 14 * k))
-            p.drawLine(QPointF(c.x() - 14 * k, c.y()), QPointF(c.x() + 14 * k, c.y()))
-            stamp = 'frame %s · t %.1f s · %d×%d%s' % (m['seq'], m['t_ms'] / 1000, fw, fh,
-                                                     ' · rotated' if self.rotate else '')
-            f = T.font(11, mono=True)
-            p.setFont(f)
-            fm = QFontMetrics(f)
-            box = QRectF(8, H - 6 - fm.height() - 2, fm.horizontalAdvance(stamp) + 12, fm.height() + 2)
-            p.fillRect(box, C(T.CAM_BG, 0.7))
-            p.setPen(C(T.MUTED))
-            p.drawText(box, Qt.AlignmentFlag.AlignCenter, stamp)
+        p.restore()
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        p.setPen(QPen(C(T.FG, 0.25), 1))
+        c = r.center()
+        p.drawLine(QPointF(c.x(), c.y() - 14 * k), QPointF(c.x(), c.y() + 14 * k))
+        p.drawLine(QPointF(c.x() - 14 * k, c.y()), QPointF(c.x() + 14 * k, c.y()))
+        if self.rotate:
+            stamp += ' · rotated'
+        f = T.font(11, mono=True)
+        p.setFont(f)
+        fm = QFontMetrics(f)
+        box = QRectF(8, H - 6 - fm.height() - 2, fm.horizontalAdvance(stamp) + 12, fm.height() + 2)
+        p.fillRect(box, C(T.CAM_BG, 0.7))
+        p.setPen(C(T.MUTED))
+        p.drawText(box, Qt.AlignmentFlag.AlignCenter, stamp)
+        self._frame_border(p, W, H)
+
+    @staticmethod
+    def _frame_border(p, W, H):
         p.setPen(QPen(C(T.BORDER), 1))
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawRect(QRectF(0.5, 0.5, W - 1, H - 1))
