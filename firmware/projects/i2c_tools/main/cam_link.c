@@ -266,7 +266,7 @@ static void print_status(void)
            st.rows, st.rows_detected, st.info_lines, st.rejected, st.overflows, st.bytes);
     if (!have) {
         if (st.bytes == 0) {
-            printf("nothing has arrived: check the camera is powered, CAM U0T (GPIO1) -> 470 ohm -> "
+            printf("nothing has arrived: check the camera is powered, CAM IO14 -> 470 ohm -> "
                    "S3 GPIO%d, and the grounds joined\n", st.rx_gpio);
         } else {
             printf("bytes arrive but no row parses: a wrong baud, or not target_cam's rows; "

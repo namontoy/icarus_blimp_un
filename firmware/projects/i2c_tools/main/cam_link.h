@@ -2,8 +2,10 @@
  * cam_link.h - the forward ESP32-CAM's detections over UART1, and the 'cam'
  * console command.
  *
- * The camera runs namontoy's target_cam (branches target-cam-*), which prints
- * one CSV row per processed frame, 12.5 a second, on its UART0 at 115200:
+ * The camera runs namontoy's target_cam (firmware/projects/target_cam/), which
+ * prints one CSV row per processed frame, 12.5 a second, on its UART0 at
+ * 115200 for the PC and copies every data row to its UART1 (TX IO14, same
+ * baud) for this board:
  *
  *   t_ms,ok,cx_px,cy_px,az_deg,el_deg,area_px,w_px,h_px,fill,range_mm,...
  *
@@ -11,9 +13,12 @@
  * the version number). Only the first eleven are read here, and they are
  * the same in both. Lines starting with '#' are its banner and replies; the
  * boot ROM's log and anything else that is not a row are counted and
- * dropped. The wiring (the Cableado, docs/inter-board-link-plan.md): CAM U0T
- * (GPIO1) -> 470 ohm -> S3 GPIO6, S3 GPIO2 -> 470 ohm -> CAM U0R (GPIO3), and
- * the grounds joined.
+ * dropped. The wiring (the Cableado, docs/inter-board-link-plan.md): CAM IO14
+ * -> 470 ohm -> S3 GPIO6, S3 GPIO2 -> 470 ohm -> CAM IO13, and the grounds
+ * joined. target_cam does not read its IO13 yet and sends no '#' lines on
+ * UART1, so on that wiring 'cam --tx' reaches nothing; it is kept for the
+ * camera's UART0 pads (U0T GPIO1, U0R GPIO3), which the 2026-10-30 build was
+ * first wired to.
  *
  * A reader task (core 0, below the link) assembles lines and keeps the latest
  * row as a cam_result_t under a spinlock; the control task peeks it every

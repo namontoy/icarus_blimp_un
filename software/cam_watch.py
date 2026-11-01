@@ -40,7 +40,7 @@ def summary(text):
     if age and int(age.group(1)) > 500:
         parts.append('LAST ROW %s ms AGO' % age.group(1))
     if 'nothing has arrived' in text:
-        parts.append('NOTHING HAS ARRIVED: power, the U0T -> GPIO6 wire, the grounds')
+        parts.append('NOTHING HAS ARRIVED: power, the CAM IO14 -> GPIO6 wire, the grounds')
     elif 'no row parses' in text:
         parts.append('BYTES BUT NO ROWS: the baud, or not target_cam (cam --raw)')
     elif det and bearing:

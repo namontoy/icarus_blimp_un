@@ -112,7 +112,8 @@ rows are identical run for run and the ToF rows' best laps moved (the table belo
 hold can turn toward the forward camera's target (`blimp_hold_t.target_held`, `hold follow`):
 each new sighting sets the heading to yaw + bearing, held between frames and after the balloon
 is lost. The S3 reads namontoy's `target_cam` rows on UART1 (RX GPIO6, TX GPIO2; `cam_link.c`,
-`cam`), from the camera's UART0 at 115200 rather than the IO13/IO14 the link plan drew. Open
+`cam`), from the camera's UART1 copy on IO14 at 115200 (target_cam since 2026-10-31; the
+first build assumed its UART0 pads). Open
 until the bench: the bearing's sign for this mounting (Kconfig -1, `software/cam_watch.py`
 checks it), the camera's delay (not compensated), and the camera's power on the blimp. The sweep
 with 0.3.0 is identical to 0.2.1's in every cell. The same review made the firmware's stale

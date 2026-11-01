@@ -381,12 +381,12 @@ endmenu
 menu "Forward camera (target_cam over UART)"
 
     # cam_link.c reads the forward ESP32-CAM's detections: the CSV rows that
-    # namontoy's target_cam firmware prints on the CAM's UART0 (its U0T pad,
-    # GPIO1), 12.5 a second. The S3 pins are the Cableado's
+    # namontoy's target_cam firmware copies to the CAM's UART1 (TX IO14, since
+    # 2026-10-31), 12.5 a second. The S3 pins are the Cableado's
     # (docs/inter-board-link-plan.md): UART1, RX on GPIO6, TX on GPIO2.
 
     config CAM_FWD_UART_RX_GPIO
-        int "S3 RX GPIO (from the CAM's U0T)"
+        int "S3 RX GPIO (from the CAM's IO14)"
         range 0 48
         default 6
         help
@@ -395,7 +395,7 @@ menu "Forward camera (target_cam over UART)"
             nothing to do.
 
     config CAM_FWD_UART_TX_GPIO
-        int "S3 TX GPIO (to the CAM's U0R), or -1 for none"
+        int "S3 TX GPIO (to the CAM's IO13), or -1 for none"
         range -1 48
         default 2
         help
