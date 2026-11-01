@@ -1,6 +1,6 @@
 /*
  * cam_row.h - one CSV row of namontoy's target_cam (the forward ESP32-CAM's
- * firmware, branches target-cam-*), parsed. Portable C with no ESP-IDF, so
+ * firmware, firmware/projects/target_cam/), parsed. Portable C with no ESP-IDF, so
  * tools/fw_host_test.py checks it on the host
  * (firmware/projects/i2c_tools/host/test_cam_row.c); cam_link.c feeds it the
  * lines that arrive on UART1.

@@ -22,24 +22,25 @@ so the repo now has a host side and two chips:
 | `sim/`, `tools/` | host (verified on Windows and Linux) | MuJoCo closed loop around the compiled core, plus the build, verify and sweep scripts. `python tools/setup_env.py` once, then `python tools/verify.py` after any change. |
 | `firmware/projects/i2c_tools/` | ESP32-S3 (Waveshare ESP32-S3-Zero) | The flight-controller-to-be: IMU, magnetometer and barometer (stand-alone breakouts since the GY-88 burned; see below), altimeter, four DRV8833 thrusters, and since the `s3-wireless-link` work its own Wi-Fi access point carrying the console and a UDP packet link (`docs/wireless-link.md`). The name comes from the Espressif `i2c_tools` example it grew out of, and the console prompt is still `i2c-tools>`. |
 | `firmware/projects/optflow_cam/` | ESP32-CAM (AI-Thinker, original ESP32) | Downward optical flow. It prints CSV over UART to a laptop. |
+| `firmware/projects/target_cam/` | ESP32-CAM (AI-Thinker, original ESP32) | Forward colour-blob detector for the red waypoint balloons. It prints CSV over UART0 to the PC and, since 2026-10-31 (`CONFIG_TARGETCAM_S3_UART`), copies every data row to the S3 on UART1 (TX IO14, RX IO13, 115200). `host/viewer/` (`tcview`, its own `targetcam` conda env) shows the raw image over the same serial link and is where the user calibrates by hand. Settings persist in NVS. Host tests: `make -C firmware/projects/target_cam/host test`. |
 | `firmware/projects/espfly/` | XIAO ESP32-S3 on the ESP-FLY board | DroneUN's previous flight shell for the previous board: an `esp_timer`-driven control task around `blimp_step()`, an ESP-NOW link and `net/protocol.h`. Not built here; kept as the reference for the S3-Zero control task until that supersedes it (ESP-IDF v5.3, `tools\idf_build.bat`). |
 | `firmware/projects/blink/` | — | Stock ESP-IDF example, kept as a toolchain smoke test. |
 | `software/` | host | `blimp_link.py` is the ground tool for this repo's firmware (standard library only; `mock_blimp.py` fakes the firmware on localhost, capture included; `blimp_log.py` decodes captures; `thrust_map.py`, `step_test.py` and `step_response.py` are the bench instruments of `docs/pid-tuning-plan.md`, and `hold_test.py` runs its closed-loop heading steps on the firmware's bench hold, and `square_test.py`, since 2026-11-01, the square: open-loop legs of push, coast and brake with turns on the spot, both ending in a landing `core/` flies with `hold altitude <m> <m/s>`). The esp-drone bench tools that were here until 2026-10-30 (`drone_gui.py`, `drone_dynamics.py`, `motor_diag.py`, `SETUP.md`) spoke CRTP over UDP to a different quadcopter's firmware, never to this repo's; the ground station replaced them. They are in git history (`git show dab8786:software/drone_gui.py`) and `docs/esp-drone-tools-report.md` describes them. |
 
-Only the forward camera is linked to the S3 so far. `docs/inter-board-link-plan.md` (a draft) proposes UART links; since 2026-10-30 the S3 firmware reads the forward camera's rows over UART1 (RX GPIO6, TX GPIO2; `cam_link.c`, the `cam` command), from namontoy's `target_cam` firmware (branches `target-cam-*`; the rows-only copy on the camera's IO14 is on `target-cam-learned-detector`), measured on the bench 2026-10-31 with IO14 wired to GPIO6 (rows at 12–13 a second; firmware README §1); since 2026-11-01 the S3 also relays each row to the ground station as `LINK_PKT_CAMERA` (built; run against `mock_blimp.py` and in `--demo`, not against the blimp). `docs/sensor-fusion-plan.md` is a proposal (`blimp_ins`) that is **not implemented**. `hardware/` and `external/` are empty placeholders (`external/` is where a read-only esp-drone clone goes, gitignored); `scripts/` holds `idf.bat`. The top-level `README.md` is the project front page, from DroneUN.
+Only the forward camera is linked to the S3 so far. `docs/inter-board-link-plan.md` (a draft) proposes UART links; since 2026-10-30 the S3 firmware reads the forward camera's rows over UART1 (RX GPIO6, TX GPIO2; `cam_link.c`, the `cam` command), from namontoy's `target_cam` firmware (`firmware/projects/target_cam/`, merged into `pid-tuning` on 2026-11-01 from the `target-cam-*` branches), which copies its rows to its IO14, measured on the bench 2026-10-31 with IO14 wired to GPIO6 (rows at 12–13 a second; firmware README §1); since 2026-11-01 the S3 also relays each row to the ground station as `LINK_PKT_CAMERA` (built; run against `mock_blimp.py` and in `--demo`, not against the blimp). `docs/sensor-fusion-plan.md` is a proposal (`blimp_ins`) that is **not implemented**. `hardware/` and `external/` are empty placeholders (`external/` is where a read-only esp-drone clone goes, gitignored); `scripts/` holds `idf.bat`. The top-level `README.md` is the project front page, from DroneUN.
 
 ## Building firmware (ESP-IDF v5.5.5)
 
 ESP-IDF was installed with EIM, so the activation script sits at a non-standard path:
 
 ```bash
-source /home/talos/.espressif/tools/activate_idf_v5.5.5.sh
+source $HOME/.espressif/tools/activate_idf_v5.5.5.sh
 ```
 
 After activation `idf.py` is a shell function, so `timeout`, `xargs` and similar can't exec it. From scripts or tool calls, invoke it directly:
 
 ```bash
-IDF_PY="/home/talos/.espressif/tools/python/v5.5.5/venv/bin/python /home/talos/.espressif/v5.5.5/esp-idf/tools/idf.py"
+IDF_PY="$HOME/.espressif/tools/python/v5.5.5/venv/bin/python $HOME/.espressif/v5.5.5/esp-idf/tools/idf.py"
 $IDF_PY -C firmware/projects/i2c_tools set-target esp32s3   # once per fresh build dir
 $IDF_PY -C firmware/projects/i2c_tools build
 $IDF_PY -C firmware/projects/i2c_tools -p /dev/ttyACM0 flash

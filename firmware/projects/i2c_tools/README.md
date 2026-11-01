@@ -150,8 +150,8 @@ motors stay off while the pins float during reset.
 |---|---|
 | 1 | Battery divider, ADC1_CH0 (`BATTERY_ADC_GPIO`; read since 2026-10-29, not yet checked on the bench) |
 | 4, 5 | I2C SDA, SCL |
-| 2 | UART1 TX to the forward camera's U0R (`CAM_FWD_UART_TX_GPIO`; since 2026-10-30, only `cam --tx` writes) |
-| 6 | UART1 RX from the forward camera's U0T (`CAM_FWD_UART_RX_GPIO`; since 2026-10-30) |
+| 2 | UART1 TX to the forward camera's IO13 (`CAM_FWD_UART_TX_GPIO`; since 2026-10-30, only `cam --tx` writes, and target_cam does not read IO13 yet) |
+| 6 | UART1 RX from the forward camera's IO14 (`CAM_FWD_UART_RX_GPIO`; since 2026-10-30) |
 | 7–14 | Motor driver inputs (all eight LEDC channels) |
 | 21 | WS2812 status LED (RMT) |
 | 38 | Planned for the parked PING))) sensor (not built in; its default was 6 until the camera took it) |
@@ -585,8 +585,10 @@ yaw error while it was; check the bearing's sign first with
 
 ### `cam`: the forward camera's link
 
-The forward ESP32-CAM runs namontoy's `target_cam` (branches `target-cam-*`)
-and prints one CSV row per frame, 12.5 a second, on its UART0 at 115200
+The forward ESP32-CAM runs namontoy's `target_cam`
+(`firmware/projects/target_cam/`) and prints one CSV row per frame, 12.5 a
+second, on its UART0 at 115200 for the PC; since 2026-10-31 it copies every
+data row to its UART1, TX IO14, at the same baud, for the S3
 (`main/cam_row.h` has the columns). The S3 reads them on UART1
 (`cam_link.c`), keeps the latest for the control task's read stage, relays
 each row to the ground station as a `CAMERA` packet (§7; built 2026-11-01, not
@@ -594,18 +596,24 @@ yet run against the real camera), and
 writes to the camera only when someone types `cam --tx`: target_cam takes
 single-letter commands, and a stray `s` turns its rows off.
 
-Wiring (the Cableado's S3 pins, `docs/inter-board-link-plan.md`; on the
-camera, target_cam's UART0 pads, not the IO13/IO14 that plan drew):
+Wiring (the Cableado's pins on both boards, `docs/inter-board-link-plan.md`;
+measured 2026-10-31 with IO14 on GPIO6):
 
 | ESP32-CAM | | ESP32-S3-Zero |
 |---|---|---|
-| U0T (GPIO1) | → 470 Ω → | GPIO6 (RX) |
-| U0R (GPIO3) | ← 470 Ω ← | GPIO2 (TX) |
+| IO14 (UART1 TX) | → 470 Ω → | GPIO6 (RX) |
+| IO13 (UART1 RX) | ← 470 Ω ← | GPIO2 (TX) |
 | GND | — | GND |
 
-U0T/U0R are also the camera's programming port: with the 470 Ω in the S3's
-TX line a programmer on U0R still wins, or unplug that wire to reflash. The
-camera's boot log arrives on the same line and is counted and dropped.
+The camera's microSD slot must stay empty (IO13 and IO14 are its DAT3 and
+CLK), and IO14 can toggle while the camera boots, which the S3 counts and
+drops. target_cam sends only data rows on UART1 (no `#` replies, and its `s`
+does not stop them) and does not read IO13 yet, so on this wiring `cam --tx`
+reaches nothing; it works when the S3 is wired to the camera's UART0 pads
+(U0T GPIO1 → GPIO6, U0R GPIO3 ← GPIO2), which the 2026-10-30 build first
+assumed. U0T/U0R are also the camera's programming port: with the 470 Ω in
+the S3's TX line a programmer on U0R still wins, or unplug that wire to
+reflash.
 
 ```
 cam                  rows/s, counts, the latest detection and the bearing core/ gets

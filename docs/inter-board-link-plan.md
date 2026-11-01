@@ -6,11 +6,14 @@
 > altimeter and the MPU-6050 interrupt — are **proposed** in this plan and
 > marked as such. Reconciled against the Cableado on 2026-10-13.
 >
-> **Built for the forward camera, 2026-10-30 (not yet run):** the S3 side as drawn here, UART1
-> with RX on GPIO6 and TX on GPIO2 (`cam_link.c`, the `cam` command). The camera side differs:
-> namontoy's `target_cam` prints its CSV rows on the CAM's **UART0** (U0T GPIO1, U0R GPIO3) at
-> **115200**, not on IO13/IO14 at 921600, so the wires go to U0T/U0R. No binary protocol yet:
-> the S3 parses those rows (`cam_row.c`). The firmware README's `cam` section has the wiring.
+> **Built for the forward camera, 2026-10-30; link measured 2026-10-31:** the S3 side as drawn
+> here, UART1 with RX on GPIO6 and TX on GPIO2 (`cam_link.c`, the `cam` command). Since
+> 2026-10-31 namontoy's `target_cam` copies every CSV data row to its **UART1, TX IO14**, at
+> **115200** rather than this plan's 921600 (`CONFIG_TARGETCAM_S3_UART`), so the wires are the
+> ones drawn here: CAM IO14 → S3 GPIO6, S3 GPIO2 → CAM IO13. Its IO13 is not read yet, so the
+> link is one-way for now. (The 2026-10-30 build first assumed the camera's UART0 pads, U0T/U0R.)
+> No binary protocol yet: the S3 parses those rows (`cam_row.c`). The firmware README's `cam`
+> section has the wiring.
 >
 > **Not the same link as the UDP packets, 2026-11-01:** the codes `0x01`..`0x87` below are this UART
 > protocol, CAM to S3. The ground station's UDP link (`link_protocol.h`, `docs/wireless-link.md`)

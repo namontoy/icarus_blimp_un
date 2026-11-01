@@ -2,7 +2,7 @@
  * computer.
  *
  * The rows are made here with the printf format strings of target_cam's own
- * row (target_main.c on namontoy's target-cam-learned-detector branch, the
+ * row (firmware/projects/target_cam/main/target_main.c, namontoy's, the
  * v2 row; v1 is the same without its last ten columns), so this checks the
  * format the camera really prints, not one written from its description. And
  * the lines a bare UART also carries, which must never read as a row: the

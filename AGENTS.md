@@ -56,6 +56,10 @@ CLAUDE.md, and others). Keep it tool-neutral; tool-specific notes belong in that
   `LINK_PKT_CAMERA` (built 2026-11-01, run against `mock_blimp.py` only).
 - `firmware/projects/espfly/`: the previous board's shell. `main/main.c` is only an RTOS shell
   around `blimp_step()` (the esp_timer loop pattern); not part of day-to-day builds.
+- `firmware/projects/target_cam/`: the forward ESP32-CAM's red-balloon detector (namontoy's;
+  merged from the `target-cam-*` branches 2026-11-01). CSV rows to the PC on UART0, a copy to
+  the S3 on UART1 (TX IO14); `host/` has its tests and the `tcview` viewer; reports in
+  `docs/learned-detector-report.md` and `docs/lens-focus-procedure.md`.
 - `firmware/projects/optflow_cam/`: ESP32-CAM optical-flow experiment. `blink/`: toolchain test.
 - `sim/`: MuJoCo closed loop that runs the same core, built as `build/libblimp.dll`, through
   ctypes (`sim/blimp_ffi.py`). `sim/scene/build_scene.py` generates the course from the rulebook.
