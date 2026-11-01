@@ -20,7 +20,9 @@
  *   yaw: radians to newton-metres. The largest torque is one motor's thrust
  *     on the front half-span, about 0.34 N x 0.20 m = 0.07 N m; a kp of
  *     2 N m/rad saturates it within 2 degrees. The default is 0.033.
- *   surge: metres of range to newtons, one-way. The default kp is 0.30.
+ *   surge: metres of range to newtons, one-way (guidance never brakes; the
+ *     bench hold's own surge may, with front_reverse_ratio). The default kp
+ *     is 0.30.
  *
  * d_lpf_hz stops at 25 Hz, the Nyquist frequency of the 50 Hz loop
  * (CTL_PERIOD_US); 0 switches the derivative filter off (pid.h).
@@ -112,6 +114,9 @@ static const param_entry_t TABLE[] = {
     /* mixer: up to 1 gf; the validator also keeps it at most half of
        motor_max_thrust_n, so it can never silence the front pair */
     F(front_deadband_n,      0.0f,      0.0098f,    "N"),
+    /* the front pair's reverse thrust as a fraction of forward (core
+       0.4.0): 0 one-way, 1 as strong backwards as forwards */
+    F(front_reverse_ratio,   0.0f,      1.0f,       "1"),
 };
 
 #define TABLE_LEN (sizeof(TABLE) / sizeof(TABLE[0]))

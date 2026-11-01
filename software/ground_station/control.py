@@ -237,7 +237,8 @@ class ControlPage(QWidget):
         self.limit_in.setValue(LIMIT_DEFAULT)
         self.limit_in.setKeyboardTracking(False)
         self.limit_in.setFixedWidth(64)
-        self.limit_in.setToolTip('full stick is this duty; D-pad up and down step it')
+        self.limit_in.setToolTip("full stick is this command (1 is the blimp's duty ceiling); "
+                                 'D-pad up and down step it')
         self.limit_in.valueChanged.connect(self._limit_changed)
         lim = QWidget()
         lim.setLayout(hbox(label('Limit', color=T.MUTED), self.limit_in, label('%', color=T.MUTED), spacing=6))

@@ -60,7 +60,9 @@ typedef struct {
     blimp_pid_params_t yaw;      /* heading error (rad)  -> tz (N*m); kd acts
                                   * on the GYRO yaw rate, not on the noisy
                                   * vision bearing (blimp.c)               */
-    blimp_pid_params_t surge;    /* range error (m)      -> fx (N), >= 0       */
+    blimp_pid_params_t surge;    /* range error (m)      -> fx (N), >= 0; the
+                                  * bench hold's commanded surge is clipped
+                                  * to +/- out_max                          */
     float pitch_damp_kd;         /* pendulum swing damping, rate-only       */
 
     /* -- estimator -------------------------------------------------------- */
@@ -91,6 +93,14 @@ typedef struct {
                                   * motor_max_thrust_n: it was a fixed 0.5 gf,
                                   * which on 1 gf of usable thrust (30 % duty)
                                   * silenced the bench hold's whole range.   */
+    float front_reverse_ratio;   /* the front pair's reverse thrust at a full
+                                  * reverse command, as a fraction of
+                                  * motor_max_thrust_n, 0..1 (appended
+                                  * 2026-11-01, core 0.4.0). 0: one-way, the
+                                  * mixer never drives a front motor below
+                                  * zero. Above 0 a turn becomes a couple
+                                  * and a negative surge brakes (mixer.h).
+                                  * The rear pair is always one-way.        */
 } blimp_params_t;
 
 /* Fills p with the documented starting values. Never fails. */

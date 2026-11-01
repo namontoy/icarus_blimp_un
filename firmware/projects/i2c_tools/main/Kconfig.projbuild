@@ -136,36 +136,46 @@ menu "Motor driver (DRV8833)"
     config MOTOR_DEADBAND_PERMILLE
         int "Break-away duty in parts per thousand"
         range 0 900
-        default 0
+        default 100
         help
             Smallest duty that actually starts the prop turning. Thrust
-            commands are mapped onto [deadband, 1.0] so that a small command
-            produces a small thrust instead of nothing at all.
+            commands are mapped onto [deadband, ceiling] so that a small
+            command produces a small thrust instead of nothing at all.
 
-            0 means no mapping: a command is its duty, so 0.05 is 5 % duty,
-            which is what the ground station's sliders and the readback
-            assume. The earlier default of 120 was an unmeasured guess that
-            turned the smallest slider step (0.003) into 12.3 % duty, and
-            the motors ran far faster than the slider said (2026-10-28).
-            Measure the real value per motor with 'motor -m FL --sweep'
-            before you set a non-zero one.
+            100 (10 %) since 2026-11-01: the team's bench setting from
+            2026-10-30 on, with MOTOR_MAX_DUTY_PERCENT's 40, so a boot no
+            longer leaves the motors unlimited until someone types
+            'motor --max-duty 40 --deadband 10'. A command is then not its
+            duty: c gives 10 + 30 |c| % (0.05 is 11.5 %), the ground
+            station's sliders and the readback included. 0 means no mapping,
+            a command is its duty, which the thrust stand and the step tests
+            need (software/thrust_map.py and step_test.py refuse anything
+            else: 'motor --max-duty 100 --deadband 0' for the run, and a
+            reboot or 'motor --max-duty 40 --deadband 10' after it). It was
+            the default from 2026-10-28; the 120 before that was an
+            unmeasured guess that turned the smallest slider step (0.003)
+            into 12.3 % duty. Measure the real value per motor with
+            'motor -m FL --sweep'.
 
     config MOTOR_MAX_DUTY_PERCENT
         int "Duty ceiling, percent: what a command of 1.0 gives"
         range 10 100
-        default 100
+        default 40
         help
             Commands are mapped onto [deadband, ceiling] instead of
             [deadband, 100 %], so a full command is this duty and nothing
-            can exceed it. The team runs the motors at 30 % at most (asked
-            2026-10-30, to spare the electronics): 'motor --max-duty 30'
-            sets it until the next reset, and the bench hold sets it with
-            'software/hold_test.py --max-duty 30'. With a ceiling, core/'s
-            motor_max_thrust_n must be the thrust AT the ceiling (about 1 gf
-            at 30 % on the 2026-10-28 scale), so that core/'s idea of a
-            full command and the motor's agree. 100 keeps a command equal
-            to its duty, which is what the ground station's sliders, the
-            readback and the thrust stand (software/thrust_map.py) assume.
+            can exceed it. The team caps the motors to spare the drivers
+            (1.2 A a channel): 30 % from 2026-10-30, 40 % from 2026-10-31,
+            when the rear pair could not lift the trim at 30 %; the default
+            since 2026-11-01, so a boot is already limited. 'motor
+            --max-duty' changes it until the next reset, and the bench hold
+            sets it with 'software/hold_test.py --max-duty 40'. With a
+            ceiling, core/'s motor_max_thrust_n must be the thrust AT the
+            ceiling (about 3.4 gf at 40 %, inferred on 2026-10-31), so that
+            core/'s idea of a full command and the motor's agree. 100 with
+            a 0 deadband keeps a command equal to its duty, which the thrust
+            stand (software/thrust_map.py) and the step tests need; see
+            MOTOR_DEADBAND_PERMILLE.
 
     config MOTOR_RAMP_MS
         int "Soft start: rest to a full command, ms; 0 disables"

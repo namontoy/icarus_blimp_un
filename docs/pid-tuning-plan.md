@@ -386,8 +386,10 @@ python software/step_test.py yaw --mirror --go --thrust-map docs/history/pid-ben
 ```
 
 The defaults are the 30 % limit's steps (0.20, 0.25, 0.30) and l_f = 0.12 m. The tool reads the
-motor table first: it refuses a driver left at hold_test.py's deadband and ceiling (reset with
-`python software/blimp_link.py console "motor --max-duty 100 --deadband 0"`, or reboot) and
+motor table first: it refuses any driver but a plain one, a command equal to its duty (since
+2026-11-01 a boot gives the team's 10 % deadband and 40 % ceiling; set it plain with
+`python software/blimp_link.py console "motor --max-duty 100 --deadband 0"` for the run, and
+back with `"motor --max-duty 40 --deadband 10"` or a reboot after it) and
 records the motor map, which the fit uses. Until FL and FR are on the thrust map the fit uses the
 mean of RL's and RR's curves for them (the map's own fallback); re-run `step_response.py` on the
 capture once they are. Watch the readback follow each step in the printed lines. At the end every step and every

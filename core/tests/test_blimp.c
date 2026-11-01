@@ -118,6 +118,22 @@ static uint32_t force_arm(blimp_t *b)
     return t_us;
 }
 
+/* One 20 ms tick of the bench hold with the ToF reading tof_m. */
+static void hold_tick(blimp_t *b, uint32_t *t_us, const blimp_hold_t *h, float tof_m,
+                      blimp_actuators_t *out)
+{
+    *t_us += 20000u;
+    blimp_input_t in = {0};
+    in.imu = stationary_imu(*t_us);
+    in.imu.range_alt = tof_m;
+    in.imu.range_valid = true;
+    in.arm_request = true;
+    in.t_us = *t_us;
+    in.hold = *h;
+    blimp_notify_link(b, *t_us);
+    blimp_step(b, &in, out);
+}
+
 int main(void)
 {
     printf("test_blimp\n");
@@ -646,6 +662,43 @@ int main(void)
         CHECK(out.thrust_fl + out.thrust_fr <= b.params.surge.out_max + 1e-5f);
         CHECK(actuator_violations(&out) == 0);
 
+        /* A negative surge (core 0.4.0): one-way, nothing, as before. */
+        h.surge_n = -0.05f;
+        t_us += 20000u;
+        in.imu = stationary_imu(t_us);
+        in.t_us = t_us;
+        in.hold = h;
+        blimp_notify_link(&b, t_us);
+        blimp_step(&b, &in, &out);
+        CHECK_NEAR(out.thrust_fl + out.thrust_fr, 0.0f, 1e-9);
+        CHECK(actuator_violations(&out) == 0);
+
+        /* With the front pair reversible it brakes, evenly; a huge one is
+         * capped at the cruise cap, and the mixer's own limits hold. */
+        b.params.front_reverse_ratio = 0.74f;
+        t_us += 20000u;
+        in.imu = stationary_imu(t_us);
+        in.t_us = t_us;
+        in.hold = h;
+        blimp_notify_link(&b, t_us);
+        blimp_step(&b, &in, &out);
+        CHECK_NEAR(out.thrust_fl + out.thrust_fr, -0.05f, 1e-5);
+        CHECK_NEAR(out.thrust_fl, out.thrust_fr, 1e-6);
+        CHECK_NEAR(out.thrust_rl + out.thrust_rr, 0.0f, 1e-9);
+        h.surge_n = -1.0e6f;
+        t_us += 20000u;
+        in.imu = stationary_imu(t_us);
+        in.t_us = t_us;
+        in.hold = h;
+        blimp_notify_link(&b, t_us);
+        blimp_step(&b, &in, &out);
+        CHECK(out.thrust_fl + out.thrust_fr >= -b.params.surge.out_max - 1e-5f);
+        CHECK(out.thrust_fl >= -0.74f * b.params.motor_max_thrust_n - 1e-7f);
+        CHECK(out.thrust_fr >= -0.74f * b.params.motor_max_thrust_n - 1e-7f);
+        CHECK(fabsf(out.thrust_fl) + fabsf(out.thrust_fr) + out.thrust_rl + out.thrust_rr
+              <= BLIMP_RULE13_MAX_TOTAL_N + 1e-6f);
+        b.params.front_reverse_ratio = 0.0f;
+
         /* Active but nothing held: all zero, guidance not consulted. */
         h = (blimp_hold_t){0};
         h.active = true;
@@ -656,6 +709,95 @@ int main(void)
         blimp_notify_link(&b, t_us);
         blimp_step(&b, &in, &out);
         CHECK_NEAR(out.thrust_fl + out.thrust_fr + out.thrust_rl + out.thrust_rr, 0.0f, 1e-9);
+    }
+
+    TEST_GROUP("bench hold: the height moves at altitude_rate_mps (core 0.4.0)");
+    {
+        blimp_t b;
+        uint32_t t_us = force_arm(&b);
+        blimp_actuators_t out = {0};
+        blimp_hold_t h = {0};
+        h.active = true;
+        h.altitude_held = true;
+
+        /* Rate 0 is the step it always was: the setpoint is the target. */
+        h.altitude_m = 1.0f;
+        for (int i = 0; i < 25; i++) {
+            hold_tick(&b, &t_us, &h, 0.07f, &out);
+        }
+        CHECK(b.hold_alt_valid);
+        CHECK(b.hold_alt_sp_m == 1.0f);
+        CHECK_NEAR(b.demand.fz, 1.0f - b.state.altitude, 1e-6);
+
+        /* Leaving the altitude clears the setpoint; taken up again with a
+         * rate, it starts from where the vehicle is and climbs rate x dt a
+         * tick, exactly, until it lands on the target and stays. */
+        h.altitude_held = false;
+        hold_tick(&b, &t_us, &h, 0.07f, &out);
+        CHECK(!b.hold_alt_valid);
+        h.altitude_held = true;
+        h.altitude_rate_mps = 0.1f;
+        hold_tick(&b, &t_us, &h, 0.07f, &out);
+        const float start = b.hold_alt_sp_m;
+        CHECK_NEAR(start, b.state.altitude + 0.1f * 0.02f, 1e-4);
+        CHECK(start < 0.2f);
+        for (int i = 1; i <= 50; i++) {
+            hold_tick(&b, &t_us, &h, 0.07f, &out);
+            CHECK_NEAR(b.hold_alt_sp_m, start + 0.002f * (float)i, 1e-4);
+        }
+        CHECK(actuator_violations(&out) == 0);
+        for (int i = 0; i < 600; i++) {
+            hold_tick(&b, &t_us, &h, 0.07f, &out);
+        }
+        CHECK(b.hold_alt_sp_m == 1.0f);
+
+        /* Retargeted mid-way, it turns round from where the setpoint is,
+         * not from the vehicle. */
+        h.altitude_m = 0.5f;
+        hold_tick(&b, &t_us, &h, 0.07f, &out);
+        CHECK_NEAR(b.hold_alt_sp_m, 1.0f - 0.002f, 1e-6);
+
+        /* Non-finite or negative rates are the step. */
+        h.altitude_rate_mps = (float)NAN;
+        hold_tick(&b, &t_us, &h, 0.07f, &out);
+        CHECK(b.hold_alt_sp_m == 0.5f);
+        h.altitude_rate_mps = -1.0f;
+        h.altitude_m = 0.8f;
+        hold_tick(&b, &t_us, &h, 0.07f, &out);
+        CHECK(b.hold_alt_sp_m == 0.8f);
+        CHECK(actuator_violations(&out) == 0);
+    }
+
+    TEST_GROUP("bench hold: a ramp's damping follows it instead of braking it");
+    {
+        /* The vehicle descending exactly with a 0.1 m/s ramp: the error and
+         * its rate are about zero, so the rear pair gives the feed-forward.
+         * Damping on the climb rate alone (the old law) would add
+         * alt.kd x 0.1 m/s, about 0.13 N with the defaults. */
+        blimp_t b;
+        uint32_t t_us = force_arm(&b);
+        blimp_actuators_t out = {0};
+        blimp_hold_t h = {0};
+        h.active = true;
+        h.altitude_held = true;
+        h.altitude_m = 1.5f;
+        for (int i = 0; i < 100; i++) {
+            hold_tick(&b, &t_us, &h, 1.5f, &out);
+        }
+        h.altitude_m = 0.2f;
+        h.altitude_rate_mps = 0.1f;
+        float tof = 1.5f;
+        for (int i = 0; i < 300; i++) {           /* 6 s, 0.6 m down */
+            tof -= 0.002f;
+            hold_tick(&b, &t_us, &h, tof, &out);
+        }
+        const float hover = b.params.hover_thrust_n;
+        const float kd_term = b.params.alt.kd * 0.1f;
+        CHECK(b.state.vz < -0.05f);
+        CHECK_MSG(fabsf(b.act.thrust_rl + b.act.thrust_rr - hover) < 0.3f * kd_term,
+                  "rear pair %.4f N against the feed-forward %.4f N (the old law adds %.4f N)",
+                  (double)(b.act.thrust_rl + b.act.thrust_rr), (double)hover, (double)kd_term);
+        CHECK(actuator_violations(&out) == 0);
     }
 
     TEST_GROUP("bench hold: failsafes and disarm still win");

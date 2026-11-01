@@ -199,9 +199,9 @@
 
   <actuator>
     <general name="motor_fl" site="motor_fl_site" gear="1 0 0 0 0 0"
-             ctrlrange="0 0.343350" gaintype="fixed" gainprm="1 0 0"/>
+             ctrlrange="-0.343350 0.343350" gaintype="fixed" gainprm="1 0 0"/>
     <general name="motor_fr" site="motor_fr_site" gear="1 0 0 0 0 0"
-             ctrlrange="0 0.343350" gaintype="fixed" gainprm="1 0 0"/>
+             ctrlrange="-0.343350 0.343350" gaintype="fixed" gainprm="1 0 0"/>
     <general name="motor_rl" site="motor_rl_site" gear="0 0 1 0 0 0"
              ctrlrange="0 0.343350" gaintype="fixed" gainprm="1 0 0"/>
     <general name="motor_rr" site="motor_rr_site" gear="0 0 1 0 0 0"

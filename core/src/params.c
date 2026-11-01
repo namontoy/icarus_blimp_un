@@ -50,6 +50,7 @@
 #define HOVER_TRIM_GF        6.0f   /* flown this much heavy (Rule 11 allows
                                      * 10); rear pair holds it up            */
 #define FRONT_DEADBAND_N     BLIMP_GF_TO_N(0.5f)   /* see the mixer block below */
+#define FRONT_REVERSE_RATIO  0.0f                  /* ditto                     */
 
 void blimp_params_defaults(blimp_params_t *p)
 {
@@ -150,6 +151,12 @@ void blimp_params_defaults(blimp_params_t *p)
      * 2026-10-28 scale) that is half the range; set it with the measured
      * motor_max_thrust_n, a few percent of it. */
     p->front_deadband_n = FRONT_DEADBAND_N;
+    /* The DRV8833s drive either way, but reverse is off by default until it
+     * has flown: 0 is the one-way mixer exactly, so the simulator's results
+     * tables and guidance's behaviour stay as recorded. One motor on a lab
+     * supply gave about 74 % of its forward thrust in reverse (AGENTS.md,
+     * "The vehicle"); the bench sets the vehicle's own ratio with 'param'. */
+    p->front_reverse_ratio = FRONT_REVERSE_RATIO;
 }
 
 /* Clamp anything that would break a rule or produce undefined behaviour.
@@ -234,6 +241,17 @@ bool blimp_params_validate(blimp_params_t *p)
     }
     if (p->front_deadband_n > 0.5f * p->motor_max_thrust_n) {
         p->front_deadband_n = 0.5f * p->motor_max_thrust_n;
+        ok = false;
+    }
+    /* A propeller pushes less backwards than forwards, never more: a ratio
+     * above 1 would let the mixer ask a motor for thrust it does not have.
+     * Non-finite or negative means one-way. */
+    if (!isfinite(p->front_reverse_ratio) || p->front_reverse_ratio < 0.0f) {
+        p->front_reverse_ratio = FRONT_REVERSE_RATIO;
+        ok = false;
+    }
+    if (p->front_reverse_ratio > 1.0f) {
+        p->front_reverse_ratio = 1.0f;
         ok = false;
     }
 

@@ -53,7 +53,7 @@ written down, but it has not run on hardware.
 | BMP280 (`baro`) | **Built, not run on hardware** | Same driver as the BME280 minus humidity; no BMP280 has been on the bus |
 | VL53L1X (`tof`) | **Measured** 2026-10-11, at 1.57 m only | 1566 mm, sd 1.5 mm at a 100 ms budget, dark room. Budgets below 100 ms read about 5 % short. **Range at 2 m not measured yet** (§8) |
 | Motors (`motor`) | **Measured** 2026-10-12, 2026-10-30 | 2 s run at 10 %, then the failsafe coasted it. No spurious errors. After the remount (2026-10-30): the pins in use read back as FL 10/11, RL 12/13, FR 14/7, RR 8/9, and each motor turned in its place and its intended direction, checked by eye |
-| Per-motor break-away duty | Not measured | The default deadband is 0, so a command is its duty (it was an unmeasured 12 % until 2026-10-28). Measure it with `--sweep` (§6) |
+| Per-motor break-away duty | Not measured | The default deadband is 10 % since 2026-11-01, the team's bench value, with a 40 % ceiling: a command c gives 10 + 30 c % (0 from 2026-10-28, a command its duty; an unmeasured 12 % before). Measure it with `--sweep` (§6) |
 | Wi-Fi AP, UDP link | **Measured** 2026-10-24 | The laptop joined `ICARUS-…` and the ground station page (`software/ground_station/`) received telemetry. 2026-10-30 (`docs/history/bench-2026-10-30.md`): the console over UDP; 0.0 % loss over 582 packets, the blimp's longest wait 66 ms, a command echoed in 47 ms median; with the heartbeat on, the motors stop 0.50 s after the last `MOTOR_SET`, and the link falls 0.45 s after the last packet; `motor --failsafe` refused over the air. Still open from `docs/wireless-link.md` §8: current, range |
 | Sensor stream (`sensors`, the `SENSORS` packet) | **Built, not run on hardware** | Written 2026-10-24 on the four drivers above. The ground station decodes the same packet from `software/mock_blimp.py` |
 | PING))) ultrasonic | **Parked, not tested** | Not in the build (§8) |
@@ -356,7 +356,7 @@ motor [--status]
 | `--sweep` | Ramp one motor from 5 % to 100 % duty in 20 steps, with the deadband switched off, so you can see where it starts turning. Each step lasts `-d` ms |
 | `--decay` | PWM decay mode. Default `slow` |
 | `--deadband` | Break-away duty in percent, 0–90 |
-| `--max-duty` | Duty ceiling in percent, 10–100 (2026-10-30): commands map onto [deadband, ceiling], so 1.0 gives this duty and nothing gives more. The team's limit is 30; the default (`CONFIG_MOTOR_MAX_DUTY_PERCENT`) stays 100, which keeps a command equal to its duty for the ground station and the thrust stand. With a ceiling, set `param motor_max_thrust_n` to the thrust at the ceiling. `--sweep` lifts it while it ramps |
+| `--max-duty` | Duty ceiling in percent, 10–100 (2026-10-30): commands map onto [deadband, ceiling], so 1.0 gives this duty and nothing gives more. The team's limit is 40 (30 until 2026-10-31), and since 2026-11-01 it is the default (`CONFIG_MOTOR_MAX_DUTY_PERCENT`), so a boot is already limited. The thrust stand and the step tests need a command equal to its duty, `--max-duty 100 --deadband 0`, and refuse anything else. With a ceiling, set `param motor_max_thrust_n` to the thrust at the ceiling. `--sweep` lifts it while it ramps |
 | `--ramp-ms` | Soft start in ms, 0–2000, default 200 (`CONFIG_MOTOR_RAMP_MS`, 2026-10-31): a start from rest begins at the deadband and reaches a full command after this long, a rise on a running motor keeps the same slope, a stop or a decrease lands at once, and turning the other way waits until the motor has coasted this long (`main/motor_ramp.h`, host-tested). A motor at rest draws several times its running current: at the 40 % ceiling a stalled start asked an estimated 1.8 A of a channel kept under 1.2 A, and the rear pair stopped starting above 28–34 % duty (`docs/history/envelope-2026-10-31.md`). 0 lands every command at once, as before. `--sweep` switches it off while it ramps |
 | `--failsafe` | Failsafe timeout in ms. 0 disables it |
 | `--status` | Pins, PWM frequency and resolution, decay, deadband, soft start, failsafe state, standing commands and the duty on the pins (which trails a command while a start climbs). A bare `motor` prints the same |
@@ -531,8 +531,12 @@ on setpoints given here instead of guidance's (`blimp_hold_t`,
 hold                       state: mode, estimator, heading, output, link, gains
 hold heading 30            hold 30 deg counter-clockwise (from above) of the nose at arming
 hold heading -45           (a negative value is a value, not an option: parsed by hand)
-hold altitude 1.5          hold 1.5 m above the floor on the ToF (0.2 to 3.0)
-hold surge 2               a constant 2 gf forward push (0 to 30)
+hold altitude 1.5          hold 1.5 m above the floor on the ToF (0.05 to 3.0; 0.2 until 2026-11-01)
+hold altitude 0.07 0.03    move the held height to 0.07 m at 3 cm/s (core 0.4.0; up to 0.5 m/s):
+                           core/ moves its setpoint and damps the error's rate, so a climb or a
+                           landing is followed instead of resisted; no rate, or 0, steps there
+hold surge 2               a constant 2 gf forward push (-30 to 30; negative brakes,
+                           only with 'param front_reverse_ratio' above 0)
 hold follow                turn toward the forward camera's balloon (overrides heading; see 'cam')
 hold follow off            stop following
 hold heading off           stop holding that axis (it outputs nothing)
@@ -554,9 +558,15 @@ any stop (`MOTOR_STOP`, `motor -s`, `hold kill`) latches KILLED until
 `hold off`. The capture's setpoint slots carry the wrench given to the motors
 and the heading error (`ctl_types.h`, `software/blimp_log.py`'s `hold_*`
 columns). Thrust becomes throttle as T / `motor_max_thrust_n`, then the
-driver maps it onto [deadband, ceiling]: on the bench set the ceiling and the
-deadband (`motor --max-duty 30 --deadband 10`), `motor_max_thrust_n` to the
-thrust at the ceiling (about 1 gf at 30 % on the 2026-10-28 scale), and
+driver maps it onto [deadband, ceiling]. A front motor's reverse thrust
+(`front_reverse_ratio` above 0, core 0.4.0: turns as a couple, a negative
+surge as a brake) becomes T / (`front_reverse_ratio` x `motor_max_thrust_n`),
+so -1 is that motor's full reverse; the soft start lets it coast before it
+turns the other way. On the bench the ceiling and the deadband are the
+team's 40 % and 10 % from boot since 2026-11-01 (`motor --max-duty 40
+--deadband 10` sets them again after the thrust stand), `motor_max_thrust_n`
+is the thrust at the ceiling (about 3.4 gf at 40 %, inferred on
+2026-10-31; about 1 gf at 30 % on the 2026-10-28 scale), and
 `front_deadband_n`, the mixer's cut-off, to a few percent of it (0.05 gf):
 its default of 0.5 gf, a constant until 2026-10-30, silenced every
 correction on the rope rig. `hold_test.py --max-duty --deadband --param ...`
@@ -664,12 +674,14 @@ section.
   brakes the motor. That gives a more linear speed-to-duty curve and is the
   usual choice. In *fast* decay the off part coasts.
 - **Deadband.** A small brushed motor doesn't turn below some break-away duty.
-  Commands are mapped onto `[deadband, 1.0]`, so a small command gives a small
-  thrust instead of nothing. The default is 0: no mapping, a command is its
-  duty, which is what the ground station's sliders show. Until 2026-10-28 it
-  was an unmeasured 12 %, which made the smallest slider step (0.003) drive
-  12.3 % duty. **Measure each motor with `motor --sweep -m FL` (and RL, FR,
-  RR)** before setting one, with `--deadband` at runtime or
+  Commands are mapped onto `[deadband, ceiling]`, so a small command gives a
+  small thrust instead of nothing. The default is 10 % since 2026-11-01 (with
+  the 40 % ceiling, the team's bench setting): the ground station's sliders
+  are then commands, 0.003 driving 10.1 % duty and 1 driving 40 %. From
+  2026-10-28 it was 0, no mapping, a command its duty; until then an
+  unmeasured 12 %, which made the smallest slider step drive 12.3 %.
+  **Measure each motor with `motor --sweep -m FL` (and RL, FR, RR)** before
+  changing it, with `--deadband` at runtime or
   `CONFIG_MOTOR_DEADBAND_PERMILLE` permanently.
 - **Failsafe** (`CONFIG_MOTOR_FAILSAFE_MS`, default 1000 ms). The PWM peripheral
   holds its last duty forever, so a controller that stops running would leave
@@ -815,7 +827,9 @@ default there or put it in `sdkconfig.defaults*`.
 | Motor driver (DRV8833) | `MOTOR_{FL,RL,FR,RR}_IN{1,2}_GPIO` | see the §2 table |
 | | `MOTOR_NSLEEP_GPIO` | −1 (tied high in hardware) |
 | | `MOTOR_PWM_FREQ_HZ` | 20000 |
-| | `MOTOR_DEADBAND_PERMILLE` | 0 (a command is its duty) |
+| | `MOTOR_DEADBAND_PERMILLE` | 100 (10 %; 0 makes a command its duty) |
+| | `MOTOR_MAX_DUTY_PERCENT` | 40 (the team's limit; 100 with a 0 deadband makes a command its duty) |
+| | `MOTOR_RAMP_MS` | 200 (the soft start; 0 disables) |
 | | `MOTOR_FAILSAFE_MS` | 1000 (0 disables) |
 | Wireless link (Wi-Fi access point + UDP) | `NET_WIFI_AT_BOOT` | y (otherwise use `wifi --start`) |
 | | `NET_WIFI_SSID_PREFIX` | `ICARUS` |

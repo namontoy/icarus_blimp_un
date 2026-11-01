@@ -129,10 +129,12 @@ class MotorsPanel(Panel):
     RACE_HINT = 'Race mode: this window only watches. STOP is the one command it sends to the motors.'
 
     def __init__(self, station):
-        # The value is the PWM duty as a signed fraction: 0.003 is 0.3 %. That
-        # holds only while the firmware's deadband is 0 (its default since
-        # 2026-10-28); a non-zero one maps a command c to db + (1 − db)·|c|.
-        super().__init__('Motors', "signed PWM duty, −1 … +1 · bars show the blimp's readback")
+        # The value is the motor command, signed: the firmware maps a command
+        # c onto [deadband, ceiling], db + (top − db)·|c|. Since 2026-11-01 it
+        # boots at 10 % and 40 %, so 0.003 is 10.1 % duty and 1 is 40 %; with
+        # 'motor --max-duty 100 --deadband 0' (the thrust stand) c is its duty.
+        super().__init__('Motors', "signed command, −1 … +1 · 1 is the blimp's duty ceiling · "
+                                   "bars show its readback")
         self.station = station
         self.enabled = False
         self.limit = 0.30
@@ -167,7 +169,7 @@ class MotorsPanel(Panel):
         for i, m in enumerate(MOTORS):
             sl = ThrustSlider()
             sl.setEnabled(False)
-            sl.setToolTip('%s duty, percent of the limit · double-click for zero' % m)
+            sl.setToolTip('%s command, percent of the limit · double-click for zero' % m)
             sl.valueChanged.connect(lambda v, m=m: self._slid(m, v))
             # Steps of 1 on the slider's −100…100 scale, i.e. 1 % of the limit.
             # setValue() goes through valueChanged, so a step follows the pair
@@ -273,7 +275,7 @@ class MotorsPanel(Panel):
 
     def _limit_changed(self, pct):
         self.limit = clamp(pct / 100, 0.05, 1.0)
-        self.station.log('warn' if self.limit > 0.5 else 'info', 'duty limit %d %%' % round(self.limit * 100))
+        self.station.log('warn' if self.limit > 0.5 else 'info', 'command limit %d %%' % round(self.limit * 100))
         self.send()
 
     # readback in

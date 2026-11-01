@@ -186,6 +186,8 @@ void blimp_init(blimp_t *b)
     b->follow_valid   = false;
     b->follow_yaw_rad = 0.0f;
     b->follow_obs_us  = 0u;
+    b->hold_alt_valid = false;
+    b->hold_alt_sp_m  = 0.0f;
 }
 
 void blimp_notify_link(blimp_t *b, uint32_t t_us)
@@ -203,7 +205,10 @@ const char *blimp_version(void)
      * rule 6 bans time-of-day/non-determinism, and this must be identical
      * for identical source. Bump the number when this file's behaviour
      * changes in a way worth distinguishing in a flight log. */
-    return "blimp-core-0.3.0";   /* 0.3.0: the hold follows a target.
+    return "blimp-core-0.4.0";   /* 0.4.0: the front pair reverses
+                                  * (front_reverse_ratio), the hold brakes,
+                                  * and its height can move at a set rate.
+                                  * 0.3.0: the hold follows a target.
                                   * 0.2.1: a link packet newer than the tick is
                                   * fresh; the arming tick steers on the new
                                   * origin. 0.2.0: the bench hold. */
@@ -217,6 +222,9 @@ static void reset_control_loops(blimp_t *b)
     blimp_pid_reset(&b->pid_alt);
     blimp_pid_reset(&b->pid_yaw);
     blimp_pid_reset(&b->pid_surge);
+    /* The hold's moving height setpoint is loop state too: after a reset a
+     * ramp starts again from where the vehicle is. */
+    b->hold_alt_valid = false;
 }
 
 /* Altitude: PID on the height error PLUS the hover feed-forward - the rear
@@ -226,7 +234,7 @@ static void reset_control_loops(blimp_t *b)
  * integration sees the actuator limit instead of the nominal one in params.
  * Done on a local copy: params stay the single source of truth and are never
  * mutated here. Shared by guidance's run and the bench hold. */
-static float altitude_loop(blimp_t *b, float err_m, float dt)
+static float altitude_loop(blimp_t *b, float err_m, float sp_rate_mps, float dt)
 {
     blimp_pid_params_t alt_p = b->params.alt;
     const float hover    = b->params.hover_thrust_n;
@@ -240,8 +248,13 @@ static float altitude_loop(blimp_t *b, float err_m, float dt)
      * drifts and would be fought for no reason. */
     const uint32_t fix_age_us = b->state.t_us - b->est.last_abs_us;
     const bool fix_fresh = b->est.abs_ever && fix_age_us < 500000u;
-    const float d_alt = (b->state.altitude_valid && fix_fresh)
-                            ? -b->state.vz : 0.0f;
+    /* d(error)/dt is the setpoint's rate less the climb rate. With a fixed
+     * setpoint (guidance, a held step) it is -vz exactly as it always was;
+     * with the hold's moving one, damping on -vz alone would brake every
+     * commanded climb or descent. */
+    const float d_alt = !(b->state.altitude_valid && fix_fresh) ? 0.0f
+                        : (sp_rate_mps != 0.0f) ? sp_rate_mps - b->state.vz
+                                                : -b->state.vz;
     return blimp_pid_step_d(&b->pid_alt, &alt_p, err_m, d_alt, dt) + hover;
 }
 
@@ -267,23 +280,58 @@ static void hold_wrench(blimp_t *b, const blimp_input_t *in, float dt,
     *w = BLIMP_SAFE_WRENCH;
     b->demand = BLIMP_SAFE_WRENCH;
 
-    /* Surge is open loop here: a constant push, never reverse, never above
-     * the run's own cruise cap. */
+    /* Surge is open loop here: a constant push, or with a negative value a
+     * brake (core 0.4.0), never beyond the run's own cruise cap either way.
+     * Whether a brake can be made is the mixer's business: one-way
+     * (front_reverse_ratio 0) it is zero there, as it always was. */
     blimp_pid_reset(&b->pid_surge);
-    if (isfinite(h->surge_n) && h->surge_n > 0.0f) {
-        const float cap = b->params.surge.out_max;
-        w->fx = (isfinite(cap) && h->surge_n > cap) ? cap : h->surge_n;
-        if (!(w->fx >= 0.0f)) {
-            w->fx = 0.0f;
+    if (isfinite(h->surge_n) && h->surge_n != 0.0f) {
+        /* A negative cap (corrupt) allows nothing, as before 0.4.0. */
+        const float cap = (b->params.surge.out_max > 0.0f) ? b->params.surge.out_max : 0.0f;
+        w->fx = h->surge_n;
+        if (isfinite(b->params.surge.out_max)) {
+            if (w->fx > cap) {
+                w->fx = cap;
+            } else if (w->fx < -cap) {
+                w->fx = -cap;
+            }
         }
         b->demand.fx = w->fx;
     }
 
-    if (h->altitude_held && isfinite(h->altitude_m) && b->state.altitude_valid) {
-        b->demand.fz = h->altitude_m - b->state.altitude;
-        w->fz = altitude_loop(b, b->demand.fz, dt);
+    /* The height setpoint: altitude_m at once, or moving toward it at
+     * altitude_rate_mps (blimp.h), from where the vehicle is when a ramp
+     * finds no setpoint to continue from. A tick without an altitude
+     * outputs nothing and keeps the setpoint where it was. */
+    if (h->altitude_held && isfinite(h->altitude_m)) {
+        const float rate = (isfinite(h->altitude_rate_mps) && h->altitude_rate_mps > 0.0f)
+                               ? h->altitude_rate_mps : 0.0f;
+        if (b->state.altitude_valid && isfinite(b->state.altitude)) {
+            float sp_rate = 0.0f;
+            if (rate <= 0.0f) {
+                b->hold_alt_sp_m = h->altitude_m;
+            } else {
+                if (!b->hold_alt_valid || !isfinite(b->hold_alt_sp_m)) {
+                    b->hold_alt_sp_m = b->state.altitude;
+                }
+                const float gap  = h->altitude_m - b->hold_alt_sp_m;
+                const float step = rate * dt;
+                if (fabsf(gap) <= step) {
+                    b->hold_alt_sp_m = h->altitude_m;
+                } else {
+                    b->hold_alt_sp_m += (gap > 0.0f) ? step : -step;
+                    sp_rate = (gap > 0.0f) ? rate : -rate;
+                }
+            }
+            b->hold_alt_valid = true;
+            b->demand.fz = b->hold_alt_sp_m - b->state.altitude;
+            w->fz = altitude_loop(b, b->demand.fz, sp_rate, dt);
+        } else {
+            blimp_pid_reset(&b->pid_alt);
+        }
     } else {
         blimp_pid_reset(&b->pid_alt);
+        b->hold_alt_valid = false;
     }
 
     /* Target follow (blimp.h): a new observation moves the heading to where
@@ -514,16 +562,18 @@ void blimp_step(blimp_t *b, const blimp_input_t *in, blimp_actuators_t *out)
          * errors and fy is passed straight through as an already-final
          * force. */
 
-        /* Surge: P on the range error. The mixer discards anything negative
-         * (no reverse thrust), and the PID's own out_min is 0 so its
-         * anti-windup bookkeeping agrees with that. */
+        /* Surge: P on the range error. The PID's out_min is 0, so guidance
+         * never brakes (the mixer would discard a negative surge one-way
+         * anyway, and the anti-windup bookkeeping agrees with that). With
+         * front_reverse_ratio > 0 the mixer still turns on a couple. */
         final_wrench.fx = blimp_pid_step(&b->pid_surge, &b->params.surge,
                                          b->demand.fx, dt);
 
         /* No lateral actuator exists (types.h). */
         final_wrench.fy = 0.0f;
 
-        final_wrench.fz = altitude_loop(b, b->demand.fz, dt);
+        final_wrench.fz = altitude_loop(b, b->demand.fz, 0.0f, dt);
+        b->hold_alt_valid = false;   /* a later hold's ramp starts afresh */
 
         /* Heading on the vision bearing error (guidance's demand.tz). */
         final_wrench.tz = heading_loop(b, b->demand.tz, dt);

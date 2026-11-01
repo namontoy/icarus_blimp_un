@@ -22,6 +22,12 @@ it; the thrust is (reading - tare) x --lever, the rig's arm ratio (1.0 when
 the motor pushes straight on the scale). Every point goes to a CSV row, and
 every plateau's capture is kept beside it.
 
+A duty is a command only on a plain driver, deadband 0 and ceiling 100 %.
+Since 2026-11-01 a boot gives the team's 10 % and 40 % instead, so `run`
+reads the driver first and refuses until it is set plain for the sweep
+(the refusal prints the two console lines, there and back), and --limit
+keeps the sweep at the team's 40 % unless raised deliberately.
+
 Why forward and reverse separately: the DRV8833 drives both ways, the
 propeller is pitched for one, and AGENTS.md's 74 % is one measurement. Why
 per motor: four motors from one batch differ and the mixer assumes one
@@ -160,7 +166,8 @@ def write_rows(path, rows):
 
 
 def run(args):
-    duties = sorted(set(args.duties))
+    duties = sorted(set(args.duties or [round(0.05 * k, 2) for k in range(2, 21)
+                                        if round(0.05 * k, 2) <= args.limit + 1e-9]))
     bad = [d for d in duties if d <= 0 or d > args.limit]
     if bad:
         sys.exit('duties must be in (0, %.2f]: %s' % (args.limit, bad))
@@ -187,6 +194,20 @@ def run(args):
     if any(abs(v) > 0.005 for v in tel['motor'].values()):
         link.close()
         sys.exit('the motors are already driven (%s): one source at a time' % tel['motor'])
+    # A command is its duty only on a plain driver (deadband 0, ceiling
+    # 100 %); since 2026-11-01 a boot gives the team's 10 % and 40 %, and the
+    # map would then pair each reading with the wrong duty. step_test.py
+    # makes the same check; imported here, since step_response.py imports
+    # this module.
+    import step_test
+    motors = step_test.read_motor_status(args.host, args.console_port)
+    if 'error' in motors:
+        link.close()
+        sys.exit("the blimp's motor table could not be read (%s): the duties need a plain driver"
+                 % motors['error'])
+    if motors['deadband_pct'] != 0.0 or motors['max_duty_pct'] != 100.0:
+        link.close()
+        sys.exit(step_test.PLAIN_DRIVER_REFUSAL % (motors['deadband_pct'], motors['max_duty_pct']))
     cap = bl.CaptureClient(link)
     have_cap = True
     try:
@@ -519,10 +540,14 @@ def main(argv=None):
     r = sub.add_parser('run', help='sweep one motor on the stand; dry run without --go')
     r.add_argument('--host', default=bl.BLIMP_IP)
     r.add_argument('--port', type=int, default=bl.LINK_PORT)
+    r.add_argument('--console-port', type=int, default=bl.CONSOLE_PORT)
     r.add_argument('--motor', required=True, help='FL, RL, FR or RR')
-    r.add_argument('--duties', type=float, nargs='+', default=DUTIES, help='default 0.1 .. 1.0')
+    r.add_argument('--duties', type=float, nargs='+',
+                   help='default 0.10 .. --limit in steps of 0.05')
     r.add_argument('--reverse', action='store_true', help='after the forward duties, the same in reverse')
-    r.add_argument('--limit', type=float, default=1.0, help='largest |duty| allowed (default %(default)s)')
+    r.add_argument('--limit', type=float, default=0.40,
+                   help="largest |duty| allowed (default %(default)s, the team's limit: a channel of the "
+                        "drivers carries 1.2 A, and one motor drew 2.0 A at 3.71 V)")
     r.add_argument('--lever', type=float, default=1.0, help='thrust / scale reading, from the rig\'s arms')
     r.add_argument('--settle', type=float, default=1.5, help='s from the command to the capture')
     r.add_argument('--hold', type=float, default=3.0, help='s of capture per point, the motor running')

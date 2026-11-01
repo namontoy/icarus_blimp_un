@@ -121,6 +121,7 @@ class BlimpParams(C.Structure):
         ("link_timeout_s", C.c_float),
         ("max_altitude_m", C.c_float),
         ("front_deadband_n", C.c_float),    # core 0.2.0: the mixer's deadband, appended
+        ("front_reverse_ratio", C.c_float), # core 0.4.0: the front pair's reverse, appended
     ]
 
 
@@ -178,9 +179,9 @@ class BlimpWrench(C.Structure):
 
 
 class BlimpActuators(C.Structure):
-    """Mirrors blimp/types.h: blimp_actuators_t - four fixed unidirectional
-    motors (front pair pushes +x, rear pair pushes +z) plus three clamp
-    flags. Tail-padded to 20 bytes."""
+    """Mirrors blimp/types.h: blimp_actuators_t - four fixed motors (front
+    pair pushes +x, or -x when negative with front_reverse_ratio > 0; rear
+    pair pushes +z) plus three clamp flags. Tail-padded to 20 bytes."""
 
     _fields_ = [
         ("thrust_fl", C.c_float),
@@ -285,8 +286,9 @@ class BlimpGuidance(C.Structure):
 class BlimpHold(C.Structure):
     """Mirrors blimp/blimp.h: blimp_hold_t — the bench hold's setpoints, in
     place of guidance's (docs/pid-tuning-plan.md C1-C4). Four bools (the
-    fourth, target_held, in what was padding until core 0.3.0), three
-    floats: 16 bytes. All-zero is a normal run."""
+    fourth, target_held, in what was padding until core 0.3.0), four
+    floats (altitude_rate_mps appended in core 0.4.0): 20 bytes. All-zero is
+    a normal run."""
 
     _fields_ = [
         ("active", C.c_bool),
@@ -296,6 +298,7 @@ class BlimpHold(C.Structure):
         ("heading_rad", C.c_float),
         ("altitude_m", C.c_float),
         ("surge_n", C.c_float),
+        ("altitude_rate_mps", C.c_float),
     ]
 
 
@@ -322,7 +325,7 @@ class BlimpInput(C.Structure):
 # ---------------------------------------------------------------------------
 _EXPECTED_LAYOUT = {
     "BlimpPidParams": (32, {"kp": 0, "ki": 4, "kd": 8, "i_min": 12, "i_max": 16, "out_min": 20, "out_max": 24, "d_lpf_hz": 28}),
-    "BlimpParams": (184, {"front_half_span_m": 0, "cam_dz_m": 4, "max_total_thrust_n": 8, "motor_max_thrust_n": 12, "heave_budget_n": 16, "hover_thrust_n": 20, "alt": 24, "yaw": 56, "surge": 88, "pitch_damp_kd": 120, "comp_alpha_attitude": 124, "comp_alpha_alt": 128, "mag_declination_rad": 132, "use_mag": 136, "gyro_bias_tau_s": 140, "wp_touch_radius_m": 144, "wp_approach_speed_ms": 148, "wp_align_tol_rad": 152, "touch_confirm_s": 156, "search_yaw_rate": 160, "miss_timeout_s": 164, "prepare_settle_s": 168, "link_timeout_s": 172, "max_altitude_m": 176, "front_deadband_n": 180}),
+    "BlimpParams": (188, {"front_half_span_m": 0, "cam_dz_m": 4, "max_total_thrust_n": 8, "motor_max_thrust_n": 12, "heave_budget_n": 16, "hover_thrust_n": 20, "alt": 24, "yaw": 56, "surge": 88, "pitch_damp_kd": 120, "comp_alpha_attitude": 124, "comp_alpha_alt": 128, "mag_declination_rad": 132, "use_mag": 136, "gyro_bias_tau_s": 140, "wp_touch_radius_m": 144, "wp_approach_speed_ms": 148, "wp_align_tol_rad": 152, "touch_confirm_s": 156, "search_yaw_rate": 160, "miss_timeout_s": 164, "prepare_settle_s": 168, "link_timeout_s": 172, "max_altitude_m": 176, "front_deadband_n": 180, "front_reverse_ratio": 184}),
     "BlimpState": (56, {"roll": 0, "pitch": 4, "yaw": 8, "gyro": 12, "accel": 24, "altitude": 36, "vz": 40, "yaw_rate": 44, "t_us": 48, "attitude_valid": 52, "altitude_valid": 53}),
     "BlimpImuSample": (56, {"gyro": 0, "accel": 12, "mag": 24, "baro_alt": 36, "range_alt": 40, "t_us": 44, "gyro_valid": 48, "accel_valid": 49, "mag_valid": 50, "baro_valid": 51, "range_valid": 52}),
     "BlimpWrench": (16, {"fx": 0, "fy": 4, "fz": 8, "tz": 12}),
@@ -330,8 +333,8 @@ _EXPECTED_LAYOUT = {
     "BlimpWaypoint": (12, {"x": 0, "y": 4, "z": 8}),
     "BlimpTargetObs": (32, {"bearing_rad": 0, "elevation_rad": 4, "range_m": 8, "confidence": 12, "hint_yaw_rad": 16, "alt_fix_m": 20, "visible": 24, "hint_valid": 25, "alt_fix_valid": 26, "t_us": 28}),
     "BlimpGuidance": (72, {"state": 0, "wp_index": 4, "wp_count": 8, "loop_index": 12, "loop_count": 16, "state_entry_us": 20, "run_start_us": 24, "last_seen_us": 28, "confirm_timer_s": 32, "search_dir": 36, "miss_count": 40, "timing_active": 44, "last_loop_time_s": 48, "best_loop_time_s": 52, "hint_reached": 56, "blind_climb_s": 60, "alt_err_known": 64, "last_alt_err": 68}),
-    "BlimpHold": (16, {"active": 0, "heading_held": 1, "altitude_held": 2, "target_held": 3, "heading_rad": 4, "altitude_m": 8, "surge_n": 12}),
-    "BlimpInput": (112, {"imu": 0, "target": 56, "contact_detected": 88, "arm_request": 89, "t_us": 92, "hold": 96}),
+    "BlimpHold": (20, {"active": 0, "heading_held": 1, "altitude_held": 2, "target_held": 3, "heading_rad": 4, "altitude_m": 8, "surge_n": 12, "altitude_rate_mps": 16}),
+    "BlimpInput": (116, {"imu": 0, "target": 56, "contact_detected": 88, "arm_request": 89, "t_us": 92, "hold": 96}),
 }
 
 

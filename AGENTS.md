@@ -28,8 +28,10 @@ CLAUDE.md, and others). Keep it tool-neutral; tool-specific notes belong in that
   measured 2026-10-30; `params.c` and the sim scene still say 0.10) (surge, and yaw by running one
   faster). Heave pair RL, RR: push along +z, on the same bar at +/-5.5 cm (heave; their
   difference is a static roll trim at most). No servos, no sideways force. The DRV8833s allow
-  reverse thrust, but `core/`'s mixer still assumes one-way motors; changing that is a core
-  change, never a firmware workaround.
+  reverse thrust; since core 0.4.0 (2026-11-01) `core/`'s mixer uses it on the front pair
+  when `front_reverse_ratio` > 0 (a turn as a couple, a negative surge as a brake), off by
+  default until flown. The rear pair stays up only. Reverse is `core/`'s to command, never a
+  firmware workaround.
 - Trimmed about 6 gf heavy, so motors off means a slow sink to the floor; that is the failsafe.
   Older docs that say it drifts upward are wrong.
 - Thrust: one motor measured 14.7-16.8 gf on a lab supply, reverse about 74 % of forward.
@@ -47,7 +49,8 @@ CLAUDE.md, and others). Keep it tool-neutral; tool-specific notes belong in that
   `docs/reuse_log.md`. Since 2026-10-30 it compiles `core/` as a component, the `param` console
   command (`main/cmd_param.c`) reads and sets `blimp_params_t` live, in RAM, and (branch
   `pid-tuning`, first run on the rope rig 2026-10-30) the task calls `blimp_step()` every tick
-  and drives the motors in the bench hold (`hold`, `software/hold_test.py`), through the motor
+  and drives the motors in the bench hold (`hold`, `software/hold_test.py`, and since 2026-11-01
+  `software/square_test.py`, the square's open-loop legs and turns on the spot), through the motor
   map (`motormap`); it also reads the forward camera's rows on UART1 (`cam`, namontoy's
   `target_cam` on the CAM) for `hold follow` (built 2026-10-30, not yet run) and relays them to the ground station as
   `LINK_PKT_CAMERA` (built 2026-11-01, run against `mock_blimp.py` only).

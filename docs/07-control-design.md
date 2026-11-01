@@ -195,8 +195,13 @@ Body frame: +x forward, +y left, +z up, yaw +CCW from above.
 | FR | front, −y | +x | surge, +yaw |
 | RL, RR | rear | +z | heave (up only) |
 
-Every motor is **unidirectional** (0 to `motor_max_thrust_n`). Consequences that shape every
-loop above the mixer:
+Every motor is **unidirectional** (0 to `motor_max_thrust_n`) at the default
+`front_reverse_ratio` of 0. Since core 0.4.0 (2026-11-01) a ratio r > 0 lets each FRONT motor
+push back down to -r·`motor_max_thrust_n`: a negative surge then brakes and yaw becomes a couple
+(T_fl = -T_fr, a pivot with no net surge while the reversed motor can give half the difference;
+`core/src/mixer.c`, docs/10 §5). The rear pair stays up only. The consequences below are the
+one-way default's, the first and the third lifted by reverse; they shape every loop above the
+mixer:
 
 - **No braking.** Drag is the only decelerator (e-fold distance ~3 m for the 0.78 m sphere),
   so the arrival speed at a balloon is set by how much surge is allowed on the way in

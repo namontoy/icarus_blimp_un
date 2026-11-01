@@ -1,9 +1,21 @@
-/* mixer.c - control allocation for four fixed, unidirectional motors.
+/* mixer.c - control allocation for four fixed motors, the front pair
+ * reversible when front_reverse_ratio > 0.
  * See blimp/mixer.h for the contract this implements.
  *
  * GEOMETRY (types.h): front pair pushes +x at lateral offsets +/-l_f, rear
  * pair pushes +z. The front pair is a 2-DOF sum/difference allocation; the
  * rear pair is a 1-DOF sum with an equal split.
+ *
+ * THE FRONT PAIR'S FEASIBLE SET. With surge s = T_fl + T_fr and difference
+ * d = T_fr - T_fl, each motor in [-r*M, M] (r = front_reverse_ratio, M =
+ * motor_max) and the pair's share B of the Rule 13 budget:
+ *     T_fl, T_fr >= -r*M      <=>  s >= |d| - 2*r*M
+ *     T_fl, T_fr <=  M        <=>  s <= 2*M - |d|
+ *     |T_fl| + |T_fr| <= B    <=>  |s| <= B and |d| <= B
+ * (|a| + |b| = max(|a + b|, |a - b|)). So |d| <= min((1 + r)*M, B), and s
+ * lies in [max(|d| - 2rM, -B), min(2M - |d|, B)]. At r = 0 that is the
+ * one-way mixer's [|d|, min(2M - |d|, B)] exactly: the same arithmetic,
+ * bit for bit, so the simulator flies as before.
  *
  * WHY THE PRIORITY ORDER IS HEAVE > YAW > SURGE:
  *   - Heave keeps the vehicle on the 2 m waypoint plane (Rule 22). A balloon
@@ -17,6 +29,14 @@
  * unidirectional pair that would shrink the yaw DIFFERENCE, which is the
  * quantity that actually turns the vehicle. Here the difference is
  * protected first and the common-mode (surge) absorbs every clamp.
+ *
+ * WHY REVERSE (2026-11-01): one-way, a turn is one motor pushing the nose
+ * round and then the other stopping it, and both push forward; on the
+ * envelope a 90 deg turn left the blimp coasting 2-3 m
+ * (docs/history/envelope-2026-10-31.md). With reverse, the same difference
+ * comes from one motor forward and one back: a couple with no net push.
+ * Reverse thrust counts against Rule 13 like forward thrust: the budget is
+ * on |T|, summed.
  */
 #include "blimp/mixer.h"
 
@@ -71,6 +91,7 @@ typedef struct {
     float motor_max;    /* > 0                                  */
     float heave_budget; /* 0 <= heave_budget <= max_total       */
     float deadband;     /* 0 <= deadband <= motor_max / 2       */
+    float reverse;      /* 0 <= reverse <= 1                    */
 } blimp_mixer_safe_params_t;
 
 static blimp_mixer_safe_params_t sanitize_params(const blimp_params_t *p)
@@ -101,6 +122,14 @@ static blimp_mixer_safe_params_t sanitize_params(const blimp_params_t *p)
                      ? p->front_deadband_n : BLIMP_MIXER_FALLBACK_DEADBAND_N;
     if (s.deadband > 0.5f * s.motor_max) {
         s.deadband = 0.5f * s.motor_max;
+    }
+
+    /* Anything unreadable is one-way: a corrupted ratio must never let a
+     * motor be asked for more reverse thrust than forward. */
+    s.reverse = (p && isfinite(p->front_reverse_ratio) && p->front_reverse_ratio > 0.0f)
+                    ? p->front_reverse_ratio : 0.0f;
+    if (s.reverse > 1.0f) {
+        s.reverse = 1.0f;
     }
     return s;
 }
@@ -157,17 +186,18 @@ void blimp_mixer_apply(const blimp_params_t *p,
     const float t_rr = 0.5f * heave;
 
     /* ---- Priority 3: front pair - yaw exact, surge takes what is left ---
-     * Required difference d = T_fr - T_fl = tz / l_f. Realising |d| with
-     * both motors >= 0 needs the higher motor at >= |d|, so |d| is bounded
-     * by the per-motor cap and by whatever Rule 13 budget the rear pair
-     * left. Within that, the pair sum s must satisfy
-     *     |d| <= s <= min(front_budget, 2*motor_max - |d|)
-     * (lower bound: lower motor >= 0; upper: higher motor <= motor_max and
-     * the pair within budget). Surge is clamped into that interval. */
+     * Required difference d = T_fr - T_fl = tz / l_f, bounded by what the
+     * pair can make, (1 + r) * motor_max (one motor full forward, the other
+     * full reverse; motor_max alone when one-way), and by whatever Rule 13
+     * budget the rear pair left. Within that, the pair sum s must satisfy
+     *     max(|d| - 2*rev_max, -front_budget) <= s
+     *         <= min(front_budget, 2*motor_max - |d|)
+     * (the header's feasible set). Surge is clamped into that interval. */
     float front_budget = sp.max_total - heave;
     if (front_budget < 0.0f) {
         front_budget = 0.0f;
     }
+    const float rev_max = sp.reverse * sp.motor_max;
 
     float d = clampf(tz / sp.l_f, -BLIMP_MIXER_DEMAND_ABS_MAX,
                      BLIMP_MIXER_DEMAND_ABS_MAX);
@@ -175,36 +205,46 @@ void blimp_mixer_apply(const blimp_params_t *p,
         d = 0.0f;
     }
     bool yaw_clipped = false;
-    const float d_max = fminf(sp.motor_max, front_budget);
+    const float d_max = fminf((1.0f + sp.reverse) * sp.motor_max, front_budget);
     if (fabsf(d) > d_max) {
         d = (d > 0.0f) ? d_max : -d_max;
         yaw_clipped = true;
     }
 
-    float surge = (fx > 0.0f) ? fx : 0.0f;   /* no reverse thrust exists */
-    if (surge < sp.deadband) {
+    /* One-way, a negative surge is zero: drag is the only brake. With
+     * reverse it is a brake, both motors pushing back. */
+    float surge = (sp.reverse > 0.0f) ? fx : ((fx > 0.0f) ? fx : 0.0f);
+    if (fabsf(surge) < sp.deadband) {
         surge = 0.0f;
     }
     bool surge_clipped = false;
-    const float s_min = fabsf(d);
+    const float s_min = fmaxf(fabsf(d) - 2.0f * rev_max, -front_budget);
     const float s_max = fminf(front_budget, 2.0f * sp.motor_max - fabsf(d));
     if (surge > s_max) {
         surge = s_max;
         surge_clipped = true;
     }
     if (surge < s_min) {
-        /* Yaw floor: the minimum surge that realises d exactly. Not a
-         * clamp on anything the caller asked for - it is the price of a
-         * unidirectional pair - so it does not raise clamped_total. */
+        /* Yaw floor: the minimum surge that realises d exactly, when the
+         * motor turning the other way cannot give the rest (one-way: it
+         * cannot give anything, and a pure yaw is a tight arc). Not a clamp
+         * on anything the caller asked for, so it does not raise
+         * clamped_total; a brake the caller did ask for and does not get,
+         * because yaw came first or reverse ran out, does. */
+        if (surge < 0.0f) {
+            surge_clipped = true;
+        }
         surge = s_min;
     }
 
     float t_fl = 0.5f * (surge - d);
     float t_fr = 0.5f * (surge + d);
     /* Belt-and-braces against float rounding; the interval algebra above
-     * guarantees 0 <= t <= motor_max analytically. */
-    t_fl = clampf(t_fl, 0.0f, sp.motor_max);
-    t_fr = clampf(t_fr, 0.0f, sp.motor_max);
+     * guarantees -rev_max <= t <= motor_max analytically. One-way, the
+     * floor is +0, as it always was. */
+    const float t_lo = (sp.reverse > 0.0f) ? -rev_max : 0.0f;
+    t_fl = clampf(t_fl, t_lo, sp.motor_max);
+    t_fr = clampf(t_fr, t_lo, sp.motor_max);
 
     out->thrust_fl     = t_fl;
     out->thrust_fr     = t_fr;

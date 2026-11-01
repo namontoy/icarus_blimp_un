@@ -66,11 +66,28 @@ python software/hold_test.py --steps 0 30 0 --go --max-duty 30 --deadband 10 --s
 ```
 
 `hold_test.py` keeps the link alive that the hold needs, steps the heading, kills the hold from
-the ground when the gyro passes `--max-rate`, and always ends with `hold off`; it saves the
-capture with overshoot, settling and the final error per step in its `.json`. `--surge` holds a
-constant forward push for the whole run, so both front motors keep turning and a yaw correction
-speeds one up and slows the other: on the rope rig that removed the limit cycle that one motor
-at a time produced (`docs/history/rig-2026-10-30.md`).
+the ground when the yaw rate passes `--max-rate` (roll and pitch have their own
+`--max-tilt-rate` since 2026-11-01: the gondola's harmless nodding tripped a single limit), and
+always ends with `hold off`; it saves the capture with overshoot, settling and the final error
+per step in its `.json`. `--surge` holds a constant forward push for the whole run, so both
+front motors keep turning and a yaw correction speeds one up and slows the other: on the rope
+rig that removed the limit cycle that one motor at a time produced
+(`docs/history/rig-2026-10-30.md`). A run that holds a height ends with a landing that `core/`
+flies itself (`hold altitude <m> <m/s>`, core 0.4.0): 0.1 m/s down to 0.30 m, 3 cm/s on toward
+the floor, the motors off at a ToF of 0.09 m, about 2 cm above where the gondola stands.
+
+The square and its calibration runs (2026-11-01) fly with `square_test.py`: a climb, then legs
+of a timed push, coast and brake (the brake a negative `hold surge`, which needs
+`param front_reverse_ratio` above 0) with turns on the spot between them, then the landing. The
+legs are open loop, since nothing on the blimp measures where it is; tape on the floor and a
+video measure them, laid out in the "Icarus Flight Room" page. `--legs 0` is the landing test,
+`--legs 1` the push, brake and leg runs:
+
+```
+python software/square_test.py --legs 1 --push 2 4 --coast 8                     # prints the plan; --go flies it
+python software/square_test.py --legs 4 --turn 90 --push 2 4 --coast 2 --brake 2 3 --go \
+    --param front_reverse_ratio=0.74 ...                                         # the square
+```
 
 The balloon follow (F0–F2 in the tuning plan) uses the same tool, after a check with the motors
 off:

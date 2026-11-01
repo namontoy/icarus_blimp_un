@@ -43,6 +43,11 @@ typedef struct {
     bool              follow_valid;
     float             follow_yaw_rad;
     uint32_t          follow_obs_us;
+    /* The bench hold's height setpoint as it moves toward
+     * blimp_hold_t.altitude_m at altitude_rate_mps (core 0.4.0). Cleared
+     * with the loops, and whenever no altitude is held. */
+    bool              hold_alt_valid;
+    float             hold_alt_sp_m;
 } blimp_t;
 
 /* Bench hold: setpoints commanded from the ground in place of guidance, for
@@ -80,7 +85,19 @@ typedef struct {
                             * latched at arming (blimp_estimator_zero)       */
     float altitude_m;      /* m above the floor, as the estimator reports it */
     float surge_n;         /* N, a constant forward thrust, clipped to
-                            * [0, surge.out_max]; 0 for the C tests          */
+                            * [-surge.out_max, surge.out_max]; negative is a
+                            * brake, made only with front_reverse_ratio > 0
+                            * (core 0.4.0); 0 for the C tests                */
+    float altitude_rate_mps; /* m/s (core 0.4.0, appended): above 0, the held
+                            * height moves toward altitude_m at this rate,
+                            * starting from where the vehicle is when the
+                            * hold takes the altitude up, and the loop's
+                            * damping acts on the error's rate rather than
+                            * on the climb rate, so a commanded descent is
+                            * followed, not resisted (on the envelope the
+                            * landing ramp trailed by 0.3 m, 2026-10-31).
+                            * 0, or anything not finite and positive: the
+                            * setpoint is altitude_m at once, as before.   */
 } blimp_hold_t;
 
 /* Inputs to one control tick. */

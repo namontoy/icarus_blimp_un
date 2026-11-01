@@ -73,10 +73,11 @@ esp_err_t motors_init(void);
  * 2026-10-30 a positive command pushed forward on FL and FR and up on RL
  * and RR, so every default sign is +1.
  *
- * The magnitude is mapped through the break-away deadband (see
- * motors_set_deadband). With the default deadband of 0 the magnitude is the
- * duty itself; with a measured one, 0.01 produces the smallest duty that
- * actually turns the prop rather than a duty that only heats the winding.
+ * The magnitude is mapped onto [deadband, ceiling] (see motors_set_deadband
+ * and motors_set_max_duty): with the defaults since 2026-11-01, 10 % and
+ * 40 %, 0.01 produces 10.3 % duty, the smallest that turns the prop rather
+ * than only heating the winding, and 1.0 produces 40 %. With a deadband of
+ * 0 and a ceiling of 100 % the magnitude is the duty itself.
  *
  * Rejects a non-finite throttle with ESP_ERR_INVALID_ARG rather than passing
  * a NaN through to the duty arithmetic - a NaN out of a controller must not
@@ -101,11 +102,12 @@ esp_err_t motors_set_decay(motor_decay_t mode);
 
 /**
  * Smallest duty, 0.0 to 0.9, that is assumed to break the prop away from
- * rest. Thrust commands are mapped onto [deadband, 1.0].
+ * rest. Thrust commands are mapped onto [deadband, ceiling].
  *
- * This is a per-motor physical property. The default is 0 (command = duty)
- * until it has been measured - measure it with 'motor --sweep' and set it
- * from the result.
+ * This is a per-motor physical property. The default is 0.10 (Kconfig
+ * MOTOR_DEADBAND_PERMILLE, since 2026-11-01; 0, command = duty, before):
+ * the team's bench value. Measure a motor's own with 'motor --sweep'. The
+ * thrust stand and the step tests need 0, with a ceiling of 1.0.
  */
 esp_err_t motors_set_deadband(float deadband);
 float motors_get_deadband(void);
@@ -113,9 +115,10 @@ float motors_get_deadband(void);
 /**
  * Duty ceiling, 0.1 to 1.0 and above the deadband: commands are mapped onto
  * [deadband, ceiling], so a command of 1.0 gives this duty and nothing gives
- * more (Kconfig MOTOR_MAX_DUTY_PERCENT, 100 by default; the team's limit is
- * 30 %). With a ceiling below 1, core/'s motor_max_thrust_n must be the
- * thrust at the ceiling, not at full duty.
+ * more (Kconfig MOTOR_MAX_DUTY_PERCENT: 40 by default since 2026-11-01, the
+ * team's limit, so a boot is already limited; 100 before). With a ceiling
+ * below 1, core/'s motor_max_thrust_n must be the thrust at the ceiling, not
+ * at full duty.
  */
 esp_err_t motors_set_max_duty(float max_duty);
 float motors_get_max_duty(void);

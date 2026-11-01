@@ -76,9 +76,9 @@ with it, open:
 - **The thrust chain is linear**: the hold turns `core/`'s newtons into throttle as
   T / `motor_max_thrust_n` and then the driver's [deadband, ceiling], against a measured F(u)
   that is close to quadratic. Over full duty, part duty delivers less than asked (about half at
-  mid duty with the 2026-10-28 curves); under the team's 30 % ceiling, with the 10 % deadband
-  and `motor_max_thrust_n` the thrust at the ceiling, the map is close to linear over the range
-  used. Safe for Rule 13 either way, a gain error for the loops; the per-motor thrust map (plan
+  mid duty with the 2026-10-28 curves); under the team's ceiling (30 % until 2026-10-31, 40 %
+  since, the firmware's boot default since 2026-11-01), with the 10 % deadband and
+  `motor_max_thrust_n` the thrust at the ceiling, the map is close to linear over the range used. Safe for Rule 13 either way, a gain error for the loops; the per-motor thrust map (plan
   P0, FL and FR at 30 % first) is the fix.
 
 **2026-10-30, the first hold on the rope rig gave no thrust at all.** The hold armed and tracked
@@ -385,6 +385,8 @@ real camera's field of view and the real camera stream.
 | `blimp.c` | Altitude damping uses the estimator's fused vertical rate, and only within 0.5 s of a fix - accel-only dead reckoning through a balloon collision was observed to be wrong by 0.7 m in 3 s. |
 | `guidance.c` | A stale altitude error is re-applied only DOWNWARD. Climbing on stale information is how a vehicle with no altitude sensor reaches the ceiling (observed: 7 m). |
 | `mixer.c` | 0.5 gf deadbands on yaw and surge. Without them the heading loop's noise floor kept one front motor creeping and walked the vehicle 0.5 m forward during PREPARE. |
+| `blimp.c` (core 0.4.0, 2026-11-01) | The bench hold's height can move: `blimp_hold_t.altitude_rate_mps` > 0 has `core/` move its setpoint toward `altitude_m` at that rate (from where the vehicle is when the hold takes the altitude up), and the altitude loop's derivative is then the setpoint's rate less vz, not -vz alone. Damping on -vz braked every commanded descent: the envelope's landing ramp, resent from the ground, trailed by 0.3 m and the last 0.4 m sped up. Rate 0 is the old step bit for bit, and guidance's path passes 0. |
+| `mixer.c` (core 0.4.0, 2026-11-01) | `front_reverse_ratio` > 0 lets the front pair push back: yaw becomes a couple (no net surge while the reversed motor can give half the difference) and a negative surge brakes. A front thrust can then be negative, so Rule 13 counts magnitudes: sum of \|T\| <= 100 gf, swept one-way and reversible in `test_mixer.c`. The default is 0, the one-way mixer bit for bit, so the simulator's tables still stand; the bench sets the ratio with `param`. The S3 turns a reverse thrust into T / (ratio x `motor_max_thrust_n`), so the ratio is also that conversion: a wrong one gives a turn a net push, forward or back. |
 | `blimp.c` | FAILSAFE has hysteresis (0.5 m below the ceiling to clear) and guidance resumes the run autonomously once clear - Rule 7 forbids human intervention. |
 | `build_scene.py` | MuJoCo's default angular drag coefficient (1.5) on a sphere is ~200x the physical value; it made every scan cost 3 gf of continuous differential thrust. Set to 0.05. Contacts softened (solref 0.06 s) - the default made a latex envelope meeting a mylar balloon launch the vehicle upward at 2 m/s. |
 | `sim/blimp_ffi.py` | The layout table is regenerated from a compiler probe on every header change; the import-time check compares against the DLL. |

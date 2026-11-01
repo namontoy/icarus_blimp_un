@@ -29,7 +29,12 @@
  * only. Descent is the small negative buoyancy the vehicle is deliberately
  * trimmed with (Rule 11 allows +/-10 gf). Yaw always comes with some surge,
  * because the only way to turn is to run one front motor harder than the
- * other and neither can go below zero. */
+ * other and neither can go below zero.
+ *
+ * SINCE 2026-10-09 the board is the ESP32-S3-Zero with two DRV8833 H-bridges,
+ * so every motor can turn either way. core 0.4.0 lets the mixer use that on
+ * the FRONT pair (params.h, front_reverse_ratio; off by default): -x for a
+ * brake, and yaw as a couple without surge. The rear pair stays up only. */
 
 /* M_PI is NOT standard C11 - it is a POSIX/MSVC extension gated behind
  * _USE_MATH_DEFINES. core/ must build clean under -std=c11 on both the host
@@ -82,10 +87,12 @@ typedef struct {
 } blimp_wrench_t;
 
 /* What the mixer emits; what the actuator drivers consume.
- * Every thrust is >= 0 by construction (mixer.h). */
+ * The rear pair's thrusts are >= 0 by construction; the front pair's are too
+ * unless front_reverse_ratio > 0, and then a negative one is that much thrust
+ * pushing -x (mixer.h). */
 typedef struct {
-    float thrust_fl;      /* N, front-left  motor, pushes +x               */
-    float thrust_fr;      /* N, front-right motor, pushes +x               */
+    float thrust_fl;      /* N, front-left  motor, pushes +x (-x if < 0)   */
+    float thrust_fr;      /* N, front-right motor, pushes +x (-x if < 0)   */
     float thrust_rl;      /* N, rear-left   motor, pushes +z               */
     float thrust_rr;      /* N, rear-right  motor, pushes +z               */
     bool  clamped_total;  /* Rule 13 total-thrust clamp engaged            */

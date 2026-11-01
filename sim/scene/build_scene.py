@@ -154,8 +154,9 @@ class SceneParams:
     envelope_diameter: float = 0.78     # m (-> ~0.25 m^3, this task's default)
     added_mass_coeff: float = 0.5       # k; 0.5 = sphere (Lamb). ~0.11 axial
                                         # for a 3:1 prolate ellipsoid.
-    # Motors: four FIXED brushed motors, unidirectional (core/include/blimp/types.h).
-    # Front pair pushes +x (surge, differential = yaw); rear pair pushes +z (heave).
+    # Motors: four FIXED brushed motors (core/include/blimp/types.h). Front pair
+    # pushes +x (surge, differential = yaw), or -x when core/'s
+    # front_reverse_ratio > 0 (core 0.4.0); rear pair pushes +z (heave), up only.
     # All positions are relative to the envelope centre, in the body frame.
     front_half_span: float = 0.10       # m, front motors' lateral offset (l_f in params.c)
     front_x: float = 0.05               # m, front motors ahead of the envelope centre
@@ -402,8 +403,10 @@ def _vehicle_xml(p: SceneParams, start_xy: Tuple[float, float], yaw: float,
     a sphere rolling onto its side.
 
     Motors are sites on the gondola body: front pair force along the site's
-    +x, rear pair along +z, all with ctrlrange [0, motor_max]. Rule 13's
-    100 gf TOTAL is the C mixer's job; the scene only caps each motor."""
+    +x with ctrlrange [-motor_max, motor_max] (reverse, core 0.4.0: how far a
+    motor reverses is front_reverse_ratio, so the C mixer's floor, not the
+    scene's), rear pair along +z with [0, motor_max]. Rule 13's 100 gf TOTAL
+    is the C mixer's job; the scene only caps each motor."""
     r_env = p.envelope_radius()
     gondola_z = -(r_env + 0.03)
     m_total = p.vehicle_total_mass()             # (1+k) inflated
@@ -556,9 +559,9 @@ def build_xml(p: SceneParams) -> str:
 
   <actuator>
     <general name="motor_fl" site="motor_fl_site" gear="1 0 0 0 0 0"
-             ctrlrange="0 {motor_max_n:.6f}" gaintype="fixed" gainprm="1 0 0"/>
+             ctrlrange="-{motor_max_n:.6f} {motor_max_n:.6f}" gaintype="fixed" gainprm="1 0 0"/>
     <general name="motor_fr" site="motor_fr_site" gear="1 0 0 0 0 0"
-             ctrlrange="0 {motor_max_n:.6f}" gaintype="fixed" gainprm="1 0 0"/>
+             ctrlrange="-{motor_max_n:.6f} {motor_max_n:.6f}" gaintype="fixed" gainprm="1 0 0"/>
     <general name="motor_rl" site="motor_rl_site" gear="0 0 1 0 0 0"
              ctrlrange="0 {motor_max_n:.6f}" gaintype="fixed" gainprm="1 0 0"/>
     <general name="motor_rr" site="motor_rr_site" gear="0 0 1 0 0 0"

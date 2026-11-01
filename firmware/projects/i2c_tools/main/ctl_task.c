@@ -125,6 +125,8 @@ typedef struct {
     float             follow_yaw;       /* rad, where the target was last seen */
     bool              tgt_visible;      /* this tick's camera row, as handed in */
     float             tgt_bearing;      /* rad, core/'s sign                   */
+    bool              alt_sp_valid;     /* core/'s moving height setpoint ...   */
+    float             alt_sp;           /* ... m, where it is this tick        */
 } hold_snap_t;
 
 /* esp_psram_* only links with CONFIG_SPIRAM; a build without it (the
@@ -456,18 +458,40 @@ static void mixer(const ctrl_out_t *out, motor_cmd_t *cmd)
  * pid-bench-2026-10-28) a part duty gives less thrust than core/ asked for:
  * the loop under-delivers, never over. A per-motor curve is the thrust map's
  * job (docs/pid-tuning-plan.md, P0). The driver then maps (0, 1] onto
- * [deadband, 1]. One-way, as core/'s mixer is: every thrust is >= 0.
+ * [deadband, 1], and [-1, 0) the same way backwards.
+ *
+ * Reverse (core 0.4.0): with front_reverse_ratio > 0 core/'s mixer may give
+ * a FRONT position a negative thrust, at most ratio x motor_max_thrust_n.
+ * That divides by the thrust a full reverse command gives, the same ratio x
+ * motor_max_thrust_n, so -1 is the motor's full reverse and a reverse thrust
+ * gets a larger command than the same thrust forward: the propeller pushes
+ * less backwards. The driver's soft start lets the motor coast before it
+ * turns the other way (motor_ramp.c). The rear pair is up only: anything
+ * negative there is zero, as every thrust was before.
  */
 static void saturate(motor_cmd_t *cmd)
 {
-    const float tmax = s.b.params.motor_max_thrust_n;
+    const float tmax  = s.b.params.motor_max_thrust_n;
+    const float ratio = s.b.params.front_reverse_ratio;
+    const float rmax  = (ratio > 0.0f && ratio <= 1.0f) ? ratio * tmax : 0.0f;
     cmd->clamped_mask = 0;
-    for (int m = 0; m < MOTOR_COUNT; m++) {
-        float u = (tmax > 0.0f) ? cmd->thrust_n[m] / tmax : 0.0f;
-        if (!(u > 0.0f)) {
-            u = 0.0f;                   /* also NaN */
-        } else if (u >= 1.0f) {
+    for (int p = 0; p < MOTOR_COUNT; p++) {
+        /* By position, since only the front positions reverse; the motor
+           map cannot change while the loop holds the motors. */
+        const int m = (int)motor_at_position((motor_id_t)p);
+        const bool front = (p == MOTOR_FL || p == MOTOR_FR);
+        const float t = cmd->thrust_n[m];
+        float u = 0.0f;                 /* also NaN, and a negative rear */
+        if (t > 0.0f && tmax > 0.0f) {
+            u = t / tmax;
+        } else if (front && t < 0.0f && rmax > 0.0f) {
+            u = t / rmax;
+        }
+        if (u >= 1.0f) {
             u = 1.0f;
+            cmd->clamped_mask |= (uint8_t)(1u << m);
+        } else if (u <= -1.0f) {
+            u = -1.0f;
             cmd->clamped_mask |= (uint8_t)(1u << m);
         }
         cmd->throttle[m] = u;
@@ -548,6 +572,8 @@ static void snapshot(void)
     n.follow_yaw   = s.b.follow_yaw_rad;
     n.tgt_visible  = s.est.tgt_visible;
     n.tgt_bearing  = s.est.tgt_bearing_rad;
+    n.alt_sp_valid = s.b.hold_alt_valid;
+    n.alt_sp       = s.b.hold_alt_sp_m;
     portENTER_CRITICAL(&s.mux);
     s.snap = n;
     portEXIT_CRITICAL(&s.mux);
@@ -983,8 +1009,14 @@ static int do_ctl_cmd(int argc, char **argv)
  * core/'s link watchdog zeroes the hold after link_timeout_s of silence, so
  * the hold runs only while something on the ground keeps the link alive.
  */
-#define HOLD_ALT_MIN_M      0.2f
+/* Down to the floor: the ToF reads about 0.07 m with the gondola standing
+   on it (2026-10-31), and a landing that ends at 0.2 m dropped the last
+   0.13 m. 0.2 until 2026-11-01. */
+#define HOLD_ALT_MIN_M      0.05f
 #define HOLD_ALT_MAX_M      3.0f
+/* 'hold altitude <m> <m/s>': the rate core/ moves the height at (core
+   0.4.0's altitude_rate_mps); 0 or none is a step. */
+#define HOLD_ALT_RATE_MAX   0.5f
 #define HOLD_SURGE_MAX_GF   30.0f
 #define HOLD_LINK_FRESH_MS  500u
 #define HOLD_CAM_FRESH_MS   500u
@@ -1043,6 +1075,9 @@ static void print_hold(void)
            n.altitude_valid ? "ToF" : "no source");
     if (h.altitude_held) {
         printf("; held at %.2f m", (double)h.altitude_m);
+        if (h.altitude_rate_mps > 0.0f && n.alt_sp_valid) {
+            printf(", moving at %.2f m/s, now at %.2f m", (double)h.altitude_rate_mps, (double)n.alt_sp);
+        }
     } else {
         printf("; not held");
     }
@@ -1067,12 +1102,16 @@ static int hold_usage(void)
 {
     printf("hold                     the state of the bench hold\n"
            "hold heading <deg>|off   hold a heading, + counter-clockwise from above, from the nose at arming\n"
-           "hold altitude <m>|off    hold a height above the floor (ToF), %.1f to %.1f m\n"
-           "hold surge <gf>|off      a constant forward push, 0 to %.0f gf\n"
+           "hold altitude <m>|off    hold a height above the floor (ToF), %.2f to %.1f m\n"
+           "hold altitude <m> <m/s>  move the held height there at this rate, up to %.1f m/s\n"
+           "                         (a climb or a landing; 0 or none jumps there at once)\n"
+           "hold surge <gf>|off      a constant push, -%.0f to %.0f gf; negative brakes, with\n"
+           "                         param front_reverse_ratio above 0 (else it is nothing)\n"
            "hold follow [off]        turn toward the forward camera's target (overrides heading)\n"
            "hold off                 end it: the motors coast and go back to the link and the console\n"
            "hold kill                coast now and latch KILLED, like a STOP from the link\n",
-           (double)HOLD_ALT_MIN_M, (double)HOLD_ALT_MAX_M, (double)HOLD_SURGE_MAX_GF);
+           (double)HOLD_ALT_MIN_M, (double)HOLD_ALT_MAX_M, (double)HOLD_ALT_RATE_MAX,
+           (double)HOLD_SURGE_MAX_GF, (double)HOLD_SURGE_MAX_GF);
     return 1;
 }
 
@@ -1100,13 +1139,31 @@ static int do_hold_cmd(int argc, char **argv)
         printf("all motors coasting%s\n", motors_loop_owns() ? "; the hold is KILLED until 'hold off'" : "");
         return 0;
     }
-    /* 'hold follow' takes no value ('hold follow off' ends it); the rest take one. */
+    /* 'hold follow' takes no value ('hold follow off' ends it); the rest take
+       one, and 'hold altitude' a rate after it as well. */
     const bool follow = strcasecmp(what, "follow") == 0;
-    if (follow ? (argc > 3) : (argc != 3)) {
+    const bool altitude = strcasecmp(what, "altitude") == 0;
+    if (follow ? (argc > 3) : altitude ? (argc != 3 && argc != 4) : (argc != 3)) {
         return hold_usage();
     }
+    float rate = 0.0f;
+    if (argc == 4) {
+        char *end = NULL;
+        rate = strtof(argv[3], &end);
+        if (end == argv[3] || *end != '\0' || !isfinite(rate)) {
+            printf("'%s' is not a number\n", argv[3]);
+            return 1;
+        }
+        if (rate < 0.0f || rate > HOLD_ALT_RATE_MAX) {
+            printf("refused: a height rate of %.2f m/s is outside 0..%.1f m/s\n", (double)rate,
+                   (double)HOLD_ALT_RATE_MAX);
+            return 1;
+        }
+    }
 
-    const char *val = argc == 3 ? argv[2] : "on";
+    /* The value is the third word whenever there is one: 'hold altitude <m>
+       <m/s>' has four (argc 4 passes the check above for altitude only). */
+    const char *val = argc >= 3 ? argv[2] : "on";
     const bool off = strcasecmp(val, "off") == 0;
     if (follow && !off && strcasecmp(val, "on") != 0) {
         return hold_usage();
@@ -1138,17 +1195,21 @@ static int do_hold_cmd(int argc, char **argv)
     if (strcasecmp(what, "heading") == 0) {
         req.heading_held = !off;
         req.heading_rad  = v / HOLD_RAD_DEG;
-    } else if (strcasecmp(what, "altitude") == 0) {
+    } else if (altitude) {
         if (!off && (v < HOLD_ALT_MIN_M || v > HOLD_ALT_MAX_M)) {
-            printf("refused: altitude %.2f m is outside %.1f..%.1f m\n", (double)v,
+            printf("refused: altitude %.2f m is outside %.2f..%.1f m\n", (double)v,
                    (double)HOLD_ALT_MIN_M, (double)HOLD_ALT_MAX_M);
             return 1;
         }
-        req.altitude_held = !off;
-        req.altitude_m    = v;
+        req.altitude_held     = !off;
+        req.altitude_m        = v;
+        req.altitude_rate_mps = off ? 0.0f : rate;
     } else if (strcasecmp(what, "surge") == 0) {
-        if (!off && (v < 0.0f || v > HOLD_SURGE_MAX_GF)) {
-            printf("refused: surge %.1f gf is outside 0..%.0f gf\n", (double)v, (double)HOLD_SURGE_MAX_GF);
+        /* Negative is a brake (core 0.4.0); core/ makes it only when
+           front_reverse_ratio > 0, and one-way it is nothing, as before. */
+        if (!off && (v < -HOLD_SURGE_MAX_GF || v > HOLD_SURGE_MAX_GF)) {
+            printf("refused: surge %.1f gf is outside -%.0f..%.0f gf\n", (double)v,
+                   (double)HOLD_SURGE_MAX_GF, (double)HOLD_SURGE_MAX_GF);
             return 1;
         }
         req.surge_n = off ? 0.0f : v * HOLD_GF_N;

@@ -25,6 +25,8 @@
  * ALIGN cannot pivot in place either: the mixer realises a yaw demand with
  * the minimum surge that keeps both front motors non-negative, so ALIGN is a
  * tight arc, not a spin. Every state here is written with that in mind.
+ * (core 0.4.0: with front_reverse_ratio > 0 the mixer turns on a couple, so
+ * ALIGN does pivot; guidance itself still never asks for a brake.)
  *
  * ALTITUDE WITHOUT AN ALTITUDE SENSOR: the confirmed PCB carries only an
  * MPU-6050. When the estimator has no altitude source, guidance derives the

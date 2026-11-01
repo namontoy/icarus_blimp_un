@@ -20,10 +20,14 @@ from above, the thread is a floor: the vehicle cannot sink below where it
 hangs, so put every step above that height.
 
 Whenever a height is held, the run ends with a landing (--no-land skips
-it): the setpoint ramps down at --land-rate to 0.2 m, the lowest 'hold
-altitude' takes, and the motors stop once the ToF reads it there, so the
-vehicle drops its last ~0.13 m instead of falling from the last step on its
-trim (4.8 g heavy reached the floor at about 0.5 m/s from 1 m, 2026-10-31).
+it; land() and LAND_SLOW_M below): core/ moves the height down at
+--land-rate to 0.30 m and at --final-rate on toward the floor, following
+the descent instead of damping it (core 0.4.0), and the motors stop once
+the ToF reads 0.09 m, about 2 cm above where the gondola stands. Without a
+landing a 4.8 g heavy vehicle fell from 1 m and reached the floor at about
+0.5 m/s (2026-10-31); the first landing, the setpoint stepped from here down
+to 0.2 m, still dropped the last 0.13 m. --climb-rate approaches the first
+height the same way instead of stepping to it.
 
 --follow runs 'hold follow' instead of the steps: core/ turns the gondola
 toward the forward camera's balloon (each new sighting sets the heading to
@@ -44,8 +48,11 @@ it starts (its heartbeats are what core/'s link watchdog needs: the hold
 drops to zero thrust within link_timeout_s, 1 s, if this tool dies).
 
 Safety, in layers: --max-rate (default 120 deg/s) kills the hold from here
-the moment the gyro in the 50 Hz SENSORS stream exceeds it, which is what a
-sign error or too much gain looks like on a tether; the end of the schedule,
+the moment the yaw rate in the 50 Hz SENSORS stream exceeds it, which is what
+a sign error or too much gain looks like on a tether, and --max-tilt-rate
+(default 120 deg/s) does the same for roll and pitch (a collision); the two
+are apart since the gondola's harmless 2 Hz nodding tripped a single 62 deg/s
+limit on two flights (make_kills()); the end of the schedule,
 Ctrl-C and any error send 'hold off', and MOTOR_STOP three times if the
 console does not answer (a STOP kills the hold on the blimp: KILLED until
 'hold off'); core/'s own limits (yaw.out_min/out_max, Rule 13) bound the
@@ -69,8 +76,24 @@ LEAD_S = 2.0          # zero-thrust baseline in the capture before the hold arms
 # it can be a tick off the blimp's: one record of the next setpoint inside it
 # read as a 30 deg overshoot (2026-10-31, T2). Trimmed at both ends.
 EDGE_S = 0.1
-LAND_ALT_M = 0.2      # the landing's last setpoint: HOLD_ALT_MIN_M in ctl_task.c
-LAND_WAIT_S = 4.0     # at that setpoint before the motors stop, if the ToF never reads it
+# The landing (2026-11-01). core/ moves the height itself ('hold altitude <m>
+# <m/s>', core 0.4.0), damping the error's rate, so the vehicle follows the
+# descent; the setpoint resent from here every 0.25 s, with the damping on the
+# climb rate, trailed by 0.3 m and the last 0.4 m sped up (150723). Down at
+# --land-rate to LAND_SLOW_M, then at --final-rate toward the floor, and the
+# motors stop once the ToF reads LAND_CUT_M, about 2 cm above where the
+# gondola stands: it settles those on its trim instead of dropping 0.13 m.
+LAND_SLOW_M = 0.30    # where the slow final approach begins
+LAND_FLOOR_M = 0.07   # the ToF with the gondola standing on the floor (2026-10-31)
+LAND_CUT_M = 0.09     # motors off at or below this ToF reading
+LAND_WAIT_S = 4.0     # after the final ramp, if the ToF never reads LAND_CUT_M
+
+
+def landing_time(sp0, land_rate, final_rate):
+    """Seconds a landing from sp0 m takes at most."""
+    fast = max(0.0, sp0 - LAND_SLOW_M) / land_rate
+    slow = (min(sp0, LAND_SLOW_M) - LAND_FLOOR_M) / final_rate
+    return fast + max(0.0, slow) + LAND_WAIT_S
 
 
 def landing_s(args):
@@ -78,7 +101,83 @@ def landing_s(args):
     sp0 = args.steps[-1] if args.altitude else args.hold_alt
     if sp0 is None or not args.land:
         return 0.0
-    return max(0.0, sp0 - LAND_ALT_M) / args.land_rate + LAND_WAIT_S
+    return landing_time(sp0, args.land_rate, args.final_rate)
+
+
+def make_kills(link, max_yaw_dps, max_tilt_dps, max_alt_m=None):
+    """The kills on the 50 Hz SENSORS stream: tripped() gives the reason or
+    None, and peak holds the largest yaw and tilt rates seen, deg/s. The
+    stream's gyro is in the chip's axes, and the chip's z is the body's up
+    (CONFIG_CTL_IMU_AXES "-Y +X +Z"), so yaw is z and roll and pitch are x and
+    y. Split since 2026-11-01: a yaw rate is what a sign error or too much gain
+    looks like, but the gondola also nods at about 2 Hz on its clip, and that
+    pitch tripped a 62 deg/s kill on two flights that were holding (154445,
+    171718)."""
+    peak = {'yaw': 0.0, 'tilt': 0.0}
+
+    def tripped():
+        s = link.sensors
+        if s and s['imu_valid']:
+            gx, gy, gz = s['gyro']
+            yaw, tilt = abs(gz), max(abs(gx), abs(gy))
+            peak['yaw'] = max(peak['yaw'], yaw)
+            peak['tilt'] = max(peak['tilt'], tilt)
+            if yaw > max_yaw_dps:
+                return 'yaw %.0f deg/s over --max-rate %.0f' % (yaw, max_yaw_dps)
+            if tilt > max_tilt_dps:
+                return 'roll/pitch %.0f deg/s over --max-tilt-rate %.0f' % (tilt, max_tilt_dps)
+        if (max_alt_m is not None and s and s['tof_valid'] and s['tof_status'] == 0
+                and s['tof_mm'] / 1000.0 > max_alt_m):
+            return 'ToF %.2f m over --max-alt %.2f' % (s['tof_mm'] / 1000.0, max_alt_m)
+        return None
+    return tripped, peak
+
+
+def land(con, link, sp0, land_rate, final_rate, tripped, log, clock, poll_s=1.0):
+    """The landing from a held sp0 m (see LAND_SLOW_M): two 'hold altitude'
+    moves, the kills watched, a status line every poll_s. Returns True when it
+    ended on a kill (hold killed here), False when it landed or timed out;
+    the caller's 'hold off' stops the motors either way. clock() is the
+    caller's run time, for the log."""
+    t_land = time.monotonic()
+    fast_s = max(0.0, sp0 - LAND_SLOW_M) / land_rate
+    end_s = landing_time(sp0, land_rate, final_rate)
+    phase = 0
+    next_poll = 0.0
+    log('%6.1f s  landing from %.2f m: %sto the floor at %.2f m/s, motors off at a ToF of %.2f m'
+        % (clock(), sp0, ('to %.2f m at %.2f m/s, then ' % (LAND_SLOW_M, land_rate)) if sp0 > LAND_SLOW_M else '',
+           final_rate, LAND_CUT_M))
+    while True:
+        now = time.monotonic()
+        el = now - t_land
+        want = 1 if (sp0 > LAND_SLOW_M and el < fast_s) else 2
+        if want != phase:
+            phase = want
+            cmd = ('hold altitude %.2f %.3f' % (LAND_SLOW_M, land_rate) if phase == 1 else
+                   'hold altitude %.2f %.3f' % (LAND_FLOOR_M, final_rate))
+            reply = console(con, cmd)
+            log('%6.1f s  %s: %s' % (clock(), cmd, reply.strip().splitlines()[-1] if reply.strip() else '?'))
+            if 'refused' in reply or 'not a number' in reply:
+                log('%6.1f s  the landing was refused: motors off here' % clock())
+                return False
+        why = tripped()
+        if why:
+            console(con, 'hold kill')
+            log('%6.1f s  KILLED: %s' % (clock(), why))
+            return True
+        s = link.sensors
+        tof = s['tof_mm'] / 1000.0 if s and s['tof_valid'] and s['tof_status'] == 0 else None
+        if tof is not None and tof <= LAND_CUT_M:
+            log('%6.1f s  landed: ToF %.2f m, motors off' % (clock(), tof))
+            return False
+        if el >= end_s:
+            log('%6.1f s  landing timed out: ToF %s, motors off' % (
+                clock(), '%.2f m' % tof if tof is not None else 'not reading'))
+            return False
+        if now >= next_poll:
+            log('%6.1f s  %s' % (clock(), hold_line(console(con, 'hold'))))
+            next_poll = now + poll_s
+        time.sleep(0.02)
 
 
 def plan(steps, dwell, follow=False):
@@ -104,7 +203,8 @@ def hold_line(text):
     o = re.search(r'throttle FL ([\d.]+) RL ([\d.]+) FR ([\d.]+) RR ([\d.]+)', text)
     f = re.search(r'FOLLOWING the target, last seen at ([-+\d.]+) deg, error ([-+\d.]+) deg', text)
     cam = re.search(r'camera: target at bearing ([-+\d.]+) deg', text)
-    alt = re.search(r'altitude: estimate ([-+\d.]+) m \(([^)]*)\)(?:; held at ([-+\d.]+) m)?', text)
+    alt = re.search(r'altitude: estimate ([-+\d.]+) m \(([^)]*)\)(?:; held at ([-+\d.]+) m'
+                    r'(?:, moving at [\d.]+ m/s, now at ([-+\d.]+) m)?)?', text)
     mode = re.search(r'mode (\w+)', text)
     parts = [mode.group(1) if mode else '?']
     if m:
@@ -112,9 +212,10 @@ def hold_line(text):
         if m.group(3):
             parts.append('sp %+6.1f  err %+6.1f' % (float(m.group(3)), float(m.group(4))))
     if alt and alt.group(3):
-        h, sp = float(alt.group(1)), float(alt.group(3))
-        parts.append('alt %5.2f  sp %5.2f  err %+5.2f%s' % (h, sp, sp - h,
-                                                          '' if alt.group(2) == 'ToF' else ' (no ToF)'))
+        # a moving setpoint (core 0.4.0): the error is against where it is now
+        h, sp = float(alt.group(1)), float(alt.group(4) or alt.group(3))
+        parts.append('alt %5.2f  sp %5.2f%s  err %+5.2f%s' % (h, sp, '>' if alt.group(4) else ' ', sp - h,
+                                                            '' if alt.group(2) == 'ToF' else ' (no ToF)'))
     if f:
         parts.append('seen at %+6.1f  err %+6.1f' % (float(f.group(1)), float(f.group(2))))
     elif 'FOLLOWING, nothing seen yet' in text:
@@ -231,9 +332,13 @@ def run(args):
             print('  %6.1f .. %6.1f s  heading %+6.1f deg' % (t0, t1, h))
         if args.hold_alt is not None:
             print('altitude held throughout at %.2f m, kill above %.2f m' % (args.hold_alt, args.max_alt))
+    if args.climb_rate:
+        print('the first height is approached at %.2f m/s' % args.climb_rate)
     if landing_s(args):
-        print('then a landing: %.2f m/s down to %.2f m, motors off there (about %.0f s)'
-              % (args.land_rate, LAND_ALT_M, landing_s(args)))
+        print('then a landing: %.2f m/s down to %.2f m, %.2f m/s to the floor, motors off at a ToF of %.2f m '
+              '(at most %.0f s)' % (args.land_rate, LAND_SLOW_M, args.final_rate, LAND_CUT_M, landing_s(args)))
+    print('kills: yaw over %.0f deg/s, roll or pitch over %.0f deg/s%s'
+          % (args.max_rate, args.max_tilt_rate, ', ToF over %.2f m' % args.max_alt if alt_held else ''))
     if args.param:
         print('param before the start: %s' % ' '.join(args.param))
     if args.deadband is not None:
@@ -306,19 +411,7 @@ def run(args):
 
         k = -1
         next_poll = 0.0
-        max_seen = [0.0]
-
-        def tripped():
-            """The kills on the 50 Hz SENSORS stream: the reason, or None."""
-            s = link.sensors
-            if s and s['imu_valid']:
-                rate = max(abs(g) for g in s['gyro'])
-                max_seen[0] = max(max_seen[0], rate)
-                if rate > args.max_rate:
-                    return '|gyro| %.0f deg/s over --max-rate %.0f' % (rate, args.max_rate)
-            if alt_held and s and s['tof_valid'] and s['tof_status'] == 0 and s['tof_mm'] / 1000.0 > args.max_alt:
-                return 'ToF %.2f m over --max-alt %.2f' % (s['tof_mm'] / 1000.0, args.max_alt)
-            return None
+        tripped, peak = make_kills(link, args.max_rate, args.max_tilt_rate, args.max_alt if alt_held else None)
 
         while True:
             now = time.monotonic()
@@ -330,6 +423,8 @@ def run(args):
                 k = want
                 cmd = ('hold follow' if marks[k][2] is None else
                        'hold %s %g' % ('altitude' if args.altitude else 'heading', marks[k][2]))
+                if k == 0 and args.altitude and args.climb_rate:
+                    cmd += ' %g' % args.climb_rate
                 reply = console(con, cmd)
                 if t_hold is None:
                     t_hold = time.monotonic()
@@ -344,9 +439,9 @@ def run(args):
                     if 'refused' in reply:
                         sys.exit('the firmware refused the heading:\n' + reply)
                 if k == 0 and args.hold_alt is not None:
-                    reply = console(con, 'hold altitude %g' % args.hold_alt)
-                    log('%6.1f s  hold altitude %g: %s' % (time.monotonic() - t_hold, args.hold_alt,
-                                                          reply.strip().splitlines()[-1]))
+                    acmd = 'hold altitude %g' % args.hold_alt + (' %g' % args.climb_rate if args.climb_rate else '')
+                    reply = console(con, acmd)
+                    log('%6.1f s  %s: %s' % (time.monotonic() - t_hold, acmd, reply.strip().splitlines()[-1]))
                     if 'refused' in reply:
                         sys.exit('the firmware refused the altitude:\n' + reply)
                 if k == 0 and args.surge:
@@ -366,41 +461,13 @@ def run(args):
                 next_poll = now + args.poll
             time.sleep(0.02)
 
-        # the landing: the height setpoint ramps down to LAND_ALT_M, and the
-        # motors stop once the ToF reads it there (or LAND_WAIT_S after the
-        # ramp ends), so the vehicle is not dropped from the last step
+        # the landing (land(), LAND_SLOW_M above): core/ moves the height to
+        # the floor, and the motors stop about 2 cm above it
         if started and not killed and landing_s(args):
             sp0 = args.steps[-1] if args.altitude else args.hold_alt
-            ramp_s = max(0.0, sp0 - LAND_ALT_M) / args.land_rate
-            t_land = time.monotonic()
-            next_cmd = 0.0
-            log('%6.1f s  landing: %.2f m down to %.2f m at %.2f m/s'
-                % (t_land - t_hold, sp0, LAND_ALT_M, args.land_rate))
-            while True:
-                now = time.monotonic()
-                el = now - t_hold
-                if now >= next_cmd:
-                    sp = max(LAND_ALT_M, sp0 - args.land_rate * (now - t_land))
-                    console(con, 'hold altitude %.2f' % sp)
-                    next_cmd = now + 0.25
-                why = tripped()
-                if why:
-                    killed = True
-                    console(con, 'hold kill')
-                    log('%6.1f s  KILLED: %s' % (el, why))
-                    break
-                s = link.sensors
-                low = (s and s['tof_valid'] and s['tof_status'] == 0
-                       and s['tof_mm'] / 1000.0 <= LAND_ALT_M + 0.03)
-                if now - t_land >= ramp_s and (low or now - t_land >= ramp_s + LAND_WAIT_S):
-                    log('%6.1f s  landed: ToF %s, motors off' % (
-                        el, '%.2f m' % (s['tof_mm'] / 1000.0) if s and s['tof_valid'] else 'not reading'))
-                    break
-                if now >= next_poll:
-                    log('%6.1f s  %s' % (el, hold_line(console(con, 'hold'))))
-                    next_poll = now + args.poll
-                time.sleep(0.02)
-        log('peak |gyro| seen from here: %.0f deg/s' % max_seen[0])
+            killed = land(con, link, sp0, args.land_rate, args.final_rate, tripped, log,
+                          lambda: time.monotonic() - t_hold, args.poll)
+        log('peak rates seen from here: yaw %.0f deg/s, roll/pitch %.0f deg/s' % (peak['yaw'], peak['tilt']))
     except KeyboardInterrupt:
         log('Ctrl-C')
     finally:
@@ -494,6 +561,8 @@ def run(args):
                      'steps_m': args.steps if args.altitude else None, 'max_alt_m': args.max_alt,
                      'heading_deg': args.heading, 'hold_alt_m': args.hold_alt,
                      'land_rate_mps': args.land_rate if landing_s(args) else None,
+                     'final_rate_mps': args.final_rate if landing_s(args) else None,
+                     'climb_rate_mps': args.climb_rate, 'max_tilt_rate_dps': args.max_tilt_rate,
                      'dwell_s': args.dwell, 'hold_start_in_capture_s': offset,
                      'param': args.param, 'deadband_pct': args.deadband, 'max_duty_pct': args.max_duty,
                      'surge_gf': args.surge, 'max_rate_dps': args.max_rate,
@@ -527,15 +596,27 @@ def main(argv=None):
     ap.add_argument('--no-land', dest='land', action='store_false',
                     help='end without the landing ramp (the motors stop where the vehicle is)')
     ap.add_argument('--land-rate', type=float, default=0.1,
-                    help='the landing ramp, m/s (default %(default)s)')
+                    help='the landing down to %.2f m, m/s (default %%(default)s)' % LAND_SLOW_M)
+    ap.add_argument('--final-rate', type=float, default=0.03,
+                    help='the landing from %.2f m to the floor, m/s (default %%(default)s)' % LAND_SLOW_M)
+    ap.add_argument('--climb-rate', type=float, default=0.0,
+                    help='approach the first height at this rate, m/s; 0 (the default) steps to it, as the '
+                         'tuning runs did')
     ap.add_argument('--dwell', type=float, default=8.0, help='s at each setpoint (default %(default)s)')
     ap.add_argument('--param', nargs='*', default=[], metavar='NAME=VALUE', help="'param' sets before the start")
-    ap.add_argument('--deadband', type=float, help="'motor --deadband' before the start, percent")
-    ap.add_argument('--max-duty', type=float, help="'motor --max-duty' before the start, percent (the team: 30)")
+    ap.add_argument('--deadband', type=float,
+                    help="'motor --deadband' before the start, percent (a boot gives 10 since 2026-11-01)")
+    ap.add_argument('--max-duty', type=float,
+                    help="'motor --max-duty' before the start, percent (the team: 40, a boot's default since "
+                         "2026-11-01; given anyway, it also undoes a plain driver left by the thrust stand)")
     ap.add_argument('--surge', type=float, default=0.0,
                     help="'hold surge' for the whole run, gf (default 0): keeps both front motors turning, so "
                          "a yaw correction speeds one up and slows the other instead of starting one from rest")
-    ap.add_argument('--max-rate', type=float, default=120.0, help='kill above this |gyro|, deg/s (default %(default)s)')
+    ap.add_argument('--max-rate', type=float, default=120.0,
+                    help='kill above this yaw rate, deg/s (default %(default)s); until 2026-11-01 any axis')
+    ap.add_argument('--max-tilt-rate', type=float, default=120.0,
+                    help='kill above this roll or pitch rate, deg/s (default %(default)s): the gondola nods '
+                         'at about 2 Hz on its clip without harm, and a wall hit gave 88 deg/s')
     ap.add_argument('--poll', type=float, default=1.0, help="s between 'hold' status lines (default %(default)s)")
     ap.add_argument('--wait', type=float, default=90.0,
                     help="s to wait for core/'s estimator to converge before giving up (default %(default)s)")
@@ -569,6 +650,14 @@ def main(argv=None):
             args.max_alt = args.hold_alt + 0.5
     if not math.isfinite(args.land_rate) or not 0.02 <= args.land_rate <= 0.5:
         sys.exit('--land-rate is 0.02 .. 0.5 m/s')
+    if not math.isfinite(args.final_rate) or not 0.01 <= args.final_rate <= 0.2:
+        sys.exit('--final-rate is 0.01 .. 0.2 m/s')
+    if not math.isfinite(args.climb_rate) or not (args.climb_rate == 0.0 or 0.02 <= args.climb_rate <= 0.5):
+        sys.exit("--climb-rate is 0 (a step) or 0.02 .. 0.5 m/s (the firmware's 'hold altitude' rate)")
+    if args.climb_rate and not (args.altitude or args.hold_alt is not None):
+        sys.exit('--climb-rate goes with a held height (--altitude or --hold-alt)')
+    if not (args.max_rate > 0 and args.max_tilt_rate > 0):
+        sys.exit('--max-rate and --max-tilt-rate are > 0 deg/s')
     if args.dwell <= 0 or args.dwell * (1 if args.follow else len(args.steps)) > 300:
         sys.exit('--dwell must be > 0 and the whole run under 300 s (the capture buffer)')
     if not math.isfinite(args.surge) or not 0.0 <= args.surge <= 30.0:

@@ -162,15 +162,18 @@ perception sensors. The Seeed × Max Imagination **ESP-FLY** board was the previ
 | Front pair (FL, FR) | forward | surge, and yaw by running one faster than the other |
 | Rear pair (RL, RR) | up | heave |
 
-The drivers can reverse every motor, but the controller still uses each one in a single
-direction (allowing reverse thrust is a change to `core/`'s mixer), and that shapes it:
+The drivers can reverse every motor. Since `core/` 0.4.0 (2026-11-01) the mixer can use that on
+the front pair, `front_reverse_ratio` in the parameters: a turn becomes a couple, one motor
+forward and one back, and a negative surge brakes. It is off by default until it has flown, so
+the controller uses each motor in a single direction, and that shapes it:
 
-- **No brakes.** Drag is the only thing that slows the airship, so arrival speed is decided on the
-  way in.
+- **No brakes** (until reverse is on). Drag is the only thing that slows the airship, so arrival
+  speed is decided on the way in.
 - **No push-down.** The airship is trimmed a few grams heavy and the rear pair holds it up.
   Switching the motors off makes it sink gently to the floor, which doubles as the failsafe.
-- **No turning on the spot.** Yaw needs one front motor faster than the other, so every turn costs
-  some forward motion.
+- **No turning on the spot** (until reverse is on). Yaw needs one front motor faster than the
+  other, so every turn costs some forward motion; on the envelope a 90° turn left it coasting
+  2–3 m.
 - **No sideways force.** Cross-track error is corrected by re-aiming.
 
 ### The software
@@ -399,7 +402,8 @@ first built, and keep that history. For the current design, docs/07 and docs/10 
 - **Envelope lift.** If the film is at the heavy end, the electronics may need an envelope too
   large to be competitive.
 - **Leaving the arena.** With no brakes it is easy to overshoot a balloon, and Rule 7 voids the
-  run. The simulation does not check this yet.
+  run; reverse thrust (`front_reverse_ratio`, not yet flown) is the brake. The simulation does not
+  check this yet.
 - **Air currents.** Drafts from ventilation can exceed what 100 gf can fight; test in a large hall
   early.
 - **Perception.** The camera's balloon detector is in development. Its rows reach the controller's

@@ -84,6 +84,11 @@ class MockBlimp:
         self.cam_reset(time.monotonic())
         self.t0 = time.monotonic()
         self.motor = [0.0] * 4
+        # The driver's mapping, as the firmware boots since 2026-11-01 (Kconfig
+        # MOTOR_DEADBAND_PERMILLE 100, MOTOR_MAX_DUTY_PERCENT 40): a command c
+        # is 10 + 30 |c| % duty. 'motor --max-duty --deadband' changes it.
+        self.deadband_pct = 10.0
+        self.max_duty_pct = 40.0
         self.failsafe_on = True
         self.last_thrust_cmd = 0.0      # motors_failsafe_feed()
         self.tripped = False
@@ -171,6 +176,25 @@ class MockBlimp:
         if self.tripped:
             return 3
         return 2 if any(self.motor) else 1
+
+    def motor_table(self, fs):
+        """The firmware's 'motor' table since the motor map (2026-10-30), with
+        its map: the motor named FL sits at core/'s FR position, which is also
+        how this toy turns (FL harder: counter-clockwise). The duty column
+        maps a command onto [deadband, ceiling] as cmd_motor.c does."""
+        db, top = self.deadband_pct, self.max_duty_pct
+
+        def duty(c):
+            return db + (top - db) * abs(c) if c else 0.0
+        rows = ''.join('%-6s %-7d %-12s %-9s %-9s %-8s %+7.3f %10.1f%%\n' % (n, k + 1, w, g, p, '+', c, duty(c))
+                       for k, (n, w, g, p, c) in enumerate(zip(
+                           bl.MOTOR_ORDER, ('#1 IN4/IN3', '#1 IN2/IN1', '#2 IN4/IN3', '#2 IN2/IN1'),
+                           ('10/11', '12/13', '14/7', '8/9'), ('FR', 'RR', 'FL', 'RL'), self.motor)))
+        return ('PWM 19999 Hz, 11 bit (2048 steps), slow decay, deadband %.1f%%, duty ceiling %.0f%%\n'
+                'failsafe 1000 ms, %s\nnSLEEP not on a GPIO - must be strapped high in hardware\n\n'
+                '%-6s %-7s %-12s %-9s %-9s %-8s %7s %11s\n%s'
+                % (db, top, fs[self.failsafe_state()], 'motor', 'output', 'driver', 'GPIO', 'position', 'sign',
+                   'command', 'duty', rows))
 
     def failsafe_tick(self, now):
         if self.failsafe_on and any(self.motor) and not self.tripped \
@@ -511,19 +535,32 @@ class MockBlimp:
                     "parameters: the loop holds the set after %d of %d 'param' changes (read by nothing until "
                     'increment 3)\n' % (int((time.monotonic() - self.t0) * 50), self.param_changes,
                                         self.param_changes))
+        words = line.split()
+        if words[:1] == ['motor'] and len(words) in (3, 5) and set(words[1::2]) <= {'--max-duty', '--deadband'}:
+            # cmd_motor.c's order and checks: the ceiling first, then the
+            # deadband, each against the other's value at that moment.
+            try:
+                opts = {words[k]: float(words[k + 1]) for k in range(1, len(words), 2)}
+            except ValueError:
+                return 'motor: a percentage is a number\n'
+            out = ''
+            if '--max-duty' in opts:
+                v = opts['--max-duty']
+                if not 10.0 <= v <= 100.0 or v <= self.deadband_pct:
+                    return out + ('--max-duty takes 10..100 (percent), above the deadband (%.1f%%)\n'
+                                  % self.deadband_pct)
+                self.max_duty_pct = v
+                out += 'duty ceiling: %.0f%% (a command of 1.0 gives this duty)\n' % v
+            if '--deadband' in opts:
+                v = opts['--deadband']
+                if not 0.0 <= v <= 90.0 or v >= self.max_duty_pct:
+                    return out + ('--deadband takes 0..90 (percent), below the duty ceiling (%.0f%%)\n'
+                                  % self.max_duty_pct)
+                self.deadband_pct = v
+                out += 'deadband: %.1f%%\n' % v
+            return out + self.motor_table(fs)
         if line in ('motor', 'motor --status'):
-            # The firmware's table since the motor map (2026-10-30), with its
-            # map: the motor named FL sits at core/'s FR position, which is
-            # also how this toy turns (FL harder: counter-clockwise).
-            rows = ''.join('%-6s %-7d %-12s %-9s %-9s %-8s %+7.3f %10.1f%%\n' % (n, k + 1, w, g, p, '+', c, 100 * abs(c))
-                           for k, (n, w, g, p, c) in enumerate(zip(
-                               bl.MOTOR_ORDER, ('#1 IN4/IN3', '#1 IN2/IN1', '#2 IN4/IN3', '#2 IN2/IN1'),
-                               ('10/11', '12/13', '14/7', '8/9'), ('FR', 'RR', 'FL', 'RL'), self.motor)))
-            return ('PWM 19999 Hz, 11 bit (2048 steps), slow decay, deadband 0.0%%, duty ceiling 100%%\n'
-                    'failsafe 1000 ms, %s\nnSLEEP not on a GPIO - must be strapped high in hardware\n\n'
-                    '%-6s %-7s %-12s %-9s %-9s %-8s %7s %11s\n%s'
-                    % (fs[self.failsafe_state()], 'motor', 'output', 'driver', 'GPIO', 'position', 'sign',
-                       'command', 'duty', rows))
+            return self.motor_table(fs)
         if line in ('motor -s', 'motor --stop'):
             self.coast()
             self.link_motors = False

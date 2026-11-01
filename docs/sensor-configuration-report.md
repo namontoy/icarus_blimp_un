@@ -42,7 +42,7 @@ one I2C bus, SDA 4, SCL 5, internal pull-ups, each device at 100 kHz.
 | Barometer on the bench | BME280 at 0x76 (sold as BMP280), chip ID 0x60 | reset; calibration read from NVM; `ctrl_hum` x1; `config` = 0 (IIR filter off); `ctrl_meas` pressure x4, temperature x1, **forced mode**: one conversion per read, about 16 ms, the chip sleeps between. Compensation is Bosch's integer algorithm on the chip's trims. | `cmd_baro.c` `bmx280_configure()`, preset `-o 1` |
 | Barometer alternatives | BMP280 (ID 0x58), BMP180 at 0x77 | same code paths, not run since the swap | `cmd_baro.c` |
 | Rangefinder | VL53L1X at 0x29 | ST ULD `SensorInit`; distance mode **long**; timing budget 100 ms; inter-measurement 100 ms; continuous ranging. Each read waits for data-ready, takes the result, signal and ambient rates, clears the interrupt. | `cmd_tof.c` `tof_attach()`; the stream's `TOF_BUDGET_MS`/`TOF_INTER_MS` |
-| Motors | 2 × DRV8833, 4 brushed motors FL RL FR RR | LEDC, 20 kHz, 11-bit duty (2048 steps), slow decay (drive/brake), **deadband 0 since 2026-10-28** (a command is its duty; it was an unmeasured 12 %); a zero command coasts. Failsafe: coast all after `CONFIG_MOTOR_FAILSAFE_MS` = 1000 ms without a thrust command, checked by a 50 ms esp_timer, armed only while a motor is driven. | `cmd_motor.c` |
+| Motors | 2 × DRV8833, 4 brushed motors FL RL FR RR | LEDC, 20 kHz, 11-bit duty (2048 steps), slow decay (drive/brake), **deadband 0 since 2026-10-28** (a command is its duty; it was an unmeasured 12 %; since 2026-11-01 a boot gives the team's 10 % deadband and 40 % ceiling, a command c being 10 + 30|c| %); a zero command coasts. Failsafe: coast all after `CONFIG_MOTOR_FAILSAFE_MS` = 1000 ms without a thrust command, checked by a 50 ms esp_timer, armed only while a motor is driven. | `cmd_motor.c` |
 | Battery | divider on GPIO1 (ADC1_CH0), 100 k + 100 k planned | **not read yet**: the ADC comes with increment 2 of the control loop. The record's `bat_mv` is 0. | `docs/control-loop-plan.md` |
 | Cameras | 2 × ESP32-CAM | **not linked to the S3**: no packet carries them; the camera fields of the record are 0 and the GUI's camera panel runs on demo data. | `docs/inter-board-link-plan.md` |
 | Radio | S3 as access point, WPA2, channel 1 | UDP 7200 packets, UDP 7201 console; link timeout 500 ms; telemetry 20 Hz; esp_timer task dispatch (ISR dispatch stalls Wi-Fi's timers on ESP-IDF v5.5.x, `docs/wifi-drop-report.md`) | `net_wifi.c`, `net_link.c` |
@@ -119,7 +119,8 @@ thing to glance at.
    **500 ms link timeout** coasts motors commanded over the air if no packet of any kind
    arrives; the driver's **1000 ms failsafe** coasts them if no thrust command arrives while
    a motor is driven.
-4. The driver maps the command to duty (1:1 since the deadband is 0) at 20 kHz.
+4. The driver maps the command to duty (1:1 while the deadband is 0 and the ceiling 100 %;
+   10 + 30|c| % from boot since 2026-11-01) at 20 kHz.
 5. TELEMETRY carries the driver's readback at 20 Hz; the panel's bars draw the readback, never
    the slider, so a command that did not arrive is visible.
 

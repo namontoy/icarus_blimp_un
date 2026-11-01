@@ -20,12 +20,14 @@ frame does, and the fit says when they disagree. |amplitude| is capped by
 --limit, 0.30 by default: the team's limit is 30 % duty (2026-10-30).
 
 The amplitudes are duties, which they are only while the motor driver runs
-plain: deadband 0 and ceiling 100 %, its state after a boot. hold_test.py
-leaves 10 % and 30 % behind until the next boot, and the thrust map would
-then read every step wrong, so the test reads the driver's state first and
-refuses unless it is plain. It also records the motor map (which name sits
-at which of core/'s positions; cmd_motor.h), which the yaw fit needs: the
-capture logs throttles by name.
+plain: deadband 0 and ceiling 100 %. Since 2026-11-01 a boot gives the
+team's limits instead, 10 % and 40 % (Kconfig MOTOR_DEADBAND_PERMILLE and
+MOTOR_MAX_DUTY_PERCENT), and the thrust map would then read every step
+wrong, so the test reads the driver's state first and refuses unless it is
+plain: set it plain for the run, and back after it (or reboot). --limit
+keeps the duties at the team's limit meanwhile. It also records the motor
+map (which name sits at which of core/'s positions; cmd_motor.h), which the
+yaw fit needs: the capture logs throttles by name.
 
 The schedule is --lead seconds of zeros for the baseline, then for every
 amplitude a step held --hold seconds and --gap seconds of zeros for the
@@ -161,6 +163,15 @@ def parse_motor_status(text):
     return {'deadband_pct': float(d.group(1)), 'max_duty_pct': float(d.group(2)), 'positions': dict(rows)}
 
 
+# Shared with thrust_map.py, which needs a plain driver for the same reason.
+PLAIN_DRIVER_REFUSAL = (
+    'the motor driver maps commands onto [%g %%, %g %%] (the team\'s limits, a boot\'s default since '
+    '2026-11-01), so a command would not be its duty and the thrust map would read it wrong. Set it plain '
+    'for this run:\n  python software/blimp_link.py console "motor --max-duty 100 --deadband 0"\n'
+    'and back afterwards (or reboot the blimp):\n'
+    '  python software/blimp_link.py console "motor --max-duty 40 --deadband 10"')
+
+
 def read_motor_status(host, console_port):
     """parse_motor_status() of the blimp's 'motor', or {'error': why}."""
     con = bl.BlimpConsole(host, console_port)
@@ -209,10 +220,7 @@ def run(args):
                          % motors['error'])
             print('note: motor table not read (%s); using --positions, the driver unchecked' % motors['error'])
         elif motors['deadband_pct'] != 0.0 or motors['max_duty_pct'] != 100.0:
-            sys.exit('the motor driver maps commands onto [%g %%, %g %%] (hold_test.py leaves that until a reboot), '
-                     'so the steps would not be duties and the thrust map would read them wrong. Reset it: '
-                     'python software/blimp_link.py console "motor --max-duty 100 --deadband 0"'
-                     % (motors['deadband_pct'], motors['max_duty_pct']))
+            sys.exit(PLAIN_DRIVER_REFUSAL % (motors['deadband_pct'], motors['max_duty_pct']))
         positions = sr.parse_positions(args.positions) if args.positions else motors['positions']
         print('motor map: %s' % ' '.join('%s at %s' % (n, positions[n]) for n in sr.MOTOR_NAMES))
         cap = bl.CaptureClient(link)
