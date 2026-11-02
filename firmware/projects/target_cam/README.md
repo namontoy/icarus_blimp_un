@@ -214,20 +214,21 @@ wait.
 
 Run everything from `target_cam/` with `conda activate targetcam`.
 
-1. **Collect and label** each session in its own folder under `data/`
-   (`data/red_s3`, `data/venue_s1`, ...), with fixed white-balance gains
+1. **Collect and label** each session in its own folder under `data/sessions/`
+   (`data/sessions/red_s3`, `data/sessions/venue_s1`, ...; the layout of
+   `data/` is in its `README.md`), with fixed white-balance gains
    (`Wc` then `!save`, see [White balance](#white-balance)) as in flight.
    Leave out folders whose balloons are not targets, such as `orange_s1`.
 2. **Score the current table on the new session**, before it is trained on,
    and keep the output. It is the only score from frames the table has never
    seen:
    ```bash
-   python host/tools/eval_frames.py --stage 1 data/red_s3 | tee data/red_s3/eval_before.txt
+   python host/tools/eval_frames.py --stage 1 data/sessions/red_s3 | tee data/sessions/red_s3/eval_before.txt
    ```
 3. **Train a trial table.** `--out` writes it to a trial folder and leaves the
    firmware's table alone. It takes about 10 s for 20 frames:
    ```bash
-   python host/train/train_lut.py --out data/lut_try data/red_s1 data/red_s2 data/red_s3
+   python host/train/train_lut.py --out data/tables/try data/sessions/red_s1 data/sessions/red_s2 data/sessions/red_s3
    ```
    The trainer chooses sigma, k and min_evidence itself by leaving one session
    out at a time. With only one session it cannot, so give it the current
@@ -240,7 +241,7 @@ Run everything from `target_cam/` with `conda activate targetcam`.
    - on all sessions, every balloon is found and no empty frame has a false
      blob 1:
      ```bash
-     python host/tools/eval_frames.py --stage 1 --lut data/lut_try/lut_model.bin data/red_s1 data/red_s2 data/red_s3
+     python host/tools/eval_frames.py --stage 1 --lut data/tables/try/lut_model.bin data/sessions/red_s1 data/sessions/red_s2 data/sessions/red_s3
      ```
      (These are its own training frames, so its pixel figures look better
      than they will in flight. They are a check for gross failure, not a
@@ -250,9 +251,11 @@ Run everything from `target_cam/` with `conda activate targetcam`.
 5. **Install it.** Back up the current table, copy the trial in, then rebuild
    and flash as in [Building and flashing](#building-and-flashing):
    ```bash
-   mkdir -p data/lut_before && cp main/models/lut_model.* data/lut_before/
-   cp data/lut_try/lut_model.* main/models/
+   mkdir -p data/tables/before && cp main/models/lut_model.* data/tables/before/
+   cp data/tables/try/lut_model.* main/models/
    ```
+   Then rename `data/tables/try` to `data/tables/<date>_<what>_id<id>` (the
+   id is in its `lut_model.json`), so every installed table keeps its folder.
 6. **Confirm on the board.**
    - The boot log reads `# models        colour table ok: id <new id>, …`,
      and `#!CFG` shows `lut=ok lut_id=<new id>`.
@@ -263,11 +266,12 @@ Run everything from `target_cam/` with `conda activate targetcam`.
    trained on into `host/testdata/` and run the viewer tests. They rebuild the
    committed table from those frames and must get the same bytes:
    ```bash
-   cp -r data/red_s3 host/testdata/
+   cp -r data/sessions/red_s3 host/testdata/
    (cd host/viewer && python -m pytest -q tests)
    ```
 
-**Undo.** Copy back the backup (`cp data/lut_before/lut_model.* main/models/`),
+**Undo.** Copy back the backup (`cp data/tables/before/lut_model.* main/models/`, or the table's own
+folder under `data/tables/`),
 or `git checkout main/models/` for the last committed table, then rebuild and
 flash.
 
@@ -579,7 +583,10 @@ measured distances (see the checklist).
 | `host/tools/csv_report.py` | Pacing, timing and scene report of a CSV recording or a live port. |
 | `host/tools/eval_frames.py` | Scores the camera's pipeline on hand-labelled saved frames: blob TP/FN/FP/split, blob 1, pixel precision/recall. `--stage 1` uses the committed table, `--lut` another. |
 | `host/tools/blobs_from_frames.py` | A blob dataset (`.npz`: features, crops, labels) from hand-labelled saved frames, labelled from the paint. Same format as the viewer's Blobs tab. |
+| `host/train/fix_white_balance.py` | Corrects the white balance of saved sessions after the fact (grey-pixel estimate, one median per session and camera gain, applied in linear light) into `data/sessions/<session>/`, labels copied (it refuses a session folder that already holds frames, unless `--overwrite`), the gains in each `.json`. For the sessions taken with unrecorded `w0` gains; report §10.9. Runs in the `targetcam` env. |
 | `host/train/train_lut.py` | Trains the colour table from labelled sessions, choosing its parameters by leave-one-session-out, and writes `main/models/lut_model.*`. Runs in the viewer's `targetcam` env. |
+| `host/train/fetch_openimages_balloons.py` | Downloads the Open Images Balloon boxes and images (about 3 400 images, 1 GB, CC BY 2.0 with authors in its `images.csv`) to `data/external/openimages_balloon/`, with YOLO labels. For shape work, detectors and hard negatives, never for the colour table: they are another camera's colours. Standard library only; resumes a broken download. |
+| `host/train/select_red_balloons.py` | Picks from that download the images of one to four single red balloons (no group-of or depiction box, no hot-air balloon by image-level label, every box red by an ellipse hue test) into `data/external/openimages_balloon/red_individual/`, with contact sheets to review; `red_reject.txt` beside the download lists what the review threw out. 84 images, 123 balloons on 2026-11-01: that is all Open Images holds of this kind. numpy and PyQt6 (the `targetcam` env). |
 | `host/target_monitor.py` | Live viewer with an azimuth gauge, and a CSV logger (needs `pyserial`). |
 | `host/viewer/` | `tcview`: image, hand calibration, flight-data, frame-labelling and blob-collection screens (PyQt6, own conda env). `tcview/labels.py` holds the label format and the scoring rule that `eval_frames.py` shares; `tcview/blobset.py` the blob dataset format. |
 | `host/testdata/` | The labelled test set: two capture sessions of the red balloon (`red_s1`, `red_s2`; 14 balloon frames, 6 clutter-only), each frame as `.rgb565` + `.json` + `.png` + `.labels.png`. Baseline numbers in `docs/learned-detector-report.md`. |

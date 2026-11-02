@@ -186,8 +186,8 @@ class FlightTab(QWidget):
         self.rec_btn.setToolTip("Write every row verbatim, with the camera's settings, to a new CSV file")
         self.rec_btn.toggled.connect(self._record)
         row.addWidget(self.rec_btn)
-        self.path_lbl = value_label("rows → target_cam/data/", mono=False)
-        self.path_lbl.setToolTip(str(DATA_DIR))
+        self.path_lbl = value_label("rows → target_cam/data/runs/", mono=False)
+        self.path_lbl.setToolTip(str(DATA_DIR / "runs"))
         theme.set_prop(self.path_lbl, "muted", True)
         row.addWidget(self.path_lbl)
         rst = QPushButton("Reset counts")
@@ -849,8 +849,9 @@ class FlightTab(QWidget):
 
     def _record(self, on):
         if on:
-            DATA_DIR.mkdir(parents=True, exist_ok=True)
-            self.rec_path = DATA_DIR / time.strftime("flight_%Y%m%d_%H%M%S.csv")
+            runs = DATA_DIR / "runs"        # data/README.md; DATA_DIR is patched by tests
+            runs.mkdir(parents=True, exist_ok=True)
+            self.rec_path = runs / time.strftime("flight_%Y%m%d_%H%M%S.csv")
             self.rec = open(self.rec_path, "w")
             self.rec_n = 0                  # the header goes in with the first row
             if self.cfg:

@@ -44,7 +44,7 @@ scores are slightly optimistic. A session kept out of all of this is the only
 unbiased test.
 
 Usage (from target_cam/):
-  python host/train/train_lut.py --out data/lut_try data/red_s1 data/red_s2   (a trial)
+  python host/train/train_lut.py --out data/tables/try data/sessions/red_s1 data/sessions/red_s2   (a trial)
   python host/train/train_lut.py host/testdata/red_s1 host/testdata/red_s2   (writes main/models)
   python host/train/train_lut.py --sigma 8 --k 7 DIR...   (no search; one session is enough)
 

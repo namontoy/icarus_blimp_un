@@ -23,12 +23,12 @@ records one from the port) and reports
            here for the before/after comparison of each stage.
 
 Usage:
-  csv_report.py data/flight_20261014_101500.csv
+  csv_report.py data/runs/flight_20261014_101500.csv
   csv_report.py --port /dev/ttyUSB0 --seconds 120 --cmd '!stage 0'   (single quotes: bash expands ! inside double quotes)
 
 With --port the port is opened WITHOUT resetting the camera (DTR and RTS held
 low before open, as the viewer does), each --cmd is sent on its own and must be
-ACKed, and the rows are saved under target_cam/data/ with the camera's #!CFG
+ACKed, and the rows are saved under target_cam/data/runs/ with the camera's #!CFG
 line at the top as a '#' comment, so the file records what produced it.
 """
 from __future__ import annotations
@@ -254,7 +254,7 @@ def main() -> int:
                     help="send 'k' every S seconds while recording: commands in "
                     "flight must not move a row off 80 ms (--port)")
     ap.add_argument("--out", type=Path, help="where to save the recording "
-                    "(default target_cam/data/run_<time>.csv)")
+                    "(default target_cam/data/runs/run_<time>.csv)")
     ap.add_argument("--period", type=float, help="expected dt_ms (default: the camera's "
                     "period_ms from #!CFG, else 80)")
     ap.add_argument("--jump-px", type=float, default=10.0)
@@ -262,7 +262,7 @@ def main() -> int:
     if (a.csv is None) == (a.port is None):
         ap.error("give a CSV file or --port, not both")
     if a.port:
-        out = a.out or DATA_DIR / time.strftime("run_%Y%m%d_%H%M%S.csv")
+        out = a.out or DATA_DIR / "runs" / time.strftime("run_%Y%m%d_%H%M%S.csv")
         rows, cfg, bad = record(a.port, a.seconds, a.cmd, out, a.poke)
         source = "%s (recorded from %s)" % (out, a.port)
     else:

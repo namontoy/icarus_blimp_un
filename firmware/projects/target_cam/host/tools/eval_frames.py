@@ -24,7 +24,7 @@ test is the colour table, not the HSV settings: the committed one
 (main/models/lut_model.bin) unless --lut names another record.
 
 Usage:
-  eval_frames.py target_cam/data/frames
+  eval_frames.py target_cam/data/sessions/red_s1
   eval_frames.py --stage 1 --cfg some_frame.json target_cam/host/testdata
   eval_frames.py --stage 1 --lut /tmp/lut/lut_model.bin target_cam/host/testdata
   eval_frames.py --csv scores.csv DIR
