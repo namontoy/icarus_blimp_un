@@ -11,7 +11,7 @@ import math
 import time
 
 from PyQt6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QFontMetrics, QPainter, QPainterPath, QPen, QPolygonF
+from PyQt6.QtGui import QColor, QFontMetrics, QPainter, QPainterPath, QPen, QPolygonF, QRadialGradient
 from PyQt6.QtWidgets import (QAbstractButton, QHBoxLayout, QLabel, QLayout, QPushButton, QSizePolicy, QSlider,
                              QSplitter, QSplitterHandle, QToolTip, QWidget)
 
@@ -21,6 +21,7 @@ HISTORY_S = 10.0            # the sensor plots' window
 HOVER_BAND_M = (1.85, 2.25)
 GAUGE_MAX_M = 3.0
 FOV_DEG = 54.0              # target_cam's horizontal field of view
+TARGET_MM = 550.0           # target_cam's default balloon size, from which it computes range_mm
 
 
 def C(c, alpha=None):
@@ -1156,8 +1157,9 @@ class CameraView(QWidget):
     with the detection overlay: green box, papaya crosshair and range label.
 
     The link carries rows, not frames (target_cam sends the S3 rows only), so
-    normally there is no picture: the area is drawn empty from the latest row
-    (set_row) and the overlay shows where the camera says the balloon is. A
+    normally there is no picture: the area is drawn from the latest row
+    (set_row), each blob a red balloon where the camera saw it (_balloons),
+    under the overlay. A
     frame (a demo Grab or Live) is shown with its own row while frames keep
     coming; a grabbed still holds for STILL_HOLD_S and the view then goes back
     to the rows, and it goes at once when the rows stop, so the picture never
@@ -1237,6 +1239,8 @@ class CameraView(QWidget):
         if row and row.get('ok'):
             p.setRenderHint(QPainter.RenderHint.Antialiasing)
             sx = r.width() / fw
+            if self.img is None:
+                self._balloons(p, r, sx, fw, fh, row)
             bx, by = r.x() + (row['cx_px'] - row['w_px'] / 2) * sx, r.y() + (row['cy_px'] - row['h_px'] / 2) * sx
             bw, bh = row['w_px'] * sx, row['h_px'] * sx
             p.setPen(QPen(C(T.UN_GREEN), max(1.0, 3 * k)))
@@ -1270,6 +1274,46 @@ class CameraView(QWidget):
         p.setPen(C(T.MUTED))
         p.drawText(box, Qt.AlignmentFlag.AlignCenter, stamp)
         self._frame_border(p, W, H)
+
+    @staticmethod
+    def _balloons(p, r, sx, fw, fh, row):
+        """With no picture, each blob the row reports as a red balloon where the
+        camera saw it, as the demo's painted frame draws one. Blob 1 has its
+        centroid and box: a shaded disc of radius max(w, h) / 2. Blobs 2-4 have
+        only az, el and range, so they go back through target_cam's pinhole
+        model (az = atan((x - W/2) / f), f from the 54 degree h-FOV), sized as
+        the camera sized them (range = 550 mm x f / max(w, h)), and dimmer,
+        with their number. A range of -1 (clipped, or nothing to size by) gets
+        a small dot. FOV and size are the camera's defaults: a camera set
+        otherwise ('F', 'd') draws them off by the same factor."""
+        f_px = fw / 2 / math.tan(math.radians(FOV_DEG / 2))
+        disc = [(1, row['cx_px'], row['cy_px'], max(row['w_px'], row['h_px']) / 2, 1.0)]
+        for k in range(2, 5):
+            if (row.get('blobs') or 0) < k:
+                break
+            az, el, rng = row.get('b%d_az' % k), row.get('b%d_el' % k), row.get('b%d_range_mm' % k)
+            if not (isnum(az) and isnum(el)):
+                continue
+            x = fw / 2 + f_px * math.tan(math.radians(az))
+            y = fh / 2 - f_px * math.tan(math.radians(el))
+            rad = TARGET_MM * f_px / (2 * rng) if isnum(rng) and rng > 0 else 2.0
+            disc.append((k, x, y, rad, 0.6))
+        p.save()
+        p.setClipRect(r)                        # a balloon clipped at the edge stays inside the frame
+        for k, x, y, rad, alpha in reversed(disc):      # blob 1 on top
+            rad = max(rad, 1.5) * sx
+            c = QPointF(r.x() + x * sx, r.y() + y * sx)
+            g = QRadialGradient(QPointF(c.x() - 0.35 * rad, c.y() - 0.35 * rad), 1.35 * rad)
+            g.setColorAt(0.0, C(QColor(T.UN_RED).lighter(135), alpha))
+            g.setColorAt(1.0, C(QColor(T.UN_RED).darker(170), alpha))
+            p.setBrush(g)
+            p.setPen(QPen(C(T.UN_RED, 0.9 * alpha), 1))
+            p.drawEllipse(c, rad, rad)
+            if k > 1:
+                p.setFont(T.font(max(8, round(sx * 4.5)), 700, mono=True))
+                p.setPen(C(T.FG, 0.85))
+                p.drawText(QPointF(c.x() + rad + 3, c.y() + 4), str(k))
+        p.restore()
 
     @staticmethod
     def _frame_border(p, W, H):
