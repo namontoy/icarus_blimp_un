@@ -349,7 +349,7 @@ def test_connect_from_the_gui_and_back(app, tmp_path, monkeypatch):
         win.flight.tick()
         assert "no #!CFG" in win.flight.banner.text()
         assert win.flight.rec is None and "recording stopped" in win.console.text()
-        assert len(list(tmp_path.glob("flight_*.csv"))) == 1
+        assert len(list(tmp_path.glob("runs/flight_*.csv"))) == 1
         assert win.calib.frame_row is None or win.calib.frame is not None   # frames stay
         assert win.stats.copy_text().startswith("baud — |")
         assert win.windowTitle().endswith("not connected")

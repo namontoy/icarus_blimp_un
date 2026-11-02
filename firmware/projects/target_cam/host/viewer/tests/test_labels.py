@@ -2,6 +2,7 @@
 scoring rules eval_frames reports, and the Label tab's painting, on
 synthetic saved frames with known answers."""
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -24,6 +25,21 @@ def save_frame(folder: Path, name: str, data: bytes, st: D.Settings) -> Path:
     stem.with_suffix(".json").write_text(json.dumps(
         {"seq": 1, "t_ms": 0, "w": W, "h": H, "fmt": "rgb565be", "camera_cfg": cfg}))
     return stem
+
+
+def test_a_stem_with_a_dot_of_its_own_is_listed_and_loaded(tmp_path):
+    # The 2026-10-31 sessions were saved as "parking_1.png.rgb565": the stem
+    # is "parking_1.png", not "parking_1".
+    data, _ = frame_with_disc(80, 60, 10)
+    st = D.Settings()
+    (tmp_path / "parking_1.png.rgb565").write_bytes(data)
+    (tmp_path / "parking_1.png.json").write_text(json.dumps(
+        {"w": W, "h": H, "fmt": "rgb565be", "camera_cfg": {"be": st.be}}))
+    stems = L.list_frames(tmp_path)
+    assert stems == [tmp_path / "parking_1.png"]
+    sf = L.load_frame(stems[0])
+    assert sf.frame.data == data
+    assert sf.label_path == tmp_path / ("parking_1.png" + L.LABEL_SUFFIX)
 
 
 def disc_labels(cx, cy, r):
@@ -162,4 +178,71 @@ def test_label_tab_paint_save_reload(tmp_path):
     tab.clear()
     tab.dab(10.5, 10.5, L.BACKGROUND)
     assert (tab.lab == L.BACKGROUND).sum() == 9
+    app.processEvents()
+
+
+def test_enclosed_and_fill_new_loops():
+    lab = np.zeros((H, W), np.uint8)
+    ring = lab.copy()
+    yy, xx = np.mgrid[0:H, 0:W]
+    d2 = (xx - 80) ** 2 + (yy - 60) ** 2
+    ring[(d2 >= 15 ** 2) & (d2 <= 17 ** 2)] = L.BALLOON
+    inside = d2 < 15 ** 2
+    assert np.array_equal(L.enclosed(ring == L.BALLOON), inside)
+    # A ring with a gap encloses nothing.
+    open_ring = ring.copy()
+    open_ring[55:66, 90:100] = 0
+    assert not L.enclosed(open_ring == L.BALLOON).any()
+    # The stroke that closes it fills the inside, background in it included.
+    open_ring[58:62, 75:79] = L.BACKGROUND
+    closed = open_ring.copy()
+    closed[ring == L.BALLOON] = L.BALLOON
+    out = L.fill_new_loops(open_ring, closed, L.BALLOON)
+    assert (out[inside] == L.BALLOON).all()
+    assert not (out[~inside & (ring == 0)]).any()      # outside untouched
+    # A loop that was already closed before the stroke does not fill: the
+    # unlabelled rim Rest -> background leaves round a balloon stays.
+    lab = np.zeros((H, W), np.uint8)
+    lab[inside] = L.BALLOON
+    lab = L.rest_to_background(lab, 2)
+    after = lab.copy()
+    after[5:8, 5:40] = L.BACKGROUND                  # a stroke elsewhere
+    assert np.array_equal(L.fill_new_loops(lab, after, L.BACKGROUND), after)
+
+
+def test_label_tab_fills_a_closed_brush_loop(tmp_path):
+    from PyQt6.QtCore import QPointF
+    from PyQt6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    make_set(tmp_path)
+    from tcview.label_tab import LabelTab
+    tab = LabelTab(tmp_path)
+    tab.step(1)
+    assert not tab.lab.any()
+    tab.cls_seg.set_value(L.BALLOON)
+    tab.tool_seg.set_value("brush")
+    tab.radius.setValue(1)
+
+    def loop(end_gap_deg, cls_erase=False):
+        # A circle of radius 20 round (80, 60), ending end_gap_deg short of its start.
+        pts = [QPointF(80 + 20 * math.cos(math.radians(a)), 60 + 20 * math.sin(math.radians(a)))
+               for a in range(0, 361 - end_gap_deg, 5)]
+        tab._stroke("start", pts[0], cls_erase)
+        for p in pts[1:-1]:
+            tab._stroke("move", p, cls_erase)
+        tab._stroke("end", pts[-1], cls_erase)
+
+    loop(10)                                    # ends ~3.5 px short: closed and filled
+    assert tab.lab[60, 80] == L.BALLOON and tab.lab[60, 65] == L.BALLOON
+    assert tab.lab[60, 105] == L.UNLABELLED     # outside stays
+    filled = (tab.lab == L.BALLOON).sum()
+    assert filled > math.pi * 18 ** 2
+    tab.do_undo()                               # stroke and fill go together
+    assert not tab.lab.any()
+    loop(90)                                    # a three-quarter arc: no loop, no fill
+    assert tab.lab[60, 80] == L.UNLABELLED
+    tab.do_undo()
+    tab.fill_loops.setChecked(False)            # the switch
+    loop(10)
+    assert tab.lab[60, 80] == L.UNLABELLED
     app.processEvents()

@@ -345,8 +345,8 @@ The firmware is `bc92ee1-dirty` (the A2 working tree). The camera was still,
 pointed at the red balloon with clutter in view (the camera's own range
 estimate: 1.57 m median).
 Two `csv_report.py` recordings were taken without moving anything: stage 1
-for 120 s (`data/run_20261015_233153.csv`), then stage 0 for 60 s
-(`data/run_20261015_233703.csv`).
+for 120 s (`data/runs/run_20261015_233153.csv`), then stage 0 for 60 s
+(`data/runs/run_20261015_233703.csv`).
 
 - **The table loaded and matches the PC's.** `#!CFG` reported `lut=ok
   lut_id=1792123782`. With `g` at stage 1, the camera's own row and the PC
@@ -890,3 +890,171 @@ started from `w2` at 64,64,64:
 It converged in 4 steps to **81,64,76**. The offset fit from the first run
 had predicted 82,77 (§10.8 simulation). That agreement supports the fit but
 does not prove it: it is one more scene under the same light.
+
+### 10.9 White balance corrected after the fact, and what it buys (2026-11-01)
+
+The labelled sessions red_s1–s5 and orange_s3–s5 were taken with `w0`
+gains that were never recorded (§10.8), and the 2026-10-31 sessions (SalaU,
+the architecture hall, the car park; 46 frames, unlabelled, copied into
+`data/originals/oct31_*` with the stray `.png` taken out of their names) with fixed
+gains calibrated in one room and carried to the others.
+`host/train/fix_white_balance.py` estimates, per frame, the R and B gains
+that make the near-grey pixels grey (balloon paint, red-dominant, clipped
+and dark pixels left out), takes the median per session and recorded camera
+gain, and applies it in linear light (gamma 2.2 assumed) into `data/sessions/`
+(then `data/wb/`).
+
+**Measured.**
+
+- Painted balloon pixels, median hue per session: spread across red_s1–s5
+  16° before, 9° after (−14.7…+1.0° → −12.5…−3.8°). Median background chroma
+  fell in every session. Session gains: R 0.95–1.49, B 0.81–1.46.
+- A colour table trained by `train_lut.py` on corrected red_s1–s4 (σ 4, k 15,
+  min_ev 2, id 1793592437, `data/tables/2026-11-01_wb_s1-s4_id1793592437/`, not installed), against the
+  installed one (id 1792216162, trained on the same sessions uncorrected),
+  each on its own kind of frame:
+
+  | Held out, never trained on | Installed / original | New / corrected |
+  |---|---|---|
+  | red_s5 blobs | TP 6 FN 1 FP 28 | TP 6 FN 1 FP 10 |
+  | red_s5 false blob 1, empty frames | 6 of 6 | 3 of 6 |
+  | red_s5 blob 1 on the balloon | 5 of 7 | 6 of 7 |
+  | red_s5 pixels P / R | 14.8 / 53.4 % | 27.0 / 50.7 % |
+  | orange_s5 FP | 13 | 7 |
+  | 2026-10-31, 12 empty frames | 3 blobs in 1 frame | 3 blobs in 1 frame |
+  | 2026-10-31, 32 balloon frames, any blob | 31 | 32 |
+
+  The 2026-10-31 frames were run through each table as they would reach it:
+  uncorrected for the installed table, corrected for the new one.
+- Stage 2 trial: blobs rebuilt from the corrected labelled frames with the
+  new table (`blobs_from_frames.py`): 72 blobs, 45 balloon and 27 not.
+  Logistic regression on the 12 features, trained on red_s1–s4 and
+  orange_s3–s4 (45 blobs, **10** not), scored on red_s5 and orange_s5:
+  average precision 0.75 (chance 0.37); at p ≥ 0.5 it keeps 9 of 10
+  balloons and passes 10 of 17 others. `sat_mean` alone scores 0.95 on the
+  same blobs, `highlight` 0.83: with ten negatives the regression overfits.
+
+**Reasoned, not measured.**
+
+- The correction makes walls grey; `Wc` makes a white card grey. These agree
+  only if the room's grey surfaces are neutral, so a corrected frame
+  approximates, not reproduces, a fixed-gain frame. The estimator still asks
+  R 1.2–1.4 of the 2026-10-31 fixed-gain frames, so those gains did not make
+  the rooms grey (gains carried between rooms, or a card that is not
+  neutral).
+- 72 blobs, 27 of them negatives, is an anecdote for stage 2 (§10.4 asks for
+  hundreds from several sessions). The live blob sets of §10.7 cannot be
+  corrected: their features were computed on the camera from the uncorrected
+  pixels.
+
+**Not established.** Whether the new table does better than the installed
+one on the board; a fixed-gain labelled session would settle it
+(`eval_frames.py --lut data/tables/2026-11-01_wb_s1-s4_id1793592437/lut_model.bin`).
+
+### 10.10 Relabelled frames, a stricter table installed, and stage 2 again (2026-11-02)
+
+All corrected sessions in `data/sessions/` were relabelled by hand with a 1 px
+unpainted margin between balloon and background, the 2026-10-31 sessions
+included. Two frames with orange balloons became sessions of their own
+(`orange_salaU`, `orange_hall_arquitectura`, the orange balloon painted
+background), and `green_wood` (5 frames, a green balloon) is all background:
+only red balloons are targets. red_s5 and orange_s5 stay held out, never
+trained on. 13 training sessions: red_s1–s4, SalaU_1, oct31_salaU,
+oct31_hall_arquitectura, oct31_estacionamiento, orange_s3, orange_s4,
+orange_salaU, orange_hall_arquitectura, green_wood.
+
+**Measured, colour table.**
+
+- `train_lut.py` on the 13 sessions excluded **every one** of its 168
+  settings for a false blob 1 on a held-out empty frame, and then chose by
+  pixel F1: σ 4, k 10, min_ev 0.5 (`lut_v3`, now `data/tables/2026-11-02_loose_id1793599742/`), a permissive table. In
+  every setting the false blob 1 includes the two orange-balloon frames,
+  which no table separates from red (below). Leaving those two out and
+  ranking the same held-out results by false blob 1, then false blobs, then
+  balloons found, σ 12, k 30 (any min_ev) comes first with no false blob 1.
+  That table, trained on the 13 sessions (10,358 colours, id 1793599833,
+  `lut_v3s`, now `data/tables/2026-11-02_strict_id1793599833/`), is **installed** in `main/models/` since 2026-11-02;
+  the previous one (id 1792216162) is kept in
+  `data/tables/2026-10-17_s1-s4_id1792216162/`.
+- Held out, red_s5 + orange_s5 (12 frames with a balloon, 6 empty). The
+  installed table is scored on the uncorrected frames, the others on the
+  corrected ones, as each would see them; all against the new labels:
+
+  | Table | TP | FN | FP | Blob 1 on the balloon | False blob 1, empty frames | Pixels P / R |
+  |---|---|---|---|---|---|---|
+  | id 1792216162 (was installed) | 10 | 2 | 41 | 7/12 | 6/6 | 17.5 / 64.0 % |
+  | `lut_wb` (§10.9, old labels) | 9 | 3 | 18 | 8/12 | 3/6 | 27.3 / 62.5 % |
+  | `lut_v3` σ 4 k 10 | 9 | 3 | 32 | 8/12 | 5/6 | 22.9 / 81.0 % |
+  | **`lut_v3s` σ 12 k 30 (installed)** | 10 | 2 | **6** | 8/12 | **0/6** | 47.6 / 41.5 % |
+
+  On red_s5 alone the installed table gives 0 false blobs (was 28) and blob
+  1 on the balloon in 6 of 7 frames. All 6 remaining false blobs are in
+  orange_s5.
+- Training sessions, each scored by a table trained without it (13 fold
+  tables per setting; the orange-balloon frames left out; 70 frames with a
+  balloon, 32 empty): `lut_v3s` TP 57 FN 14 FP 5, false blob 1 on 0 of 32
+  empty frames, pixels 91.3 / 45.6 %; `lut_v3` TP 68 FN 3 FP 30, 4 of 32.
+  (The two older tables score TP 67–68, FP 17–20 here, but they trained on
+  red_s1–s4.) **The price of the strict table is recall**: about one balloon
+  in five missed, and less than half of each balloon painted.
+- Both orange-balloon frames get a false blob 1 from every table, including
+  the tables trained on them.
+- The viewer tests fail twice with the new table (213 of 215 pass).
+  `test_trainer_reproduces_the_committed_table`: its sessions are not in
+  `host/testdata/` (§8, the README's step 7). `test_trained_table_is_no_worse_than_the_hsv_window`:
+  on the committed, uncorrected red_s1 + red_s2 it finds 11 of 14 balloons
+  against stage 0's 12 (FP 0 against 3, pixel precision 99 against 71 %); on
+  the corrected copies 12 against 13 (FP 0 against 13).
+
+**Measured, stage 2.** Logistic regression on the 12 features (standardised,
+class-weighted, ridge), as in §10.9. "Old": §10.9's blobs (45, 10 not).
+"New": blobs from the 13 sessions through `lut_v3s` and `lut_v3` (173, 39
+not). "New + live": also `blobs_20261027_215723` (254 blobs taken on the
+board with fixed gains; 427, 245 not). On the s5 blobs, balloons kept / false
+blobs passed at p ≥ 0.5:
+
+| s5 blobs from | Old | New | New + live |
+|---|---|---|---|
+| `lut_v3s` (11 balloon, 6 not) | 10/11, 6/6 | 6/11, 3/6 | 8/11, 5/6 |
+| `lut_v3` (9, 32) | 8/9, 28/32 | 7/9, 6/32 | 7/9, 4/32 |
+| `lut_wb` (9, 18) | 8/9, 11/18 | 8/9, 3/18 | 7/9, 4/18 |
+
+Behind a permissive table the new classifier rejects most false blobs where
+the old one rejected few, at the cost of 1–2 balloons in 9. Behind the
+installed table no classifier helps: each gives up balloons and still passes
+orange_s5's false blobs, and a threshold on `sat_mean` alone does as well.
+Leave one session out over the new blobs: balloons kept 107 of 134, false
+blobs passed 11 of 39, average precision 0.89 (chance 0.77). The largest
+standardised weights: log_area +1.4, sat_mean +0.8, edge −0.8, fill +0.7,
+texture +0.7. A median hue of the saturated, red-dominant pixels in each
+blob's crop (not a firmware feature; tried on the PC) does not separate the
+orange negatives (−23…+15°) from the red balloons (−19…+18°).
+
+**Reasoned, not measured.**
+
+- After the white-balance correction, red and orange balloons overlap in
+  colour across sessions; neither the table nor a hue feature can split them.
+  Whether they overlap less in fixed-gain frames, which is what the camera
+  delivers, needs a labelled fixed-gain session with both colours.
+- The installed table was trained on corrected frames; the camera sends
+  fixed-gain frames. The correction approximates a good `Wc` (§10.9), so the
+  table may do worse on the board than here, most likely as fewer balloons
+  found (recall is its weak side).
+- Stage 2 should wait: 39 negatives from the new frames is still an anecdote
+  next to §10.4's hundreds, and behind the installed table there are almost
+  no false blobs left for it to reject. Live blob sets with fixed gains are
+  the cheapest source of more.
+
+**Not established.** The installed table on the board (boot log `lut_id
+1793599833`, rows at 80 ms, the balloon held); its range, given the lower
+recall; and whether it can be rebuilt from the repository (the corrected
+sessions are not in `host/testdata/`).
+
+**Where the files are.** `target_cam/data/` (gitignored) was reorganised on
+2026-11-02, after the runs above: `sessions/` (the corrected, relabelled
+frames; was `wb/`), `originals/` (the camera's frames; were at the top),
+`originals_relabelled/` (was `eval_orig/`), `tables/<date>_<what>_id<id>/`
+(were `lut_before`, `lut_installed_1792216162`, `lut_wb`, `lut_v3`, `lut_v3s`
+and their `_loso` folders), `blobs/from_frames/` (were `blobs_wb`,
+`blobs_v3`), `runs/` and `external/`. `data/README.md` maps every old name to
+its new place.

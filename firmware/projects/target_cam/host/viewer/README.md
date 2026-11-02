@@ -48,7 +48,7 @@ conda activate targetcam
 cd firmware/projects/target_cam/host/viewer
 python -m tcview --port /dev/ttyACM0     # the real camera, through the ESP32-CAM-MB
 python -m tcview --fake                  # a synthetic camera; no hardware needed
-python -m tcview --label [DIR]           # label saved frames only; no camera (default DIR: target_cam/data)
+python -m tcview --label [DIR]           # label saved frames only; no camera (default DIR: target_cam/data/sessions)
 ```
 
 Opening the port does **not** reset the camera: the viewer lowers DTR and RTS
@@ -89,7 +89,7 @@ see a dropped frame and the resync.
    boots with them from then on. **Reload saved** (`!load`) and **Factory defaults**
    (`!reset`, which asks first) are next to it.
 7. **Save frame...** writes a `.png`, the raw `.rgb565` bytes and the settings as
-   `.json` to `target_cam/data/`, which is enough to reproduce a case in the
+   `.json` to `target_cam/data/sessions/` (a subfolder per session), which is enough to reproduce a case in the
    host test suite.
 8. **Rotate 180°**, next to Save frame, is for a board whose image arrives
    upside down. It sends `!flip 1` (and `!flip 0` to undo), so the camera turns
@@ -115,7 +115,7 @@ Entering it sends `v0` (image off) and `B115200`, then `k`. It shows:
 - Link health: rows/s, `dt_ms` mean and jitter, `proc_us`, ok %, and bytes/s.
   The last raw CSV line is shown verbatim.
 - **Record**: writes the rows verbatim, with a header, to
-  `target_cam/data/flight_<date>_<time>.csv`.
+  `target_cam/data/runs/flight_<date>_<time>.csv`.
 
 The bottom console shows every human `#` line from the camera. It accepts any
 raw command, for example `?`, `m`, `H350` or `p red`. **Show CSV rows** echoes
@@ -144,6 +144,16 @@ The quick way through a frame:
    band (2 px by default) around the balloon, which stays unlabelled.
 3. Check the result and move on with **PgDown**. Labels are saved when you
    change frame, with **Save** (Ctrl+S), and when the window closes.
+
+A balloon the ellipse fits badly can be outlined with the **Brush** instead:
+with **Fill closed loops** on (the default, under Brush radius), a stroke
+that closes a loop fills its inside with the class being painted. The loop
+counts as closed when the stroke ends within about 5 px (plus twice the
+radius) of where it began, and the gap is painted shut, or when it meets
+earlier paint of the same class, so an arc out from a balloon's edge and
+back fills the pocket between. Only loops the stroke itself closed fill (the
+unlabelled rim of step 2 stays), Erase never fills, and Ctrl+Z takes back the
+stroke and its fill together.
 
 A frame with no balloon in it is labelled by step 2 alone. Those frames are
 what measure false detections. Label the mylar's white highlights as balloon:

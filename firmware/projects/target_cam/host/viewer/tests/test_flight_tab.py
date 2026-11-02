@@ -202,7 +202,7 @@ def test_record_button_states(app, win, tmp_path, monkeypatch):
     fl.on_row(row())
     fl.rec_btn.setChecked(False)
     assert fl.rec_btn.text() == "Record" and fl.rec_lbl.text().endswith("(1 rows)")
-    lines = next(tmp_path.glob("flight_*.csv")).read_text().splitlines()
+    lines = next(tmp_path.glob("runs/flight_*.csv")).read_text().splitlines()
     assert lines == [",".join(P.COLUMNS), row().raw]
 
 

@@ -47,6 +47,18 @@ from .ui.widgets import (Banner, CollapsibleSection, FlowLayout, GripSplitter,
 from .widgets import AMBER, GREEN, GREY, RED, HueBar, ParamControl, _SpinBox, chip
 
 DATA_DIR = Path(__file__).resolve().parents[3] / "data"      # target_cam/data
+# The folders of data/ (data/README.md, 2026-11-02). Functions, not constants,
+# so a test that points DATA_DIR at a temporary folder moves them too.
+def sessions_dir() -> Path:
+    """Saved frames, one subfolder per capture session: where to label and train."""
+    return DATA_DIR / "sessions"
+
+
+def blobs_dir() -> Path:
+    """Blob datasets for stage 2."""
+    return DATA_DIR / "blobs"
+
+
 W, H = 160, 120
 
 # Control key -> (command format, #!CFG key)
@@ -743,19 +755,23 @@ class CalibTab(QWidget):
         if self.frame is None:
             self.main._say("# [viewer] no frame to save: press Grab frame first", "err")
             return
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        sessions_dir().mkdir(parents=True, exist_ok=True)
         # The dialog opens where the last frame went: a capture session is one
-        # subfolder (the training splits train/validation by session), chosen
-        # once rather than navigated to for every frame.
-        folder = getattr(self, "_save_dir", DATA_DIR)
+        # subfolder of data/sessions/ (the training splits train/validation by
+        # session), chosen once rather than navigated to for every frame.
+        folder = getattr(self, "_save_dir", sessions_dir())
         if not folder.is_dir():
-            folder = DATA_DIR
+            folder = sessions_dir()
         stem = time.strftime("frame_%Y%m%d_%H%M%S") + "_seq%d" % self.frame.seq
         path, _ = QFileDialog.getSaveFileName(self, "Save frame", str(folder / (stem + ".png")),
                                               "PNG (*.png)")
         if not path:
             return
-        base = Path(path).with_suffix("")
+        # Strip every trailing .png: a name typed with its extension came back
+        # from the dialog as "x.png.png" and was saved as "x.png.rgb565".
+        base = Path(path)
+        while base.suffix.lower() == ".png":
+            base = base.with_suffix("")
         self._save_dir = base.parent
         rgb = np.ascontiguousarray(self.frame.rgb())
         QImage(rgb.data, W, H, 3 * W, QImage.Format.Format_RGB888).copy().save(str(base) + ".png")

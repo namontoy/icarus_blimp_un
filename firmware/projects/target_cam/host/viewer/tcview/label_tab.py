@@ -16,6 +16,14 @@ The quick way through a frame:
   3. Check the rim band and any second balloon, then move on (PgDown).
   A frame with no balloon is labelled by "Rest -> background" alone.
 
+Closed loops fill (2026-11-01; "Fill closed loops", on by default): a brush
+stroke that closes a loop fills its inside with the class being painted, as
+the Ellipse tool fills its box, so a balloon can be outlined freehand. A loop
+is closed when the stroke ends within a few px of where it began (the gap is
+painted shut) or when it meets earlier paint of the same class. Only loops
+the stroke itself closed fill, and Erase never fills; Ctrl+Z takes back the
+stroke and its fill together.
+
 The reflections on the mylar are part of the balloon: label them balloon.
 Whether the colour table should match a white highlight is the training's
 decision (it counts how often that colour is balloon versus background), not
@@ -49,7 +57,7 @@ from PyQt6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog, QF
 
 from . import detector as D
 from . import labels as L
-from .calib_tab import BOX_COLOURS, DATA_DIR, STAGE_NAMES, _key, _row
+from .calib_tab import BOX_COLOURS, DATA_DIR, STAGE_NAMES, _key, _row, sessions_dir
 from .ui import persist, theme
 from .ui.keys import HintButton, add_shortcut
 from .ui.widgets import (Bar, CollapsibleSection, ElidedLabel, GripSplitter, PixelImageView,
@@ -65,6 +73,11 @@ CLASS_NAME = {L.UNLABELLED: "unlabelled", L.BALLOON: "balloon", L.BACKGROUND: "b
 TOOLS = ("brush", "rect", "ellipse")        # _tool() is the index, as the old radio ids were
 TOOL_NAME = {"brush": "brush", "rect": "rectangle", "ellipse": "ellipse"}
 UNDO_DEPTH = 50
+# A brush stroke that ends within this many px (plus twice the brush radius)
+# of its start is closed with a straight line before the loop fill. Half a
+# typical balloon's radius at 2 m: generous for a hand at 160x120, short
+# enough that an open arc across a balloon is not taken for a loop.
+CLOSE_GAP_PX = 5.0
 NO_HOVER = "hover over the image"
 NO_FRAME = "no frame: open a folder of saved frames"
 DONE_ROLE = Qt.ItemDataRole.UserRole + 1    # the frame has a labels file
@@ -174,7 +187,10 @@ class _CountTile(QFrame):
 class LabelTab(QWidget):
     def __init__(self, folder: Path | None = None):
         super().__init__()
-        self.folder = Path(folder or DATA_DIR)
+        # data/sessions/, not data/: the tab lists the frames of every subfolder,
+        # and data/ also holds the uncorrected originals of the same frames.
+        default = sessions_dir() if sessions_dir().is_dir() else DATA_DIR
+        self.folder = Path(folder or default)
         self.stems: list[Path] = []
         self.sf: L.SavedFrame | None = None
         self.lab = np.zeros((120, 160), dtype=np.uint8)
@@ -183,6 +199,7 @@ class LabelTab(QWidget):
         self.undo: list[np.ndarray] = []
         self._drag0 = None
         self._last = None
+        self._far = 0.0
         self._det = None                # detector result and mask for this frame
         self._mask = None
         self._stage_eff = 0
@@ -461,6 +478,12 @@ class LabelTab(QWidget):
         self.radius.setToolTip("0 = one pixel")
         g.addWidget(_key("Brush radius"), 2, 0)
         g.addWidget(self.radius, 2, 1, Qt.AlignmentFlag.AlignLeft)
+        self.fill_loops = QCheckBox("Fill closed loops")
+        self.fill_loops.setChecked(True)
+        self.fill_loops.setToolTip("A brush stroke that closes a loop (ends near its start, "
+                                   "or meets the same class) fills its inside with that class. "
+                                   "Not with Erase. Ctrl+Z takes back stroke and fill.")
+        g.addWidget(self.fill_loops, 3, 1, Qt.AlignmentFlag.AlignLeft)
         g.setColumnStretch(1, 1)
         s.add_layout(g)
         b = QPushButton("Rest → background")
@@ -549,6 +572,7 @@ class LabelTab(QWidget):
         persist.save_sections(store, self.sections)
         persist.save_zoom(store, self.view)
         store.setValue("opacity", self.opacity.value())
+        store.setValue("fill_loops", int(self.fill_loops.isChecked()))
         store.setValue("folder", str(self.folder))
 
     def restore_state(self, store, folder: bool = True):
@@ -560,6 +584,9 @@ class LabelTab(QWidget):
         v = persist.read_int(store, "opacity", self.opacity.minimum(), self.opacity.maximum())
         if v is not None:
             self.opacity.setValue(v)
+        v = persist.read_int(store, "fill_loops", 0, 1)
+        if v is not None:
+            self.fill_loops.setChecked(bool(v))
         d = persist.read(store, "folder", str, lambda v: bool(v) and Path(v).is_dir())
         if folder and d is not None and Path(d) != self.folder:
             self.open_folder(Path(d))
@@ -741,6 +768,7 @@ class LabelTab(QWidget):
             return
         self._push_undo()
         self.dab(pos.x(), pos.y(), self._cls(erase))
+        self._fill_loops(self._cls(erase))      # a dab can plug the last gap of a ring
         self._changed()
 
     def drag_start(self, pos, erase: bool):
@@ -749,6 +777,7 @@ class LabelTab(QWidget):
         self._push_undo()
         self._drag0 = (pos.x(), pos.y())
         self._last = self._drag0
+        self._far = 0.0                 # how far the stroke has gone from its start
 
     def drag_move(self, pos, erase: bool):
         if self.sf is None or self._drag0 is None:
@@ -761,6 +790,7 @@ class LabelTab(QWidget):
             for i in range(1, n + 1):
                 self.dab(lx + (x - lx) * i / n, ly + (y - ly) * i / n, self._cls(erase))
             self._last = (x, y)
+            self._far = max(self._far, math.hypot(x - self._drag0[0], y - self._drag0[1]))
             self._draw_labels()
         else:
             ax, ay = self._drag0
@@ -773,9 +803,33 @@ class LabelTab(QWidget):
         if self._tool() != 0:
             ax, ay = self._drag0
             self.fill_shape(ax, ay, pos.x(), pos.y(), self._tool() == 2, self._cls(erase))
+        else:
+            self._close_stroke(pos, self._cls(erase))
+            self._fill_loops(self._cls(erase))
         self.view.set_preview(None)
         self._drag0 = None
         self._changed()
+
+    def _close_stroke(self, pos, cls: int):
+        """Paint the gap between a brush stroke's end and its start shut, when
+        the end came back near the start after going well away from it (a
+        dab or a short wiggle is not a loop)."""
+        if not self.fill_loops.isChecked() or cls == L.UNLABELLED:
+            return
+        ax, ay = self._drag0
+        x, y = pos.x(), pos.y()
+        gap = math.hypot(x - ax, y - ay)
+        reach = CLOSE_GAP_PX + 2 * self.radius.value()
+        if gap <= reach and self._far > 2 * reach:
+            n = max(1, int(gap * 2))
+            for i in range(1, n + 1):
+                self.dab(x + (ax - x) * i / n, y + (ay - y) * i / n, cls)
+
+    def _fill_loops(self, cls: int):
+        """Fill what the stroke just enclosed (L.fill_new_loops), against the
+        labels as they were before it: the undo entry the stroke pushed."""
+        if self.fill_loops.isChecked() and cls != L.UNLABELLED and self.undo:
+            self.lab = L.fill_new_loops(self.undo[-1], self.lab, cls)
 
     def fill_rest(self):
         if self.sf is None:

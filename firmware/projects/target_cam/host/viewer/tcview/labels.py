@@ -63,18 +63,25 @@ class SavedFrame:
         return st
 
 
+def _sibling(stem: Path, suffix: str) -> Path:
+    """stem + suffix by string, never with_suffix(): a stem may hold a dot of
+    its own (the 2026-10-31 sessions saved names like "parking_1.png.rgb565",
+    whose stem with_suffix() cut to "parking_1", so the .json was not found)."""
+    return Path(str(stem) + suffix)
+
+
 def list_frames(folder: Path) -> list[Path]:
     """Every saved frame under folder (subfolders included: one subfolder per
     capture session), as stems, sorted."""
     folder = Path(folder)
-    return sorted(p.with_suffix("") for p in folder.rglob("*.rgb565")
-                  if p.with_suffix(".json").exists())
+    stems = (p.with_name(p.name[:-len(".rgb565")]) for p in folder.rglob("*.rgb565"))
+    return sorted(s for s in stems if _sibling(s, ".json").exists())
 
 
 def load_frame(stem: Path) -> SavedFrame:
     stem = Path(stem)
-    meta = json.loads(stem.with_suffix(".json").read_text())
-    data = stem.with_suffix(".rgb565").read_bytes()
+    meta = json.loads(_sibling(stem, ".json").read_text())
+    data = _sibling(stem, ".rgb565").read_bytes()
     w, h = int(meta.get("w", 160)), int(meta.get("h", 120))
     if len(data) != w * h * 2:
         raise ValueError("%s: %d bytes, expected %d for %dx%d RGB565"
@@ -205,6 +212,39 @@ def rest_to_background(lab: np.ndarray, band: int = 2) -> np.ndarray:
         near = g
     out = lab.copy()
     out[(lab == UNLABELLED) & ~near] = BACKGROUND
+    return out
+
+
+def enclosed(wall: np.ndarray) -> np.ndarray:
+    """The pixels that are not wall and that no 4-connected path of non-wall
+    pixels links to the image border: the insides of the wall's closed loops.
+    4-connected, so a diagonal step in the wall still closes it. Grown from
+    the border by repeated shifts (numpy only; ~ms on 160x120)."""
+    free = ~wall
+    reach = np.zeros_like(free)
+    reach[0], reach[-1], reach[:, 0], reach[:, -1] = free[0], free[-1], free[:, 0], free[:, -1]
+    while True:
+        g = reach.copy()
+        g[1:] |= reach[:-1]
+        g[:-1] |= reach[1:]
+        g[:, 1:] |= reach[:, :-1]
+        g[:, :-1] |= reach[:, 1:]
+        g &= free
+        if np.array_equal(g, reach):
+            return free & ~reach
+        reach = g
+
+
+def fill_new_loops(before: np.ndarray, after: np.ndarray, cls: int) -> np.ndarray:
+    """After a brush stroke of class cls (before -> after), fill the regions
+    the stroke closed: inside a loop of cls pixels now, not inside one
+    before. Everything in such a region takes cls, whatever it held, as the
+    inside of an ellipse does. Only new loops count, so a stroke anywhere
+    does not fill the unlabelled rim that Rest -> background leaves round a
+    balloon, or a hole the user left on purpose in an earlier stroke."""
+    new = enclosed(after == cls) & ~enclosed(before == cls)
+    out = after.copy()
+    out[new] = cls
     return out
 
 

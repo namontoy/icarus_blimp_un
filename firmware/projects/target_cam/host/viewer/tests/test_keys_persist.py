@@ -282,7 +282,7 @@ def test_bad_values_are_ignored(app, tmp_path):
         assert w.console.is_expanded()
         assert w.calib.view.zoom() == "fit" and w.calib.sections["colour"].is_expanded()
         assert w.calib.strip.is_expanded()
-        assert w.label.opacity.value() == 45 and w.label.folder.name == "data"
+        assert w.label.opacity.value() == 45 and w.label.folder.name in ("sessions", "data")   # data/sessions/ when it exists
         assert w.blobs.size_slider.value() == 72
         assert w.calib.split.sizes()[1] > 0
     finally:

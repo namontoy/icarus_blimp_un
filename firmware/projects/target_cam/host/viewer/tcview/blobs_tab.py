@@ -36,7 +36,7 @@ from PyQt6.QtWidgets import (QAbstractItemView, QFileDialog, QFrame, QGridLayout
 from . import blobset as B
 from . import detector as D
 from . import protocol as P
-from .calib_tab import DATA_DIR, _group, _key
+from .calib_tab import DATA_DIR, _group, _key, blobs_dir, sessions_dir
 from .ui import persist, theme
 from .ui.keys import add_shortcut
 from .ui.widgets import (Banner, CopyButton, FlowLayout, GripSplitter, ReadoutCard, Segment,
@@ -490,14 +490,15 @@ class BlobsTab(QWidget):
             self.main.send("!collect %d" % int(on))
 
     def _ask_folder(self):
+        start = sessions_dir() if sessions_dir().is_dir() else DATA_DIR
         d = QFileDialog.getExistingDirectory(self, "Saved frames to take blobs from",
-                                             str(DATA_DIR))
+                                             str(start))
         if d:
             n = self.add_folder(Path(d))
             self._say("# [viewer] %d blobs from the labelled frames under %s" % (n, d))
 
     def _ask_load(self):
-        p, _ = QFileDialog.getOpenFileName(self, "Load blob dataset", str(DATA_DIR),
+        p, _ = QFileDialog.getOpenFileName(self, "Load blob dataset", str(blobs_dir()),
                                            "Blob datasets (*.npz)")
         if p:
             try:
@@ -506,9 +507,9 @@ class BlobsTab(QWidget):
                 QMessageBox.warning(self, "Load dataset", "%s: %s" % (p, e))
 
     def _ask_save(self):
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        blobs_dir().mkdir(parents=True, exist_ok=True)
         p, _ = QFileDialog.getSaveFileName(
-            self, "Save blob dataset", str(DATA_DIR / time.strftime("blobs_%Y%m%d_%H%M%S.npz")),
+            self, "Save blob dataset", str(blobs_dir() / time.strftime("blobs_%Y%m%d_%H%M%S.npz")),
             "Blob datasets (*.npz)")
         if p:
             self.save_to(Path(p if p.endswith(".npz") else p + ".npz"))
