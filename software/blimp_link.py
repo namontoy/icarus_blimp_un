@@ -512,6 +512,15 @@ class BlimpConsole:
     def close(self):
         self.sock.close()
 
+    def drain(self):
+        """Drop what is left of a reply that was cut short, so that it cannot
+        pass for the next command's."""
+        while True:
+            try:
+                self.sock.recvfrom(4096)
+            except (socket.timeout, OSError):
+                return
+
     def run(self, line, timeout=300.0, idle=10.0, echo=None):
         """Send one line and return its whole output as text.
 
@@ -604,9 +613,24 @@ def parse_params(text):
     return {'count': int(head.group(1)), 'changes': int(head.group(2)), 'values': values, 'changed': changed}
 
 
-def read_params(console, timeout=3.0):
-    """The blimp's parameters now, through the console; see parse_params()."""
-    return parse_params(console.run('param', timeout=timeout, idle=timeout))
+def read_params(console, timeout=3.0, tries=3):
+    """The blimp's parameters now, through the console; see parse_params().
+
+    The listing spans several datagrams, so on a weak link (the S3's antenna
+    under the metallized envelope ran at -80 dBm and worse on 2026-11-01) a
+    part can go missing: a listing without its head, or short of the count
+    its head gives, is asked for again."""
+    err = None
+    for _ in range(tries):
+        try:
+            p = parse_params(console.run('param', timeout=timeout, idle=timeout))
+            if len(p['values']) == p['count']:
+                return p
+            err = ValueError('a parameter listing with %d of its %d values' % (len(p['values']), p['count']))
+        except (ValueError, TimeoutError) as e:
+            err = e
+        console.drain()
+    raise err
 
 
 # -------------------------------------------------------------------- CLI

@@ -6,7 +6,8 @@ must touch four tethered red balloons in order on two courses, with total thrust
 (Rule 13). Since 2026-10-27 this repo holds everything: the flight controller, simulator and design
 docs that were the DroneUN repo, and the bench firmware, ground station and reports of
 icarus_blimp_un. README.md is the overview; docs/10-known-issues.md is the live status and
-known-problems page.
+known-problems page; docs/flight-tests.md is where the free-flight tests stand, their rules and
+the next run.
 
 This file is shared by every coding agent used on the project (Codex, Claude Code through
 CLAUDE.md, and others). Keep it tool-neutral; tool-specific notes belong in that tool's own file.

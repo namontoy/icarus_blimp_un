@@ -1,0 +1,1 @@
+front_reverse_ratio=0.74 motor_max_thrust_n=0.033 front_deadband_n=0.0003 front_half_span_m=0.12 hover_thrust_n=0.0461 heave_budget_n=0.066 alt.kp=0.12 alt.kd=0.37 alt.d_lpf_hz=0.3 alt.i_max=0.0196 alt.i_min=-0.0196 alt.ki=0.006 yaw.out_max=0.002 yaw.out_min=-0.002 yaw.kp=0.0045 yaw.kd=0.0075 yaw.d_lpf_hz=0.3 yaw.ki=0

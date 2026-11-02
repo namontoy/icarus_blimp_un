@@ -22,6 +22,14 @@ it turns by --turn deg (+ is counter-clockwise from above, to the left), for
 reverse a turn is an arc that pushes the blimp forward; with it, a couple.
 The first leg goes the way the nose points when the hold arms: heading 0.
 
+--follow (2026-11-02) aims at the forward camera's red balloon instead of
+holding heading 0, from the end of the settle to the landing ('hold follow',
+core/'s target_held: the bearing only, no range). With --legs 0 it follows
+for --hold s (the follow test, T3); with --legs 1 the push, coast and brake
+go toward the balloon while it keeps aiming (the approach, T4), so a
+sideways current shows as the balloon sliding off centre and the follow
+turns into it. Turns would fight the follow, so it takes at most one leg.
+
 The climb: 'hold altitude --alt --climb-rate', core/ moving the height
 setpoint from where the blimp stands (core 0.4.0), then --settle s at the
 height before the first leg. The landing is hold_test.py's (land(): down
@@ -68,16 +76,19 @@ def schedule(args):
     starts. kind: 'climb', 'settle', 'push', 'coast', 'brake', 'hold', 'turn'."""
     out = []
     t = 0.0
+    trim = getattr(args, 'trim', 0.0)
 
     def add(dur, label, kind, heading, surge):
         nonlocal t
         if dur > 0:
-            out.append((t, t + dur, label, kind, heading, surge))
+            out.append((t, t + dur, label, kind, heading, surge + trim))
             t += dur
 
     climb_s = max(0.0, args.alt - TOF_FLOOR_M) / args.climb_rate
     add(climb_s, 'climb to %.2f m' % args.alt, 'climb', 0.0, 0.0)
     add(args.settle, 'settle', 'settle', 0.0, 0.0)
+    if getattr(args, 'follow', False) and args.legs == 0:
+        add(args.hold, 'follow the balloon', 'follow', 0.0, 0.0)
     heading = 0.0
     for leg in range(1, args.legs + 1):
         if leg > 1:
@@ -204,16 +215,30 @@ def run(args):
             sys.exit('the driver refused --max-duty %g --deadband %g; nothing started' % (args.max_duty, args.deadband))
         front = front_names(reply)
         log('the front pair, by name: %s' % ' '.join(front))
-        params = bl.read_params(con)
+        params = ht.read_params(con, log)
         ratio = params.get('values', {}).get('front_reverse_ratio')
-        if args.brake and not (ratio and ratio > 0):
+        if (args.brake or args.trim < 0) and not (ratio and ratio > 0):
+            if args.trim < 0 and not args.brake:
+                sys.exit('a negative --trim needs front_reverse_ratio above 0 (it is %s): add --param '
+                         'front_reverse_ratio=0.74' % ratio)
             sys.exit('a brake needs front_reverse_ratio above 0 (it is %s): add --param front_reverse_ratio=0.74, '
                      'or drop --brake' % ratio)
         if args.legs > 1 and not (ratio and ratio > 0):
             log('note: front_reverse_ratio is %s, so the turns are arcs that push the blimp forward' % ratio)
+        if args.follow:
+            # a follow with a silent camera holds where it last saw nothing:
+            # refuse before the motors start rather than fly blind
+            reply = ht.console(con, 'cam')
+            m = re.search(r'(\d+) rows/s', reply)
+            log(reply.strip().splitlines()[0] if reply.strip() else '?')
+            if not m or int(m.group(1)) == 0:
+                sys.exit("--follow needs the forward camera's rows, and 'cam' shows none:\n" + reply)
         t_wait = time.monotonic()
         while True:
-            state = ht.console(con, 'hold')
+            try:
+                state = ht.console(con, 'hold')
+            except TimeoutError:
+                state = ''      # a short Wi-Fi drop (rssi near -80 dBm, 2026-11-01): ask again
             m = re.search(r'estimator: (\w+) \(still (\d+) of 60 s\)', state)
             if m and m.group(1) == 'converged':
                 break
@@ -224,6 +249,10 @@ def run(args):
                   flush=True)
             time.sleep(1.0)
         print()
+        why = ht.floor_check(link)
+        if why:
+            sys.exit(why + '\nnothing started')
+        log('the ToF sees the floor')
 
         cap = bl.CaptureClient(link)
         if cap.info()['state'] == 1:
@@ -245,9 +274,13 @@ def run(args):
         # The phases follow one another from the hold's start: each one's
         # commands go out as the one before ends, then it runs to its t1.
         heading_now, surge_now = 0.0, 0.0
+        following = False
         next_poll = 0.0
         for t0, t1, label, kind, heading, surge in phases:
-            if heading != heading_now:
+            if args.follow and not following and kind not in ('climb', 'settle'):
+                send('hold follow')
+                following = True
+            if heading != heading_now and not following:
                 send('hold heading %g' % heading)
                 heading_now = heading
             if surge != surge_now:
@@ -262,15 +295,22 @@ def run(args):
                     log('%6.1f s  KILLED: %s' % (clock(), why))
                     break
                 if time.monotonic() >= next_poll:
-                    log('%6.1f s  %s' % (clock(), ht.hold_line(ht.console(con, 'hold'))))
+                    # A missed status poll is no reason to end a flight: the
+                    # kills read telemetry, and core/ zeroes the hold itself
+                    # after 1 s without a ground packet.
+                    try:
+                        log('%6.1f s  %s' % (clock(), ht.hold_line(ht.console(con, 'hold'))))
+                    except TimeoutError:
+                        log('%6.1f s  no answer to the status poll (a Wi-Fi drop?)' % clock())
                     next_poll = time.monotonic() + args.poll
                 time.sleep(0.02)
             if killed:
                 break
 
         if started and not killed:
-            if surge_now:
-                send('hold surge 0')
+            # the trim stays on through the landing: the rear pair still pushes
+            if surge_now != args.trim:
+                send('hold surge %g' % args.trim)
             if args.land:
                 killed = ht.land(con, link, args.alt, args.land_rate, args.final_rate, tripped, log, clock,
                                  args.poll)
@@ -319,6 +359,7 @@ def run(args):
             'notes': args.notes, 'header': h, 'records': len(records), 'params': params,
             'test': {'legs': args.legs, 'turn_deg': args.turn, 'alt_m': args.alt, 'climb_rate_mps': args.climb_rate,
                      'settle_s': args.settle, 'push': args.push, 'coast_s': args.coast, 'brake': args.brake,
+                     'trim_gf': args.trim, 'follow': args.follow,
                      'hold_s': args.hold, 'turn_time_s': args.turn_time, 'land': args.land,
                      'land_rate_mps': args.land_rate, 'final_rate_mps': args.final_rate,
                      'phases': [list(p) for p in phases], 'hold_start_in_capture_s': offset,
@@ -354,6 +395,13 @@ def main(argv=None):
     ap.add_argument('--coast', type=float, default=2.0, help='s with the motors idle after the push (default %(default)s)')
     ap.add_argument('--brake', type=float, nargs=2, metavar=('GF', 'S'),
                     help='each leg\'s brake: gf backwards for s (needs front_reverse_ratio > 0); none by default')
+    ap.add_argument('--trim', type=float, default=0.0,
+                    help='gf added to every phase\'s surge, the climb and the landing included (default 0); '
+                         'negative pushes backwards (needs front_reverse_ratio > 0): the counter-push for the '
+                         'rear pair, whose thrust leans forward on this blimp (a 45 deg climb, 2026-11-01)')
+    ap.add_argument('--follow', action='store_true',
+                    help="aim at the forward camera's balloon from the end of the settle ('hold follow'), "
+                         'instead of holding heading 0; with --legs 0 for --hold s, with --legs 1 through the leg')
     ap.add_argument('--hold', type=float, default=5.0,
                     help='s still after each leg and after each turn (default %(default)s)')
     ap.add_argument('--turn-time', type=float, default=8.0,
@@ -384,22 +432,33 @@ def main(argv=None):
 
     if not 0 <= args.legs <= 8:
         sys.exit('--legs is 0 .. 8')
+    if args.follow and args.legs > 1:
+        sys.exit('--follow takes at most one leg: the turns between legs would fight it')
     if not math.isfinite(args.turn) or abs(args.turn) > 180:
         sys.exit('--turn is -180 .. 180 deg')
     if not math.isfinite(args.alt) or not 0.3 <= args.alt <= 2.5:
         sys.exit('--alt is 0.3 .. 2.5 m (the room is 3 m high)')
     if not math.isfinite(args.climb_rate) or not 0.02 <= args.climb_rate <= 0.5:
         sys.exit("--climb-rate is 0.02 .. 0.5 m/s (the firmware's 'hold altitude' rate)")
-    for name, v in (('--settle', args.settle), ('--coast', args.coast), ('--hold', args.hold),
-                    ('--turn-time', args.turn_time)):
-        if not math.isfinite(v) or not 0.0 <= v <= 60.0:
-            sys.exit('%s is 0 .. 60 s' % name)
+    # The follow hover (--legs 0 --follow) walks the balloon through several
+    # positions, about 10 s each, so it gets two minutes; still well inside
+    # the capture's 400 s and one battery.
+    hold_max = 120.0 if args.follow and args.legs == 0 else 60.0
+    for name, v, top in (('--settle', args.settle, 60.0), ('--coast', args.coast, 60.0),
+                         ('--hold', args.hold, hold_max), ('--turn-time', args.turn_time, 60.0)):
+        if not math.isfinite(v) or not 0.0 <= v <= top:
+            sys.exit('%s is 0 .. %g s' % (name, top))
     for name, pair in (('--push', args.push), ('--brake', args.brake)):
         if pair is None:
             continue
         gf, s = pair
         if not (math.isfinite(gf) and 0.0 < gf <= 30.0 and math.isfinite(s) and 0.0 < s <= 30.0):
             sys.exit("%s is GF S: 0 < GF <= 30 gf (the firmware's 'hold surge' range), 0 < S <= 30 s" % name)
+    if not math.isfinite(args.trim) or not -10.0 <= args.trim <= 10.0:
+        sys.exit('--trim is -10 .. 10 gf')
+    for pair, sign in ((args.push, 1.0), (args.brake, -1.0)):
+        if pair is not None and abs(sign * pair[0] + args.trim) > 30.0:
+            sys.exit("the trim takes a phase's surge past the firmware's 'hold surge' range (-30 .. 30 gf)")
     if not math.isfinite(args.land_rate) or not 0.02 <= args.land_rate <= 0.5:
         sys.exit('--land-rate is 0.02 .. 0.5 m/s')
     if not math.isfinite(args.final_rate) or not 0.01 <= args.final_rate <= 0.2:

@@ -188,12 +188,64 @@ def plan(steps, dwell, follow=False):
     return [(k * dwell, (k + 1) * dwell, h) for k, h in enumerate(steps)]
 
 
-def console(con, line, log=None):
-    text = con.run(line, timeout=5.0, idle=2.0)
+def console(con, line, log=None, tries=2):
+    """One console command and its reply. A reply lost to a Wi-Fi drop is
+    asked for once more: every command these tools send is idempotent (param
+    sets, 'motor --max-duty', 'hold ...'), and on 2026-11-01 the link ran at
+    -82 .. -86 dBm with the S3's antenna under the metallized envelope."""
+    for k in range(tries):
+        try:
+            text = con.run(line, timeout=5.0, idle=2.0)
+            break
+        except TimeoutError:
+            if k == tries - 1:
+                raise
+            con.drain()
     if log:
         for ln in text.strip().splitlines():
             log('    > ' + ln)
     return text
+
+
+def floor_check(link, seconds=1.5, max_mm=300):
+    """None if the ToF sees the floor through `seconds` before a hold arms,
+    otherwise why not. A blinded ToF (status 2, 'signal fail', reading 1.4 to
+    3 m with the gondola on the floor, 2026-11-02) leaves core/ without a
+    height: its hold then commands no lift, which is safe, and the run's
+    pushes go into a blimp sitting on the floor, which is a wasted run."""
+    t_end = time.monotonic() + seconds
+    seen = bad = 0
+    last = worst = None
+    while time.monotonic() < t_end:
+        s = link.sensors
+        if s is not None and s is not last:
+            seen += 1
+            if not (s['tof_valid'] and s['tof_status'] == 0 and s['tof_mm'] <= max_mm):
+                bad += 1
+                worst = s
+            last = s
+        time.sleep(0.02)
+    if not seen:
+        return 'no sensor packets from the blimp in %.1f s, so the ToF cannot be checked' % seconds
+    if bad:
+        return ('the ToF does not see the floor: %d of %d readings bad (one: %s, %d mm, status %d). Is something '
+                'under the gondola, such as the black launch stand or a cable?'
+                % (bad, seen, 'valid' if worst['tof_valid'] else 'invalid', worst['tof_mm'], worst['tof_status']))
+    return None
+
+
+def read_params(con, log=print):
+    """The parameter listing, for the run's notes. The listing is the longest
+    reply the console gives, and on a weak link it can fail to arrive whole
+    however often it is asked for (-82 dBm on 2026-11-01): then
+    front_reverse_ratio alone, which the runs check, and 'partial' in the notes."""
+    try:
+        return bl.read_params(con)
+    except (ValueError, TimeoutError) as e:
+        log('the parameter listing did not come through whole (%s); reading front_reverse_ratio alone' % e)
+    reply = console(con, 'param front_reverse_ratio')
+    m = re.search(r'^front_reverse_ratio\s+(\S+)', reply, re.M)
+    return {'values': {'front_reverse_ratio': float(m.group(1))} if m else {}, 'partial': True}
 
 
 def hold_line(text):
@@ -384,7 +436,7 @@ def run(args):
             log(reply.strip())
             if 'takes' in reply:
                 sys.exit('motor%s was refused; nothing started' % opts)
-        params = bl.read_params(con)
+        params = read_params(con, log)
         # core/ arms only after 60 s of stillness; wait for it rather than
         # refuse, printing the count, up to --wait seconds (hands off meanwhile)
         t_wait = time.monotonic()
@@ -400,6 +452,11 @@ def run(args):
                   flush=True)
             time.sleep(1.0)
         print()
+        if args.altitude or args.hold_alt is not None:
+            why = floor_check(link)
+            if why:
+                sys.exit(why + '\nnothing started')
+            log('the ToF sees the floor')
 
         cap = bl.CaptureClient(link)
         if cap.info()['state'] == 1:
@@ -611,7 +668,9 @@ def main(argv=None):
                          "2026-11-01; given anyway, it also undoes a plain driver left by the thrust stand)")
     ap.add_argument('--surge', type=float, default=0.0,
                     help="'hold surge' for the whole run, gf (default 0): keeps both front motors turning, so "
-                         "a yaw correction speeds one up and slows the other instead of starting one from rest")
+                         "a yaw correction speeds one up and slows the other instead of starting one from rest; "
+                         "negative pushes backwards (core 0.4.0, with front_reverse_ratio > 0), the counter-push "
+                         "for the rear pair's forward lean")
     ap.add_argument('--max-rate', type=float, default=120.0,
                     help='kill above this yaw rate, deg/s (default %(default)s); until 2026-11-01 any axis')
     ap.add_argument('--max-tilt-rate', type=float, default=120.0,
@@ -660,8 +719,8 @@ def main(argv=None):
         sys.exit('--max-rate and --max-tilt-rate are > 0 deg/s')
     if args.dwell <= 0 or args.dwell * (1 if args.follow else len(args.steps)) > 300:
         sys.exit('--dwell must be > 0 and the whole run under 300 s (the capture buffer)')
-    if not math.isfinite(args.surge) or not 0.0 <= args.surge <= 30.0:
-        sys.exit("--surge is 0 .. 30 gf (the firmware's 'hold surge' range)")
+    if not math.isfinite(args.surge) or not -30.0 <= args.surge <= 30.0:
+        sys.exit("--surge is -30 .. 30 gf (the firmware's 'hold surge' range)")
     return run(args)
 
 
