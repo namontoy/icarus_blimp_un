@@ -25,7 +25,9 @@ bias is **image-fixed and therefore ours, not the room's**, and that there is **
 cross-axis scale difference** (1.021). At 0.15 px/frame — near the 0.12 px/frame a
 2 m hover produces — the host sweep and real images now **agree to 2.6 points**.
 **The dominant remaining error is a constant ~4 mm/s image-axis bias; zero-mean
-SAD is the fix in the queue.**
+SAD is the fix in the queue.** Since 2026-11-02 the flow also runs through the
+S3, logged beside its gyro and ToF (§12): on a desk rig through the S3 it read
+a 40 cm move to within ±3 % once calibrated.
 
 ---
 
@@ -1464,7 +1466,8 @@ gyro and ToF, on surfaces like the floor, at flight height. So the team runs
 the next tests through the S3, with the forward camera's module flashed with
 optflow_cam and pointed down; no second camera, no new wires.
 
-**What changed (built and host-tested; not yet run on hardware):**
+**What changed** (built and host-tested; run on hardware from the evening of
+2026-11-02, below):
 
 - optflow_cam copies every row to UART1, TX IO14 (`CONFIG_OPTFLOW_S3_UART`,
   on by default), target_cam's wiring to the S3's GPIO6.
@@ -1479,7 +1482,10 @@ optflow_cam and pointed down; no second camera, no new wires.
   and the spread in 0.001 px. `software/blimp_log.py` decodes them as the
   `flow_*` columns; `software/flow_test.py` records one test per capture and
   analyses it (texture, drift at rest, each motion against the tape, the
-  shift a tilt makes against the gyro, and the rows' delay).
+  shift a tilt makes against the gyro, and the rows' delay). Since the first
+  runs it also has a window for the people (`--window`: when it records,
+  mark buttons, Finish; the tests run without beeps) and the calibration
+  (`--calibrate` from desk runs, `--cal` to apply it in the analysis).
 
 **Measured in the 2026-11-02 flights** (four captures, T3b, H6, 5b and the
 square, gyro offset taken on the floor before the climb): the gondola tilts at
@@ -1523,6 +1529,36 @@ surface (the view is about 55 × 40 cm, so a towel fills it) and 1 m (about
 second module (weigh it; the heave pair has about 2 gf above hover at the
 40 % ceiling, so a module of ~10 g needs more helium or less weight
 elsewhere), a second UART on the S3, and the flow into `core/`'s estimator.
+
+**First runs (2026-11-02 evening, at a house; the record is
+`docs/history/flow-s3-2026-11-02.md`).** Not yet the plan above: the camera
+stayed in its front mount, tilted, looking at a wall 1.40 m away, and a
+height-adjustable desk moved the gondola 40 cm down and back up at about
+25 mm/s, the bench rig of §8.14.
+
+Measured:
+
+- **The chain works:** 12.5 frames a second reach the S3 and its capture, none
+  lost in six runs, 100 % measured, 17–22 of 25 blocks; at rest 0.01–0.15 px/s
+  of drift and about 0.014 px of jitter a frame.
+- **Repeatable only with one flat target and nothing moved between runs.** The
+  first three runs read the same 40 cm as 19 to 62 px, the motion's direction
+  in the image changing from run to run; with sheets pasted on the wall and
+  the setup untouched, runs 4 and 5 agreed within 1–3 % (32 px down, 36–37 px
+  up, against 41 px expected).
+- **The calibration** (`flow_test.py --calibrate`, runs 4 and 5): a constant
+  offset of 0.178 px/s along the image's y axis (about 1.7 mm/s), then
+  f = 120 px against the lens's 144, so the camera reads 83 % of the travel.
+  On run 6, not used to make it: **394 and 413 mm for the 400 mm moves, back
+  within 27 mm**, against 305 and 369 mm and 103 mm raw.
+
+Reasoned: the offset is §8.15's image-fixed one (1–4 mm/s on the bench) and
+the reason a move against it reads short and one with it long; the 83 % may be
+partly the diagonal (the desk's vertical lands 57° off the image x axis, and
+§8.15 read 92 % on diagonal motion against 108–116 % along an axis). Not
+established: other directions of motion, other surfaces and distances, the
+floor from above, the offset from day to day, the tilt test and the delay. The
+calibration is applied only on the ground.
 
 **Afterwards** the module goes back to namontoy's target_cam. Both firmwares
 use the default partition table and optflow_cam never touches NVS, so
