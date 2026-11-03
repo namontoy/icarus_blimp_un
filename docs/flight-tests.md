@@ -1,13 +1,20 @@
 # Flight tests: where they stand and how to run the next one
 
-**Status, 2026-11-02 evening.** The blimp climbs, holds 1 m and its heading, goes 2 m along
-the line and stops there (test 5), and lands on its own; it follows the red balloon with its
-nose when the forward camera sees the balloon (T3 done for the controller). Two open problems:
-the camera's detection (the crumpled 34 cm foil test balloon is found reliably only within about
-2 m, and only when a good face looks at the camera), and the open-loop drift, which grows with
-the flight's length and changes with the battery (each battery type needs its own trim). **Next:
-test 7 (the square), on a freshly charged cell of the new type with `--trim -0.6`.** The
-detection goes to namontoy (a taut race-size balloon, the colours tuned in this room).
+**Status, 2026-11-02 night.** The blimp climbs, holds 1 m (or 2 m) and its heading, goes 2 m
+along the line and stops there (test 5), and always lands on its own. The square (test 7)
+found that `core/` keeps learning the gyro's bias in the air and turns the heading with it (96°
+off by the fourth leg); `--flight-bias-tau 600` holds that off until the `core/` fix. The
+balloon flights (`target_test.py`) found the balloon from about 2.2 m, locked onto it,
+approached, backed off when too close (flight 5) and landed every time. Open: the camera's
+detection (about 2.2 m with the crumpled 34 cm test balloon), the nose lagging a seen balloon
+by 11–20° and turns that creep forward (both the front pair's reverse), and the open-loop drift.
+
+**The forward camera runs `optflow_cam` since the evening of 2026-11-02** (the optical-flow
+tests, `docs/history/flow-s3-2026-11-02.md`): flash namontoy's `target_cam` back before any
+balloon flight, or `hold follow` refuses (no rows). **Next:** the turn-on-the-spot calibration
+of `front_reverse_ratio` (heading steps at 1 m, as test 2, at 0.74 and lower), then a trim
+check; then the square again with `--flight-bias-tau 600`. The detection goes to namontoy (a
+taut race-size balloon, the colours tuned in this room).
 
 This is a living page: after each run, update the status above and the run's line in the
 order below. What each run measured, with captures and numbers, goes in the session record:
@@ -49,8 +56,19 @@ day.
   −1 gf for the earlier cells. A new type, or a big change in the blimp's weight, needs a
   trim check: climb, 20 s at 1 m, land (`--legs 0 --settle 20`); the drift halved for each
   0.2 gf less trim. Use one battery type for all the tests and the race.
+- **Every flight ends in a landing** (the team, 2026-11-02, after the first balloon flight
+  stopped its motors at 2.6 m and the blimp had to be caught): the scripts land when the
+  balloon is not found, when the ToF reads too high or goes silent for 1 s, on Ctrl-C and on
+  any error in the script. Two cases still stop the motors in the air: the spin and tilt kills
+  (they mean the controller itself misbehaves) and a lost Wi-Fi link (`core/`'s watchdog after
+  1 s; landing by itself there is a firmware and `core/` change still to make). Keep a spotter.
+- **At most 2.3 m.** The ToF reads the floor to about 2.5 m in the flight room and loses it
+  beyond; `target_test.py` refuses a higher `--alt`.
+- **Every flight with turns passes `--flight-bias-tau 600`** (`target_test.py`'s default;
+  `square_test.py` needs it given) until `core/` stops learning the gyro's bias while armed.
 - Limits: the firmware's 40 % duty ceiling and 10 % deadband (its defaults since 2026-11-01);
-  the scripts kill on yaw over 62 °/s, roll or pitch over 120 °/s, ToF over 1.5 m.
+  the scripts kill on yaw over 62 °/s, roll or pitch over 120 °/s, and land on a ToF over the
+  height plus 0.3 m (`square_test.py`: a kill over 1.5 m at its 1 m).
 - Captures land in the gitignored `captures/` of the PC that ran them; give each run `--notes`.
 - The forward camera's firmware and its detector (`firmware/projects/target_cam/`) are
   namontoy's: settings and changes go through them.
@@ -79,6 +97,14 @@ python -u software/square_test.py --legs 1 --push 3 3 --coast 3.5 --brake 3 4 --
 # a trim check: climb, 20 s at 1 m, land; tell where it landed against the start
 python -u software/square_test.py --legs 0 --settle 20 --trim -0.6 --wait 180 --param $BP --go
 
+# test 7, the square: A-B-C-D-A, legs as test 5, left turns on the spot
+python -u software/square_test.py --legs 4 --push 3 3 --coast 3.5 --brake 3 4 --hold 5 \
+    --trim -0.6 --flight-bias-tau 600 --wait 180 --param $BP --notes "test 7 ..." --go
+
+# the balloon flight: climb to 2 m, look, scan +-60 deg, follow, 40 cm toward / away /
+# toward with the proximity guard, land (the balloon's centre about 1.8-1.9 m, 2.2 m away)
+python -u software/target_test.py --trim -0.6 --param $BP --notes "balloon flight ..." --go
+
 # afterwards
 python software/blimp_log.py captures/<name>.bin                 # summary
 python software/blimp_log.py captures/<name>.bin --csv out.csv   # every 20 ms record, in units
@@ -103,10 +129,12 @@ team's report of where the blimp went (photos against the tape) is the only reco
 | T3 | follow the balloon while hovering | flown twice; done for the controller (turns to a seen balloon, holds when it is lost, finds it again); the left step was never detected |
 | check | the walk-in camera check | done: reliable from about 2.2 m in, patches of 26–70 px |
 | 5 | one leg, A to B | done: push 3 gf 3 s, coast 3.5 s, brake 3 gf 4 s stops it at 2 m (trim −0.6, new battery); it drifts afterwards |
-| **7** | **the square** | **next, on a fresh cell** |
-| T4 | approach and touch | after the detection is fixed (needs 4 m) |
+| 7 | the square | flown: the legs right, the heading 96° off by the end (`core/`'s gyro-bias learning); fly again with `--flight-bias-tau 600` |
+| B1–B6 | balloon flights, `target_test.py` | done: not seen from 3 m; found from about 2.2 m, approach, guard and back-off worked (B5); the nose lags 11–20° |
+| **R** | **turn on the spot**: heading steps at 1 m (as test 2) at `front_reverse_ratio` 0.74 and lower, then a trim check | **next** |
+| 7b | the square with the workaround | after R |
+| T4 | approach and touch | after the detection is fixed (needs 4 m); B5 did a short one |
 | T5 | hold a distance from the balloon | needs code and a flash |
-| 7 | the square | later |
 | T6 | a balloon course | needs the race mode |
 
 **The walk-in check (motors off).** The background: the darkest plain one available, no window
@@ -153,9 +181,33 @@ metre or more toward the far wall, which only the balloon tests correct.
 miniature. It needs `core/`'s race guidance running on the S3 (today the S3 flies only the bench
 hold).
 
+**R (turn on the spot).** At 1 m over A, heading 0 → +90 → 0 → −90 → 0 as in test 2, with
+`--param front_reverse_ratio=<r>` after the bench set: first 0.74, then lower (about 0.55).
+Tell: whether each turn stays on the spot or creeps forward, and where it landed. The ratio
+that turns in place then needs a trim check (`--legs 0 --settle 20`), since it also sets how
+strong the trim and the brake are.
+
+**The balloon flight (`target_test.py`).** One red balloon in view, its centre about 1.8–1.9 m
+(level with the camera at the 2.0 m hover; above that it leaves the top of the view as the
+blimp closes in), the blimp on the floor about 2.2 m away facing it. The proximity guard's
+350 px was set with the 34 cm balloon: a bigger balloon trips it farther away, so say the size.
+Tell: whether it turned to the balloon, how close it got, whether it backed off, where it landed.
+
 ## Known problems
 
-- **The camera's detection** is the blocker (T3, the check). The follow itself is good.
+- **`core/` learns the gyro's bias in the air** and the heading hold turns the blimp with it
+  (test 7: 96° off). Workaround `--flight-bias-tau 600`; the fix is in `core/` (no learning
+  while armed; `docs/10-known-issues.md`).
+- **The nose lags a seen balloon by 11–20°, and turns creep forward** (B4–B6): the front pair's
+  reverse gives about three quarters of what is commanded and, near zero, nothing for a moment.
+  Calibrate `front_reverse_ratio` (R); a small `yaw.ki` may also help the follow.
+- **The ToF loses the floor beyond about 2.5 m** in the flight room: 2.3 m at most.
+- **A lost Wi-Fi link stops the motors** in the air after 1 s (`core/`'s watchdog); landing by
+  itself instead needs a firmware and `core/` change.
+- **About 6 of the camera's 13 rows a second reach the PC** over Wi-Fi (the S3 has them all,
+  and `hold follow` runs there).
+- **The camera's detection** is the blocker (T3, the check, B1–B6: found from about 2.2 m
+  with the crumpled balloon, never from 3 m). The follow itself is good.
 - **The room's air** drifts the blimp 1–2 m toward the far wall in about 40 s, differently each
   run. No trim fixes it; the balloon tests are the correction. The IMU cannot measure it (the
   session record has the numbers), and the rear motors cannot push sideways.

@@ -71,8 +71,13 @@ with it, open:
   (tau 20 s) whenever the gyro reads under 11.5 °/s and the accelerometer near 1 g, armed or
   not. A blimp turning or drifting slower than that is "stationary" to it, so in a long slow turn
   the bias creeps toward the real rate and the heading under-reads it; in a hold, a drift under
-  the motors' dead band would go unseen. Reasoned from the code, not measured; a `core/` change
-  (no bias learning while armed, or only with the motors off) when the bench shows it.
+  the motors' dead band would go unseen. **Seen in flight on 2026-11-02** (the square, test 7,
+  `docs/history/flights-2026-11-01.md`): a hover passes the stillness test the whole time, each
+  left turn left about +0.5 °/s in the bias, and the heading hold turned the blimp left with it,
+  96° off by the fourth leg while `core/` believed it held. Workaround with no flash:
+  `gyro_bias_tau_s` 600 s in the air and 20 s on the ground (`square_test.py` and
+  `target_test.py --flight-bias-tau 600`). The fix is still the `core/` change: no bias
+  learning while armed.
 - **The thrust chain is linear**: the hold turns `core/`'s newtons into throttle as
   T / `motor_max_thrust_n` and then the driver's [deadband, ceiling], against a measured F(u)
   that is close to quadratic. Over full duty, part duty delivers less than asked (about half at
