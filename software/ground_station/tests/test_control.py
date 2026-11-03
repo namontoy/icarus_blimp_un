@@ -214,7 +214,8 @@ check(any('not in the firmware yet' in e['text'] for e in win.dock.events), 'pad
 c.set_mode('deck')
 win.resize(1280, 800)
 spin(0.4)
-check(c.mode == 'deck' and c.mode_b['deck'].isChecked() and not c.hint.isVisible(), 'deck: mode set, hint hidden')
+check(c.mode == 'deck' and c.mode_b['deck'].isChecked() and 'MODE_SET' in c.auto_note.text(),
+      "deck: mode set, the hand-off's note behind its info icon")
 check('left stick' in c.legend_l.text(), 'deck: legend in the pad\'s names')
 c.set_layout('mode1')
 spin(0.1)

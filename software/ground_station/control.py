@@ -37,8 +37,9 @@ from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QButtonGroup, QComboBox, QGridLayout, QSizePolicy, QSpinBox, QWidget
 
 from . import theme as T
-from .panels import MOTORS, Panel, button, code, h3, notice
-from .widgets import CentreBar, FlowBox, SegBar, StickPad, Switch, TopView, clamp, hbox, label, set_color, sfmt
+from .panels import MOTORS, Panel, button, code, h3, info_text, notice
+from .widgets import (CentreBar, FlowBox, InfoIcon, SegBar, StickPad, Switch, TopView, clamp, hbox, label,
+                      set_color, sfmt)
 
 TICK_MS = 50            # pad, keys, ramp and send; the bridge streams to the blimp at 20 Hz anyway
 DEADZONE = 0.08         # of the stick's travel: a thumb at rest is never a command
@@ -191,7 +192,7 @@ class ControlPage(QWidget):
     # ------------------------------------------------------------- panels
 
     def _build_command(self):
-        pn = Panel('Command', 'who drives, and how far')
+        pn = Panel('Command', info_text('Who drives, and how far.', self.HINT))
         lay = pn.lay
         self.mode_b = {}
         group = QButtonGroup(self)
@@ -264,14 +265,12 @@ class ControlPage(QWidget):
         self.auto_b = button('Go autonomous', 'primary',
                              tip='hand the vehicle to blimp_step() on the blimp: needs the MODE_SET packet')
         self.auto_b.setEnabled(False)
-        lay.addLayout(hbox(self.auto_b, None))
-        lay.addSpacing(4)
-        self.auto_note = label('Not in the firmware yet: the mode switch comes with increment 3 of '
-                               'docs/control-loop-plan.md (MODE_SET).', 11, color=T.FAINT, wrap=True)
-        lay.addWidget(self.auto_note)
-        lay.addSpacing(12)
-        self.hint = label(self.HINT, 12, color=T.FAINT, wrap=True)
-        lay.addWidget(self.hint)
+        # Why it is greyed out, and the how-to of the page (the panel's i),
+        # sit behind info icons since 2026-11-02, so the Deck's small screen
+        # keeps them too instead of hiding them for room
+        self.auto_note = InfoIcon('Not in the firmware yet: the mode switch comes with increment 3 of '
+                                  'docs/control-loop-plan.md (MODE_SET).')
+        lay.addLayout(hbox(self.auto_b, 6, self.auto_note, None, spacing=0))
         lay.addStretch(1)
         return pn
 
@@ -307,7 +306,9 @@ class ControlPage(QWidget):
         return pn
 
     def _build_motors(self):
-        pn = Panel('Motors', "the blimp's readback, not the command")
+        pn = Panel('Motors', info_text("The blimp's readback, not the command.",
+                                       'Arrows and rings follow the telemetry; a command that did not arrive '
+                                       'shows as nothing here.'))
         lay = pn.lay
         self.top = TopView()
         self.top.set_max_width(300)
@@ -328,9 +329,6 @@ class ControlPage(QWidget):
             g.addWidget(val, i, 2)
             self.rb_bars[m], self.rb_vals[m] = bar, val
         lay.addLayout(g)
-        lay.addSpacing(10)
-        self.rb_note = label('', 12, color=T.FAINT, wrap=True)
-        lay.addWidget(self.rb_note)
         lay.addStretch(1)
         return pn
 
@@ -346,7 +344,6 @@ class ControlPage(QWidget):
             self.settings.setValue('control/mode', mode)
             self.station.log('info', 'control: %s mode' % MODE_NAMES[mode])
         self._legend()
-        self._hints()
         self.render()
 
     def set_layout(self, lid, save=True):
@@ -370,20 +367,11 @@ class ControlPage(QWidget):
         else:
             self.legend_l.setText(legend(LEGEND_PC))
 
-    def _hints(self):
-        show = self.mode != 'deck' and not self._compact
-        self.hint.setVisible(show)
-        self.auto_note.setVisible(show)
-        self.rb_note.setText('' if self.mode == 'deck' else
-                             'Arrows and rings follow the telemetry; a command that did not arrive shows as '
-                             'nothing here.')
-
     def compact(self, on):
         self._compact = on
         for pad in (self.pad_l, self.pad_r):
             pad.set_size(150 if on else 190)
         self.top.set_max_width(240 if on else 300)
-        self._hints()
 
     def _limit_changed(self, pct):
         self.limit = clamp(pct / 100.0, 0.05, 1.0)

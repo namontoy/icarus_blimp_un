@@ -219,4 +219,26 @@ pump(app, 0.3)
 check(said(wev, 'STOP sent'), 'race: STOP still works')
 A.teardown(station, win)
 
+# ------------------------------------------------- the dock and the header row (2026-11-02)
+station, win, wev = open_window(['--demo'])
+win.resize(1916, 1017)
+pump(app, 1.5)
+before = win.split.sizes()
+check(before[1] <= 170, 'dock: the first-run height is at most 170 px on 1080p (%s)' % before)
+win.dock.toggle.click()
+pump(app, 0.3)
+after = win.split.sizes()
+check(after[1] == win.dock.bar_height() and after[0] - before[0] == before[1] - after[1],
+      'dock: collapsed to its bar, and the panels take all the room it gave (%s -> %s)' % (before, after))
+win.dock.toggle.click()
+pump(app, 0.3)
+check(win.split.sizes() == before, 'dock: expanded, back to its height (%s)' % win.split.sizes())
+link = win.header.pills['link']
+widths = set()
+for v in ('8 ms', '50 ms', '120 ms', '999 ms'):
+    link.set('ok', v)
+    widths.add(link.sizeHint().width())
+check(len(widths) == 1, 'header: the Link pill keeps one width whatever its digits (%s)' % widths)
+A.teardown(station, win)
+
 raise SystemExit(H.finish())

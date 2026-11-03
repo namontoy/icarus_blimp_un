@@ -15,6 +15,7 @@ import mock_blimp
 
 from software.ground_station import app as A
 from software.ground_station import camera as Cam
+from software.ground_station import panels as P
 from software.ground_station import station as S
 from software.ground_station import theme as T
 
@@ -143,9 +144,80 @@ check(png[:8] == b'\x89PNG\r\n\x1a\n', 'painter: a PNG with a disc')
 png = Cam.paint_demo_frame(packet(1, ok=0, w_px=0, h_px=0))
 check(png[:8] == b'\x89PNG\r\n\x1a\n', 'painter: a PNG for a row with no detection')
 
+# ----------------------------------------------------------- BlobTracker units
+# blobs 2-4 keep their numbers though the camera lists them in its own order
+
+
+def extras(*blobs, ok=1):
+    """A row with blob 1 and these extra blobs (az, el), in this order."""
+    row = packet(1, ok=ok, blobs=(1 + len(blobs)) if ok else 0)
+    for k, (az, el) in enumerate(blobs, start=2):
+        row.update({'b%d_az' % k: az, 'b%d_el' % k: el, 'b%d_range_mm' % k: 5000.0, 'b%d_conf' % k: -1.0})
+    return row
+
+
+def slots(out):
+    return {b['k']: (b['az'], b['held']) for b in out}
+
+
+tnow = [0.0]
+tr = Cam.BlobTracker(clock=lambda: tnow[0])
+out = tr.update(extras((10.0, 5.0), (-12.0, 3.0)))
+check(slots(out) == {2: (10.0, False), 3: (-12.0, False)}, 'tracker: first row, the camera order (%s)' % slots(out))
+tnow[0] += 0.08
+out = tr.update(extras((-11.5, 3.2), (10.4, 5.1)))
+check(slots(out) == {2: (10.4, False), 3: (-11.5, False)},
+      'tracker: the camera swaps them, the slots do not (%s)' % slots(out))
+tnow[0] += 0.08
+out = tr.update(extras((10.8, 5.0)))
+check(slots(out) == {2: (10.8, False), 3: (-11.5, True)},
+      'tracker: one goes missing, its slot holds it (%s)' % slots(out))
+tnow[0] += 0.08
+out = tr.update(extras((11.0, 5.0), (30.0, -10.0)))
+check(slots(out) == {2: (11.0, False), 3: (-11.5, True), 4: (30.0, False)},
+      'tracker: a new blob takes the free slot, not the held one (%s)' % slots(out))
+tnow[0] += 0.6
+out = tr.update(extras((11.2, 5.0), (30.1, -10.0)))
+check(slots(out) == {2: (11.2, False), 4: (30.1, False)},
+      'tracker: a slot held past 0.5 s is freed (%s)' % slots(out))
+tnow[0] += 0.08
+out = tr.update(extras((-25.0, 0.0), ok=0))
+check(out and all(b['held'] for b in out),
+      'tracker: a row with no target brings no blobs, the slots hold (%s)' % slots(out))
+tnow[0] += 0.6
+check(tr.update(extras(ok=0)) == [], 'tracker: and then empty')
+
 # ------------------------------------------------------------- the real chain
 
 app = QApplication([])
+T.apply(app)
+
+# --------------------------------------- the panel's text under a flickering camera (2026-11-02)
+# blobs 2 and 3 trade places in every row, as two balloons of one size do: the
+# table refreshes four times a second and each balloon keeps its row
+
+
+class NoStation:
+    def camera_command(self, *a, **kw):
+        return None
+
+
+panel = P.CameraPanel(NoStation())
+panel.on_status({'source': 'blimp', 'connected': True, 'uart': True, 'packets': 1})
+refreshes = []
+real_render = panel.render_side
+panel.render_side = lambda: (refreshes.append(1), real_render())
+for i in range(25):                     # two seconds at the camera's 12.5 rows a second
+    order = [(10.0, 5.0), (-12.0, 3.0)] if i % 2 else [(-12.0, 3.0), (10.0, 5.0)]
+    panel.on_row(extras(*order))
+    pump(app, 0.08)
+    panel.age()
+check(len(refreshes) <= 10, 'panel: the text refreshed %d times in 2 s, not 25' % len(refreshes))
+cells = [[lb.text() for lb in row] for row in panel.blobs.cells]
+check(cells[1][1] == '-12.0' and cells[2][1] == '+10.0',
+      'panel: blob 2 and blob 3 kept their rows (%s, %s)' % (cells[1][1], cells[2][1]))
+check(cells[3][1] == '—', 'panel: the fourth row stays, empty (%s)' % cells[3])
+panel.deleteLater()
 
 
 def open_real(camera):
@@ -182,8 +254,8 @@ check(st['skipped'] <= 2, 'rows: nearly no row skipped locally (%d)' % st['skipp
 check(not win.camera.b_grab.isEnabled() and not win.camera.b_live.isEnabled(),
       'rows: Grab and Live are disabled without a painter')
 check('rows only' in win.camera.note.text(), 'rows: the note says the link carries rows (%s)' % win.camera.note.text())
-check('core sign -1' in win.camera.health.text(), 'rows: the health line shows the core sign (%s)'
-      % win.camera.health.text())
+check('core sign: -1' in win.camera.health.toolTip(), "rows: the health line's tip shows the core sign (%s)"
+      % win.camera.health.toolTip())
 check(win.camera.view.img is None and win.camera.view.row is not None, 'rows: the view draws from the row, no image')
 station.camera_command('grab')
 check(any('no frames' in e['text'] for e in evs), 'rows: a Grab is answered with why it cannot be done')

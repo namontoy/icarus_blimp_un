@@ -170,13 +170,20 @@ class ChamferFrame(QWidget):
 
 class Pill(QWidget):
     """A header status pill: a state-coloured left border, a cut corner, an
-    upper-case name and a mono value."""
+    upper-case name and a mono value.
+
+    reserve: the widest value of the pill's usual states ('999 ms'). The pill
+    keeps that width, so a value that only changes its digits never moves the
+    pills beside it; until 2026-11-02 each pill was as wide as its current
+    text and the whole row shifted every time the link's milliseconds went
+    from two digits to three. A rarer, longer value (NO TELEMETRY) still
+    widens it, while it lasts."""
     BORDER = {'ok': T.UN_GREEN, 'warn': T.AMBER, 'crit': T.UN_RED, 'live': T.PAPAYA, 'demo': T.PAPAYA,
               'idle': T.FAINT}
 
-    def __init__(self, name, tip='', state='idle', value='—'):
+    def __init__(self, name, tip='', state='idle', value='—', reserve=''):
         super().__init__()
-        self.name, self.state, self.value = name, state, value
+        self.name, self.state, self.value, self.reserve = name, state, value, reserve
         self.setToolTip(tip)
         self._fn = T.font(11, 700, spacing=0.1, caps=True)
         self._fv = T.font(11, 600, mono=True)
@@ -184,16 +191,19 @@ class Pill(QWidget):
 
     def set(self, state, value):
         if (state, value) != (self.state, self.value):
-            changed_w = len(str(value)) != len(str(self.value))
+            w = self.sizeHint().width()
             self.state, self.value = state, value
-            if changed_w:
+            if self.sizeHint().width() != w:
                 self.updateGeometry()
             self.update()
 
     def sizeHint(self):
         w = QFontMetrics(self._fn).horizontalAdvance(self.name)
-        if self.value:
-            w += 4 + QFontMetrics(self._fv).horizontalAdvance(str(self.value))
+        fv = QFontMetrics(self._fv)
+        vw = max(fv.horizontalAdvance(str(self.value)) if self.value else 0,
+                 fv.horizontalAdvance(self.reserve) if self.reserve else 0)
+        if vw:
+            w += 4 + vw
         return QSize(3 + 10 + w + 16, 26)
 
     def paintEvent(self, e):
@@ -217,6 +227,80 @@ class Pill(QWidget):
             p.setPen(C(T.PAPAYA_INK if demo else T.FG))
             p.drawText(QRectF(x, 0, w - x, h), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
                        str(self.value))
+
+
+class InfoIcon(QWidget):
+    """A small circled i that holds an explanatory note, so the panels show
+    their readings and the explanations are one move away (2026-11-02; until
+    then each note was a line of faint text). Hover shows the note; so does a
+    click or a tap, because the Steam Deck's touch screen has no hover, and
+    Enter when it has the focus. setText() keeps a QLabel's API, so a note that
+    changes (the camera's source, a Wi-Fi error) updates in place; an empty
+    note paints nothing and takes no focus (not hide(): a widget not yet in a
+    layout would be shown as a window of its own by the matching show()).
+    tone 'warn' tints it amber, for a note that carries a problem rather than
+    an explanation."""
+    SIZE = 16
+
+    def __init__(self, text='', tone=''):
+        super().__init__()
+        self._text, self.tone, self._hover = '', tone, False
+        self.setFixedSize(self.SIZE + 4, self.SIZE + 4)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+        self._f = T.font(11, 700, mono=True)
+        self.setText(text)
+
+    def text(self):
+        return self._text
+
+    def setText(self, text):
+        self._text = text or ''
+        # In a <p> Qt treats the tip as rich text and wraps it, instead of one
+        # line as wide as the screen
+        self.setToolTip('<p>%s</p>' % self._text if self._text else '')
+        self.setFocusPolicy(Qt.FocusPolicy.TabFocus if self._text else Qt.FocusPolicy.NoFocus)
+        self.setCursor(Qt.CursorShape.PointingHandCursor if self._text else Qt.CursorShape.ArrowCursor)
+        self.update()
+
+    def set_tone(self, tone):
+        if tone != self.tone:
+            self.tone = tone
+            self.update()
+
+    def _show(self):
+        QToolTip.showText(self.mapToGlobal(QPoint(0, self.height() + 2)), self.toolTip(), self)
+
+    def mousePressEvent(self, e):
+        if self._text:
+            self._show()
+
+    def keyPressEvent(self, e):
+        if e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self._show()
+        else:
+            super().keyPressEvent(e)
+
+    def enterEvent(self, e):
+        self._hover = True
+        self.update()
+
+    def leaveEvent(self, e):
+        self._hover = False
+        self.update()
+
+    def paintEvent(self, e):
+        if not self._text:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        c = C(T.AMBER if self.tone == 'warn' else T.FG if self._hover or self.hasFocus() else T.FAINT)
+        r = QRectF(2.5, 2.5, self.SIZE - 1, self.SIZE - 1)
+        p.setPen(QPen(c, 1.2))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawEllipse(r)
+        p.setFont(self._f)
+        p.drawText(r, Qt.AlignmentFlag.AlignCenter, 'i')
 
 
 class Wordmark(QWidget):
@@ -1104,6 +1188,9 @@ class FovPlot(QWidget):
         sp.setHeightForWidth(True)
         self.setSizePolicy(sp)
         self._f = T.font(10, mono=True)
+        hx = FOV_DEG / 2
+        self.setToolTip('the blobs on the camera\'s field of view, ±%g° × ±%g° (az + right, el + up); blob 1 '
+                        'green, nearer is bigger, a blob that just went missing is dimmed' % (hx, hx * 0.75))
 
     def hasHeightForWidth(self):
         return True
@@ -1135,17 +1222,15 @@ class FovPlot(QWidget):
         p.drawLine(QPointF(W // 2 + 0.5, 0), QPointF(W // 2 + 0.5, H))
         p.drawLine(QPointF(0, H // 2 + 0.5), QPointF(W, H // 2 + 0.5))
         p.setFont(self._f)
-        p.setPen(C(T.FAINT))
-        p.drawText(QPointF(6, H - 6), 'field of view ±%g° × ±%g°' % (hx, hy))
         for b in self.blobs:
             x, y = W / 2 + b['az'] / hx * W / 2, H / 2 - b['el'] / hy * H / 2
             # Nearer is bigger; a range the camera could not measure (-1: clipped, or no size for
             # that blob) gets a neutral dot, never the biggest one
             r = clamp(12000 / max(b['r'], 300), 3, 22) if isnum(b['r']) and b['r'] > 0 else 6
             p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(C(T.UN_GREEN if b.get('main') else T.MUTED, 0.85))
+            p.setBrush(C(T.UN_GREEN if b.get('main') else T.MUTED, 0.35 if b.get('held') else 0.85))
             p.drawEllipse(QPointF(x, y), r, r)
-            p.setPen(C(T.FG))
+            p.setPen(C(T.FAINT if b.get('held') else T.FG))
             p.drawText(QPointF(x + r + 3, y + 3), str(b['k']))
         p.setPen(QPen(C(T.BORDER), 1))
         p.setBrush(Qt.BrushStyle.NoBrush)
@@ -1176,6 +1261,7 @@ class CameraView(QWidget):
         self.meta = None
         self.img_at = 0.0
         self.row = None
+        self.extra = None
         self.note = ''
         self.rotate = False
         self.setMinimumHeight(120)
@@ -1185,11 +1271,13 @@ class CameraView(QWidget):
         self.img, self.meta, self.img_at = img, meta, time.monotonic()
         self.update()
 
-    def set_row(self, row, note=''):
+    def set_row(self, row, note='', extra=None):
         """The latest row, or None with the reason there is none (shown in the
-        empty area). Drops a frame once it is older than STILL_HOLD_S, or at
-        once when the rows stop."""
-        self.row, self.note = row, note
+        empty area). extra: blobs 2-4 as camera.BlobTracker keeps them, so the
+        numbers here are the table's; None reads them from the row. Drops a
+        frame once it is older than STILL_HOLD_S, or at once when the rows
+        stop."""
+        self.row, self.note, self.extra = row, note, extra
         if self.img is not None and (row is None or time.monotonic() - self.img_at > self.STILL_HOLD_S):
             self.img = self.meta = None
         self.update()
@@ -1240,7 +1328,7 @@ class CameraView(QWidget):
             p.setRenderHint(QPainter.RenderHint.Antialiasing)
             sx = r.width() / fw
             if self.img is None:
-                self._balloons(p, r, sx, fw, fh, row)
+                self._balloons(p, r, sx, fw, fh, row, self.extra)
             bx, by = r.x() + (row['cx_px'] - row['w_px'] / 2) * sx, r.y() + (row['cy_px'] - row['h_px'] / 2) * sx
             bw, bh = row['w_px'] * sx, row['h_px'] * sx
             p.setPen(QPen(C(T.UN_GREEN), max(1.0, 3 * k)))
@@ -1276,28 +1364,30 @@ class CameraView(QWidget):
         self._frame_border(p, W, H)
 
     @staticmethod
-    def _balloons(p, r, sx, fw, fh, row):
+    def _balloons(p, r, sx, fw, fh, row, extra=None):
         """With no picture, each blob the row reports as a red balloon where the
         camera saw it, as the demo's painted frame draws one. Blob 1 has its
         centroid and box: a shaded disc of radius max(w, h) / 2. Blobs 2-4 have
         only az, el and range, so they go back through target_cam's pinhole
         model (az = atan((x - W/2) / f), f from the 54 degree h-FOV), sized as
         the camera sized them (range = 550 mm x f / max(w, h)), and dimmer,
-        with their number. A range of -1 (clipped, or nothing to size by) gets
-        a small dot. FOV and size are the camera's defaults: a camera set
+        with their number; one the tracker holds after it went missing,
+        dimmer still. A range of -1 (clipped, or nothing to size by) gets a
+        small dot. FOV and size are the camera's defaults: a camera set
         otherwise ('F', 'd') draws them off by the same factor."""
         f_px = fw / 2 / math.tan(math.radians(FOV_DEG / 2))
         disc = [(1, row['cx_px'], row['cy_px'], max(row['w_px'], row['h_px']) / 2, 1.0)]
-        for k in range(2, 5):
-            if (row.get('blobs') or 0) < k:
-                break
-            az, el, rng = row.get('b%d_az' % k), row.get('b%d_el' % k), row.get('b%d_range_mm' % k)
+        if extra is None:
+            extra = [{'k': k, 'az': row.get('b%d_az' % k), 'el': row.get('b%d_el' % k),
+                      'r': row.get('b%d_range_mm' % k)} for k in range(2, min(row.get('blobs') or 0, 4) + 1)]
+        for b in extra:
+            az, el, rng = b.get('az'), b.get('el'), b.get('r')
             if not (isnum(az) and isnum(el)):
                 continue
             x = fw / 2 + f_px * math.tan(math.radians(az))
             y = fh / 2 - f_px * math.tan(math.radians(el))
             rad = TARGET_MM * f_px / (2 * rng) if isnum(rng) and rng > 0 else 2.0
-            disc.append((k, x, y, rad, 0.6))
+            disc.append((b['k'], x, y, rad, 0.25 if b.get('held') else 0.6))
         p.save()
         p.setClipRect(r)                        # a balloon clipped at the edge stays inside the frame
         for k, x, y, rad, alpha in reversed(disc):      # blob 1 on top

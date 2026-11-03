@@ -44,6 +44,72 @@ STATUS_REFRESH_S = 1.0              # the counters are re-sent at least this oft
 
 NO_FRAMES = 'the link carries no frames: target_cam sends the S3 rows only'
 
+TRACK_GATE_DEG = 6.0                # a blob this close to where a slot's blob was is the same balloon
+TRACK_HOLD_S = 0.5                  # a slot whose blob went missing keeps it, dimmed, this long
+
+
+def _num(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+class BlobTracker:
+    """Keeps the camera's extra blobs (2..4) in the same numbered slot from row
+    to row, for the panel only (2026-11-02).
+
+    target_cam lists blobs 2-4 in its own order every frame, so two balloons
+    of about the same size trade numbers twelve times a second and the table,
+    the plot and the picture flicker. Here each blob of a new row takes the
+    slot whose last position is nearest, within TRACK_GATE_DEG of az/el; a blob
+    with no slot near it takes the lowest free one (or, all taken, the one
+    seen longest ago); a slot whose blob is missing keeps its last values,
+    marked held, for TRACK_HOLD_S, so a blob lost for a frame or two does not
+    blink out. Blob 1 is never touched: it is the camera's own target, the
+    one core/ would follow, and if the camera switches targets the panel
+    shows it. Nothing here reaches the blimp."""
+    SLOTS = (2, 3, 4)
+
+    def __init__(self, clock=time.monotonic):
+        self.clock = clock
+        self.slots = {}             # k -> {'az', 'el', 'r', 'c', 't'}
+
+    def reset(self):
+        self.slots.clear()
+
+    def update(self, row):
+        """The row's extra blobs in their slots: [{'k', 'az', 'el', 'r', 'c',
+        'held'}] in slot order."""
+        now = self.clock()
+        new = []
+        if row and row.get('ok'):
+            for k in range(2, min(int(row.get('blobs') or 0), 4) + 1):
+                az, el = row.get('b%d_az' % k), row.get('b%d_el' % k)
+                if _num(az) and _num(el):
+                    new.append({'az': az, 'el': el, 'r': row.get('b%d_range_mm' % k),
+                                'c': row.get('b%d_conf' % k), 't': now})
+        # Nearest pairs first, each slot and each blob used once
+        pairs = sorted((math.hypot(b['az'] - s['az'], b['el'] - s['el']), k, j)
+                       for k, s in self.slots.items() for j, b in enumerate(new))
+        taken_k, taken_j = set(), set()
+        for d, k, j in pairs:
+            if d <= TRACK_GATE_DEG and k not in taken_k and j not in taken_j:
+                self.slots[k] = new[j]
+                taken_k.add(k)
+                taken_j.add(j)
+        for k in [k for k, s in self.slots.items() if k not in taken_k and now - s['t'] > TRACK_HOLD_S]:
+            del self.slots[k]
+        for j, b in enumerate(new):
+            if j in taken_j:
+                continue
+            free = [k for k in self.SLOTS if k not in self.slots]
+            k = free[0] if free else min((k for k in self.slots if k not in taken_k),
+                                         key=lambda k: self.slots[k]['t'], default=None)
+            if k is None:
+                continue
+            self.slots[k] = b
+            taken_k.add(k)
+        return [{'k': k, 'az': s['az'], 'el': s['el'], 'r': s['r'], 'c': s['c'], 'held': k not in taken_k}
+                for k, s in sorted(self.slots.items())]
+
 
 # ------------------------------------------------------------------ images
 

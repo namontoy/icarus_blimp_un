@@ -19,7 +19,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QComboBox, QDoubleSpinBox, QFileDialog, QLineEdit, QProgressBar, QSpinBox, QWidget
 
 from . import theme as T
-from .panels import Panel, button, code, h3
+from .panels import Panel, button, code, h3, info_text
 from .widgets import ElidedLabel, FlowBox, Readout, TracePlot, hbox, isnum, label, set_color
 
 import blimp_log
@@ -59,7 +59,8 @@ class CapturePanel(Panel):
             'fetched over the air.' % code('captures/'))
 
     def __init__(self, station):
-        super().__init__('Capture', "the loop's records, one per 20 ms, kept on the blimp until fetched")
+        super().__init__('Capture', info_text("The loop's records, one per 20 ms, kept on the blimp until fetched.",
+                                              self.HINT))
         self.station = station
         self.info, self.phase, self.file, self.error = None, 'idle', None, ''
         self.data = None                    # the last decoded capture (for the CSV export)
@@ -130,8 +131,6 @@ class CapturePanel(Panel):
         self.file_l.setFont(T.font(11, mono=True))
         set_color(self.file_l, T.FAINT)
         self.lay.addWidget(self.file_l)
-        self.lay.addSpacing(12)
-        self.lay.addWidget(label(self.HINT, 12, color=T.FAINT, wrap=True))
         self.lay.addStretch(1)
         self.render()
 
@@ -227,7 +226,7 @@ class TracePanel(Panel):
     with blimp_log's summary under it."""
 
     def __init__(self):
-        super().__init__('Traces', 'download a capture to see it here')
+        super().__init__('Traces', 'download a capture to see it here', note_visible=True)
         self.header, self.rows = None, []
         self.group = QComboBox()
         for g in GROUPS:

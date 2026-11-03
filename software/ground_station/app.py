@@ -22,6 +22,8 @@ docs/motor-setpoint-ownership.md and docs/link-robustness-review.md have the
 history.
 """
 import argparse
+import collections
+import math
 import signal
 import sys
 import time
@@ -29,7 +31,7 @@ import time
 from PyQt6 import sip
 from PyQt6.QtCore import QEvent, QObject, QRect, QSettings, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QPainter
-from PyQt6.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QLineEdit, QMainWindow, QSizePolicy,
+from PyQt6.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QLineEdit, QMainWindow,
                              QStackedWidget, QVBoxLayout, QWidget)
 
 from . import theme as T
@@ -37,19 +39,29 @@ from .bench import BenchPage
 from .control import MODES, ControlPage
 from .panels import CameraPanel, Dock, MotorsPanel, SensorsPanel, button, load_dock, save_dock
 from .station import Station
-from .widgets import (C, DockSplitter, DockTab, ElidedLabel, FullScreenButton, Pill, StopButton, Wordmark, clamp,
-                      hbox, hline_polygon, label, set_color)
+from .widgets import (C, DockSplitter, DockTab, FullScreenButton, InfoIcon, Pill, StopButton, Wordmark, clamp, hbox,
+                      hline_polygon, label)
 
 TEL_STALE_S = 1.5
 FRAME_MS = 33               # plots, staleness and camera ageing, about 30 Hz
 DOCK_MIN_PX = 110
 PANELS_MIN_PX = 320         # the dock never squeezes the window's top part below this
 COMPACT_BELOW_PX = 860      # a laptop screen: smaller gauges, no motor hint
+LINK_WINDOW_S = 1.0         # the Link pill: the longest wait over this long, shown this often
+LINK_SLOW_MS = 250          # a wait past this shows at once
+# The dock's height is kept under this key. It was 'dock/h' until 2026-11-02,
+# when the default went down from 230 px to 160 px on 1080p: a new key lets
+# every station start from the new default once, instead of the height it
+# had kept from the old one.
+DOCK_H_KEY = 'dock/height'
 
 
 def dock_default_px(h):
-    """First-run height: about a quarter of the window, 230 px on a 1080p screen."""
-    return clamp(round(h * 0.23), 140, 230)
+    """First-run height: about a sixth of the window, 160 px on a 1080p screen:
+    the console's last lines, its input and the command chips. It was a
+    quarter (230 px) until 2026-11-02, which hid the bottom of the sensors
+    panel on a 1080p screen."""
+    return clamp(round(h * 0.16), 130, 170)
 
 
 class Header(QWidget):
@@ -68,29 +80,36 @@ class Header(QWidget):
         brand.addWidget(sub)
         self.wifi_b = button('Join blimp Wi-Fi', tip="join the blimp's access point from this computer")
         self.wifi_b.setEnabled(False)
-        self.wifi_note = ElidedLabel('—')
-        self.wifi_note.setFont(T.font(11, mono=True))
-        set_color(self.wifi_note, T.FAINT)
-        self.wifi_note.setMaximumWidth(300)
-        self.wifi_note.setMinimumWidth(60)
+        # What the join says (the network, this computer's address, an error)
+        # sits behind an i, amber when it is an error; until 2026-11-02 it was
+        # a line of text beside the button, elided to "on the b…" on 1080p
+        self.wifi_note = InfoIcon('—')
+        # The pills whose value is a number keep the width of their widest
+        # usual value (Pill.reserve), so changing digits no longer move the
+        # row; the others change width only when their state changes, which is
+        # news. Reserving those too would have widened the header by 124 px,
+        # and it is already wider than the Steam Deck's 1280
         self.pills = {
             'drive': Pill('Drive', 'what drives the motors: the Flight page, the Control page or nothing; '
                                    'RACE: this window only watches, STOP is its one command'),
             'wifi': Pill('Wi-Fi', "this computer's connection to the blimp's access point"),
-            'link': Pill('Link', 'UDP link to the blimp: age of the last packet'),
+            'link': Pill('Link', 'UDP link to the blimp: the longest wait for a packet over the last second, '
+                                 'shown once a second (telemetry comes 20 times a second, so about 50 ms when all '
+                                 'is well); a wait past %d ms shows at once' % LINK_SLOW_MS, reserve='999 ms'),
             'fs': Pill('Failsafe', 'motor driver failsafe on the blimp'),
-            'sta': Pill('STA', "stations on the blimp's access point"),
+            'sta': Pill('STA', "stations on the blimp's access point", reserve='99'),
             'cam': Pill('Cam', "the forward camera's rows, relayed by the S3"),
             'demo': Pill('Demo data', 'nothing here touches a real blimp', 'demo', ''),
         }
         self.pills['demo'].setVisible(demo)
+        self._ages = collections.deque()    # (t, ms) of the last second's telemetry ages, for the Link pill
+        self._link_shown = (None, 0.0)      # (state, when) of what the pill last showed
         self.full_b = FullScreenButton()
         self.full_b.setToolTip('full screen (F11)')
         self.full_b.setFocusPolicy(Qt.FocusPolicy.TabFocus)
         self.stop_b = StopButton()
         self.stop_b.setToolTip('Coast all four motors (Space or Esc)')
-        lay = hbox(brand, 12, self.wifi_b, 10, self.wifi_note, None, spacing=0, margins=(4, 14, 4, 10))
-        lay.setStretchFactor(self.wifi_note, 1)
+        lay = hbox(brand, 12, self.wifi_b, 6, self.wifi_note, None, spacing=0, margins=(4, 14, 4, 10))
         for p in self.pills.values():
             lay.addWidget(p)
             lay.addSpacing(8)
@@ -115,13 +134,15 @@ class Header(QWidget):
         if self.demo:
             b.setEnabled(False)
             T.restyle(b, state='')
-            note.setText('demo: no radio involved')
+            note.setText('Demo: no radio involved.')
+            note.set_tone('')
             pill.set('idle', 'DEMO')
             return
         if not w or w.get('backend') == 'none':
             b.setEnabled(False)
             T.restyle(b, state='')
-            note.setText((w or {}).get('error') or 'no Wi-Fi control on this system: join ICARUS-… by hand')
+            note.setText((w or {}).get('error') or 'No Wi-Fi control on this system: join ICARUS-… by hand.')
+            note.set_tone('warn' if (w or {}).get('error') else '')
             pill.set('ok' if w and w.get('joined') else 'idle', w['ip'] if w and w.get('joined') else '—')
             return
         busy = bool(w.get('busy'))
@@ -142,23 +163,43 @@ class Header(QWidget):
         else:
             c = w.get('candidates') or []
             note.setText('known: ' + ', '.join(c) if c else 'no ICARUS-… network known yet')
-        note.setToolTip(note.text())
+        note.set_tone('warn' if w.get('error') and not w.get('joined') else '')
         pill.set('live' if busy else 'ok' if w.get('joined') else 'warn',
                  (w.get('phase') or '').upper() if busy else w.get('ip') if w.get('joined') else 'DOWN')
 
     def on_tel(self, m):
         tel = m.get('tel')
         if m.get('alive') and tel:
-            age = m.get('age_s')
-            self.pills['link'].set('ok' if tel.get('link_alive') else 'warn',
-                                   '%d ms' % round(age * 1000) if age is not None else '—')
+            self._link(m.get('age_s'), 'ok' if tel.get('link_alive') else 'warn')
             fs = tel.get('failsafe')
             self.pills['fs'].set('crit' if fs == 'TRIPPED' else 'live' if fs == 'armed' else 'ok', fs)
             self.pills['sta'].set('ok' if tel.get('stations', 0) > 0 else 'warn', str(tel.get('stations')))
         else:
+            self._ages.clear()
             self.pills['link'].set('crit', 'NO TELEMETRY')
             self.pills['fs'].set('idle', '—')
             self.pills['sta'].set('idle', '—')
+
+    def _link(self, age_s, state):
+        """The Link pill. The age of the last packet at a 10 Hz tick is a
+        sawtooth between 0 and 50 ms (telemetry comes at 20 Hz, the tick
+        samples it at any phase), and shown every tick it flickered through
+        digits that meant nothing. It shows the longest wait in the last
+        second instead, once a second, rounded up to 10 ms; a change of state
+        (STALE, link_alive) and a wait past LINK_SLOW_MS show at once and
+        follow every tick while they last."""
+        now = time.monotonic()
+        if age_s is not None:
+            self._ages.append((now, age_s * 1000))
+        while self._ages and now - self._ages[0][0] > LINK_WINDOW_S:
+            self._ages.popleft()
+        worst = max((a for _, a in self._ages), default=None)
+        p = self.pills['link']
+        if p.state == state and now - self._link_shown[1] < LINK_WINDOW_S and \
+                not (worst is not None and worst > LINK_SLOW_MS):
+            return
+        self._link_shown = (state, now)
+        p.set(state, '%d ms' % (math.ceil(worst / 10) * 10) if worst is not None else '—')
 
     def set_drive(self, race, m, flight, control):
         """The Drive pill: the window's own view of who drives (flight,
@@ -198,6 +239,8 @@ class PageBar(QWidget):
     The header and the dock serve all three, so STOP and the console are
     always at hand."""
     changed = pyqtSignal(str)
+    # Each page's one-line description is its tab's tip (it was a line of
+    # faint text on the right of the bar until 2026-11-02)
     NOTES = {'flight': 'motors, camera and sensors, live',
              'control': 'fly by hand from the keyboard or a gamepad, then hand off',
              'bench': 'captures, calibration and checks of the blimp on the bench'}
@@ -207,18 +250,13 @@ class PageBar(QWidget):
         self.tabs = {'flight': DockTab('Flight'), 'control': DockTab('Control'), 'bench': DockTab('Bench')}
         for name, t in self.tabs.items():
             t.clicked.connect(lambda _=False, name=name: self.changed.emit(name))
-        self.note = label('', 12, color=T.FAINT)
-        self.note.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.note.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        lay = hbox(self.tabs['flight'], 2, self.tabs['control'], 2, self.tabs['bench'], 12, self.note, spacing=0,
-                   margins=(0, 4, 0, 0))
-        lay.setStretchFactor(self.note, 1)
-        self.setLayout(lay)
+            t.setToolTip(self.NOTES[name])
+        self.setLayout(hbox(self.tabs['flight'], 2, self.tabs['control'], 2, self.tabs['bench'], None, spacing=0,
+                            margins=(0, 4, 0, 0)))
 
     def set(self, name):
         for n, t in self.tabs.items():
             t.setChecked(n == name)
-        self.note.setText(self.NOTES[name])
 
     def paintEvent(self, e):
         p = QPainter(self)
@@ -315,7 +353,7 @@ class MainWindow(QMainWindow):
         self.show_page(page if page in self.page_index else 'flight')
         # value(..., type=int) turns a missing key into 0, not None, and 0
         # would pin the dock at its minimum on a first run.
-        h = settings.value('dock/h')
+        h = settings.value(DOCK_H_KEY)
         self._dock_h = int(h) if h not in (None, '') else None
 
     # ------------------------------------------------------------ station in
@@ -387,11 +425,16 @@ class MainWindow(QMainWindow):
         return max(DOCK_MIN_PX, self.height() - PANELS_MIN_PX)
 
     def _apply_dock_h(self):
+        total = sum(self.split.sizes())
         if self.dock.collapsed:
             bar = self.dock.bar_height()
             self.dock.setFixedHeight(bar)
             self.split.handle(1).setEnabled(False)
             self.split.handle(1).update()
+            # The splitter keeps each slot's size until told: without this the
+            # dock shrank to its bar inside a slot still as tall as the console
+            # had been, and the panels gained nothing (found 2026-11-02)
+            self.split.setSizes([total - bar, bar])
             return
         self.dock.setMinimumHeight(DOCK_MIN_PX)
         self.dock.setMaximumHeight(self._dock_max())
@@ -401,7 +444,6 @@ class MainWindow(QMainWindow):
         # before the window had its size, which is the 110 px floor.
         want = self._dock_h if self._dock_h is not None else dock_default_px(self.height())
         h = clamp(want, DOCK_MIN_PX, self._dock_max())
-        total = sum(self.split.sizes())
         self.split.setSizes([total - h, h])
 
     def _dock_moved(self, pos, index):
@@ -410,12 +452,12 @@ class MainWindow(QMainWindow):
 
     def _save_dock_h(self):
         if self._dock_h is not None:
-            self.settings.setValue('dock/h', self._dock_h)
+            self.settings.setValue(DOCK_H_KEY, self._dock_h)
 
     def _reset_dock_h(self):
         self._dock_h = None
         self._apply_dock_h()
-        self.settings.remove('dock/h')
+        self.settings.remove(DOCK_H_KEY)
 
     def _collapsed(self, on):
         self._apply_dock_h()

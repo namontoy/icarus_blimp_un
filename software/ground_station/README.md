@@ -188,9 +188,14 @@ throwaway settings file, so it never changes the remembered window.
 - **Camera**: the verdict tile, bearing, elevation, range, confidence, the blob table and the
   field-of-view plot come from the forward camera's detection rows (target_cam's CSV columns).
   They arrive from the S3 as `CAMERA` packets (12.5 rows a second), and the panel draws the target
-  from the row alone, on an empty 160 x 120 area. `az` is the camera's own, + to the right; the
-  health line shows the sign the S3 applies for `core/`. The range is the camera's uncalibrated
-  figure (`—` when unknown or clipped). When there is nothing to show, the panel says why: no
+  from the row alone, on an empty 160 x 120 area, each blob a red balloon where the camera saw
+  it. `az` is the camera's own, + to the right; the counters line's tip shows the sign the S3
+  applies for `core/`. The range is the camera's uncalibrated figure (`—` when unknown or
+  clipped). Since 2026-11-02 the pictures follow every row and the text refreshes four times a
+  second: the verdict by majority over the rows in between, blob 1's figures as their median (a
+  value the camera measured, a one-frame outlier dropped), blobs 2-4 kept in their rows while they
+  move (`camera.BlobTracker`; the camera lists them in its own order every frame), and all four
+  table rows always shown, so nothing moves. When there is nothing to show, the panel says why: no
   `CAMERA` packets (a firmware before the relay), the camera UART not running, nothing heard
   from the camera, bytes but no rows (baud rate, or not target_cam), or rows stopped. The header's
   Cam pill reads NONE, UP, NO ROWS or DOWN to match. The picture view with Grab frame, Live and
@@ -199,8 +204,8 @@ throwaway settings file, so it never changes the remembered window.
   `--demo` only, where a painted frame stands in. Built 2026-11-01; not yet run against the blimp.
 - **Control** (the second tab under the header): fly by hand. Pick the input, *PC* (the
   keyboard, plus a gamepad if one is plugged in) or *Steam Deck* (the Deck's own controls; the
-  hints leave the screen to fit 1280 × 800), and the stick layout (mode 2: left stick heave and
-  yaw, right stick surge; mode 1 swaps surge and heave). Switch *Manual control* on, or press A
+  page's notes are behind its info icons, on the Deck's 1280 × 800 too), and the stick layout
+  (mode 2: left stick heave and yaw, right stick surge; mode 1 swaps surge and heave). Switch *Manual control* on, or press A
   on the pad: arming needs telemetry and the sticks at rest, and it switches the Flight page's
   *Motors enabled* off (one source drives at a time). Then W/S is surge, A/D or ←/→ yaw, ↑/↓
   heave (half a stick; hold Shift for the whole), or the sticks. The page mixes surge, yaw and
@@ -230,9 +235,15 @@ throwaway settings file, so it never changes the remembered window.
   its toy airframe, so the page can be tried without a blimp.
 - **Console** and **Events** share the dock under the three panels, as two tabs. Drag the
   handle on the dock's top edge to set its height (double-click resets it), and the ▾ button
-  collapses it to the tab bar. Height, tab and collapsed state are remembered between runs.
-  The three panels above take whatever height is left, so at 1080p nothing needs a scrollbar;
-  on a short screen, collapse the dock or let a panel scroll.
+  collapses it to the tab bar and gives the panels the room (until 2026-11-02 it left the room
+  empty). It starts at about a sixth of the window, 160 px at 1080p (a quarter until then).
+  Height, tab and collapsed state are remembered between runs. The three panels above take
+  whatever height is left; on a short screen, collapse the dock or let a panel scroll.
+- **Notes behind an i**: what each panel, the dock, a heading or a greyed-out button is for sits
+  behind the small circled i beside it (hover, click or tap); the Wi-Fi join's state sits behind
+  the one by its button, amber when it is an error. The header's pills keep their width while
+  their digits change, and the Link pill shows the longest wait for a packet over the last
+  second, once a second (a wait past 250 ms at once).
 - **Console**: any firmware command; Enter sends, ↑/↓ recall history, the chips are the usual
   ones. One command runs at a time, on the air and on the blimp.
 - **Events**: link up and down, failsafe trips, stale setpoints, camera link changes, and any
