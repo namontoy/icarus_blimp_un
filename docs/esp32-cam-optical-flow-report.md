@@ -1564,6 +1564,151 @@ calibration is applied only on the ground.
 use the default partition table and optflow_cam never touches NVS, so
 target_cam's settings should survive; do not erase the flash.
 
+## 13. An ESP32-S3-WROOM CAM with an OV3660: the largest frame at 80 ms (2026-11-03)
+
+Branch `optflow-s3-ov3660`. The question: on an ESP32-S3-WROOM CAM board
+(Freenove pin map, the same as Espressif's ESP32-S3-EYE) carrying an OV3660
+instead of the OV2640, what is the largest greyscale frame the matcher can
+use while it keeps a frame every 80 ms (12.5 a second), and so the finest
+millimetres per pixel? **Nothing in this section has run on the board yet.**
+What is measured is the host benchmark and the AI-Thinker's 49-52 ms from
+§8; the rest is reasoned from the driver's source and has to be checked by the
+steps at the end.
+
+### 13.1 What was built
+
+- **Board option** `OPTFLOW_BOARD_S3_WROOM_CAM`, the default when the target is
+  esp32s3 (`main/camera_pins.h`): XCLK 15, SIOD 4, SIOC 5, D0-D7 11 9 8 10 12
+  18 17 16, VSYNC 6, HREF 7, PCLK 13, no PWDN/RESET, no flash LED.
+- **The UART to the S3-Zero keeps TX on IO14**, as on the AI-Thinker, so the
+  S3-Zero's UART2 (RX GPIO18) needs no change. **RX moves from IO13 to IO21**:
+  IO13 is the camera's PCLK on this board. Nothing is wired to the camera's RX
+  today (the S3-Zero never transmits to it). Check both pins on the board's
+  silk: clones differ in what they break out.
+- **Frame size** is a menuconfig choice (`OPTFLOW_FRAME`: QQVGA, HQVGA, QVGA,
+  CIF), QVGA by default on the S3 board and QQVGA, unchanged, on the
+  AI-Thinker. The search and grid defaults follow the frame (QVGA: 16/8/4x4;
+  CIF: 16/10/4x4; else 16/7/5x5).
+- **OV3660 frame timing** (`ov3660_frame_period()`, `OPTFLOW_FRAME_PERIOD_MS`,
+  default 80; 0 keeps the driver's timing), see 13.3. The boot banner prints
+  the camera's period as measured from the driver's frame timestamps, and what
+  the timing code did.
+- **Frames are copied to internal RAM** before matching (two buffers of
+  W·H bytes); the driver's buffers sit in PSRAM above QQVGA.
+- **Benchmark** `OPTFLOW_BENCH` (off by default): at boot, before the camera
+  starts, the board times the matcher on every candidate row of
+  `main/flow_bench.c`, frames in internal RAM and in PSRAM, prints
+  `# bench:` lines and then runs normally. The same table runs on the host:
+  `make -C firmware/projects/optflow_cam/host bench`.
+- `sdkconfig.defaults.esp32s3`: octal PSRAM at 80 MHz (the N8R8/N16R8
+  modules; an R2 module needs quad mode instead) and the console on UART0,
+  the CH343 "COM" port.
+
+Both targets build (ESP-IDF v5.5.5): esp32s3 with the bench off and on,
+esp32 (AI-Thinker) with its old configuration (QQVGA, 16/7/5x5, DRAM frame
+buffers). `make test` still passes (mean |error| 0.024 px, worst 0.089 px).
+
+### 13.2 The matcher's time is the limit
+
+One match costs grid² · (2·search+1)² · block² absolute differences, and the
+usable range is (search - 1) px a frame. A larger frame shrinks the mm per
+pixel, so the same velocity range needs a proportionally larger search, and
+the time grows with its square. The rows below are each sized for 2 m height,
+the 58° lens, 80 ms and a range near 0.6 m/s (twice the ~0.3 m/s the blimp
+coasts at, docs/flight-tests.md).
+
+**Measured on the host** (i5-10300H, `size_bench`, 24 trials per row, synthetic
+floor, noise 2 counts; two runs, at 300 and 550 mm/s). "est." scales each row's
+host time by the AI-Thinker's measured 50.5 ms for the QQVGA row; the host
+times jitter, so the two runs disagree by up to 10 ms on a row:
+
+| Frame | blk/srch/grid | mm/px at 2 m | range | Mops | est. ms | ok at 550 mm/s |
+|---|---|---|---|---|---|---|
+| QQVGA 160x120 | 16/7/5x5 | 13.9 | 1.04 m/s | 1.44 | 50.5 (ref.) | yes |
+| HQVGA 240x176 | 16/7/5x5 | 9.2 | 0.69 m/s | 1.44 | 50.5 | yes |
+| QVGA 320x240 | 16/8/5x5 | 6.9 | 0.61 m/s | 1.85 | 62 | yes |
+| **QVGA 320x240** | **16/8/4x4** | **6.9** | **0.61 m/s** | **1.18** | **39-42** | yes |
+| QVGA 320x240 | 24/8/4x4 | 6.9 | 0.61 m/s | 2.66 | 81-90 | yes |
+| CIF 400x296 | 16/10/4x4 | 5.5 | 0.62 m/s | 1.81 | 52-63 | yes |
+| HVGA 480x320 | 16/10/4x4 | 4.6 | 0.52 m/s | 1.81 | 52-61 | yes |
+| VGA 640x480 | 16/10/4x4 | 3.5 | 0.39 m/s | 1.81 | 44-54 | **0/24** |
+
+VGA is out on range: search 10 is `FLOW_MAX_SEARCH`, and 9 px of 3.5 mm in
+80 ms is 0.39 m/s; it lost every measurement at 550 mm/s. Its time is low only
+because fewer of its blocks have texture enough to be matched (14 of 16).
+
+The per-frame error on this floor is 0.1-0.25 mm RMS for every row, at 20 to
+550 mm/s: the synthetic texture is too clean to separate the frame sizes on
+precision. **Reasoned, not measured:** on a real floor the error that matters
+is the fixed sub-pixel bias of §8.7, §8.11 and §8.15, which is a fraction of a pixel, so it shrinks
+in millimetres in proportion to the mm per pixel: QVGA's 6.9 mm against
+QQVGA's 13.9 halves it, CIF would take it to 40 %. That is the whole case for
+the bigger frame, and the board must show it on a floor (§12's calibration
+repeated).
+
+**Reasoned:** the S3 runs the same Xtensa ISA at the same 240 MHz, with
+frames now in internal RAM, so the ESP32 scale is a fair first guess, no more.
+To the match the loop adds the frame copy (77 kB at QVGA, well under 1 ms)
+and the CSV row on UART0, a blocking printf of about 7 ms at 115200.
+
+### 13.3 What the OV3660 can deliver at 80 ms
+
+From esp32-camera 2.1.8's `ov3660.c` (not from a datasheet we hold): the
+sensor bins 2x2 for every frame up to 1024x768, with HTS 2300 and VTS 783 for
+4:3, and frame time = HTS · VTS / SYSCLK. For a raw (non-JPEG) frame the driver
+picks the PLL by size: SYSCLK = 2·XCLK below QVGA, XCLK from QVGA to HVGA,
+XCLK/2 above. At our XCLK of 20 MHz **the driver's own timing gives QVGA a
+frame every 90 ms**, too slow for 80 (the driver's comment says 10.25 FPS,
+which its own formula does not give).
+
+So `ov3660_frame_period()` sets the PLL to SYSCLK 40 MHz with PCLK 10 MHz,
+reads HTS back, and sets VTS = 80 ms · SYSCLK / HTS (1391 with HTS 2300). A
+line then lasts 57.5 µs, and at 1 byte per pixel a QVGA line needs 32 µs of
+PCLK, CIF 40 µs, HVGA 48 µs: all fit; VGA (64 µs) does not. The loop paces
+at 15 FPS, so the camera, not the loop, sets the 80 ms, as on the AI-Thinker.
+Night mode (automatic frame stretching) is off in the driver's table.
+
+**Memory is no limit up to CIF:** two internal copies of 118 kB at CIF, the
+driver's buffers in PSRAM.
+
+### 13.4 The answer
+
+- **QVGA 320x240, block 16, search 8, grid 4x4** is the largest frame with
+  margin: about 40 ms estimated for the match, 6.9 mm a pixel at 2 m (half of
+  today's 13.9), 0.6 m/s of range. It is the S3 board's default.
+- **CIF 400x296, 16/10/4x4** is the edge: about 52-63 ms estimated, plus the
+  7 ms row, inside 80 ms only if the board is no slower than the estimate.
+  5.5 mm a pixel. Choose it in menuconfig only after the board benchmark.
+- HVGA's extra pixels buy little (4.6 mm a pixel, 0.52 m/s of range at the
+  same cost as CIF); VGA cannot keep the range.
+- In every case the camera reaches 80 ms only with the PLL/VTS override; the
+  stock driver gives 90 ms at QVGA and CIF.
+
+### 13.5 Checks on the board, in order
+
+1. Flash through the CH343 ("COM") port; the boot log must name the OV3660
+   (PID 0x3660) and find the PSRAM. If the PSRAM fails, the module is quad:
+   set `CONFIG_SPIRAM_MODE_QUAD` in `sdkconfig.defaults.esp32s3`.
+2. The banner's `# camera ... ms per frame measured at boot` line: 80 ms (±1)
+   with the timing note showing SYSCLK 40 MHz. 90 ms means the override did
+   not take.
+3. With `OPTFLOW_BENCH=y`, the `# bench:` lines: the QVGA 16/8/4 row must be
+   well under 70 ms; the CIF row decides whether CIF is usable.
+4. The rows reach the S3-Zero: IO14 to its GPIO18, `cam` shows the downward
+   port at 12-13 rows a second.
+5. The lens: the OV3660 module's field of view need not be the 58° measured
+   on the team's OV2640 lens; measure it (`tools/lens_test/`) before trusting
+   any mm figure here, and redo §12's calibration.
+
+### 13.6 Next, if the time is short
+
+- Split the blocks across the S3's two cores (the matcher's blocks are
+  independent): about twice the speed, enough for CIF or QVGA with 24 px
+  blocks.
+- Coarse-to-fine: match at QQVGA with a wide search, refine at QVGA with
+  ±2 px. The range of the coarse level with the precision of the fine one, at
+  a fraction of the cost.
+
 ---
 
 ## Appendix: hardware reference

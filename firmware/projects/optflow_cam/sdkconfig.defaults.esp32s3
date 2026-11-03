@@ -1,0 +1,28 @@
+# ESP32-S3-WROOM CAM (Freenove pin map) with an OV3660: what differs from the
+# AI-Thinker defaults in sdkconfig.defaults, which still apply.
+
+# The module is an ESP32-S3-WROOM-1 N8R8 or N16R8: its PSRAM is OCTAL and
+# runs at 80 MHz. Frames above QQVGA live there (optflow_main.c,
+# camera_start). A module marked ...R2 has quad PSRAM instead: change
+# SPIRAM_MODE_OCT to SPIRAM_MODE_QUAD, or the PSRAM is not found and the
+# camera cannot allocate its buffers.
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+
+# The flash must run in QIO, not the default DIO. Octal PSRAM carries data
+# on the flash's IO2/IO3 lines; in DIO those are the flash's WP# and HOLD#,
+# and the first board (2026-11-03: N16R8, Macronix flash 0xC2 0x2018) went
+# silent mid-boot, returning 0xFF to every instruction fetch as soon as the
+# PSRAM was written - a panic in the PSRAM memory test, or a hang with the
+# test off, at 80 and at 40 MHz alike. QIO sets the flash's QE bit, which
+# turns WP# and HOLD# into data pins, and the board then boots with its
+# 8 MB of PSRAM. The flash size is left at the 2 MB default so an N8R8
+# boots too; only the first 2 MB are used.
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+
+# The console stays on UART0, which on this board is wired to the CH343
+# USB-serial chip (GPIO43/44): the port marked "USB-UART"/"COM", not the native
+# "USB-OTG" one.
+# poll_commands() reads UART0 directly, so the console must not move to
+# USB-Serial-JTAG here.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y

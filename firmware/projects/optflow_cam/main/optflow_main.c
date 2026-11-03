@@ -49,12 +49,40 @@
 
 #include "camera_pins.h"
 #include "flow_match.h"
+#if CONFIG_OPTFLOW_BENCH
+#include "flow_bench.h"
+#endif
 
 static const char *TAG = "optflow";
 
-#define FRAME_SIZE      FRAMESIZE_QQVGA     /* 160x120 */
+/* The frame size is a menuconfig choice because it is set by the match time
+   (Kconfig OPTFLOW_FRAME, host/size_bench), not by the camera. */
+#if CONFIG_OPTFLOW_FRAME_VGA
+#define FRAME_SIZE      FRAMESIZE_VGA
+#define FRAME_W         640
+#define FRAME_H         480
+#elif CONFIG_OPTFLOW_FRAME_HVGA
+#define FRAME_SIZE      FRAMESIZE_HVGA
+#define FRAME_W         480
+#define FRAME_H         320
+#elif CONFIG_OPTFLOW_FRAME_CIF
+#define FRAME_SIZE      FRAMESIZE_CIF
+#define FRAME_W         400
+#define FRAME_H         296
+#elif CONFIG_OPTFLOW_FRAME_QVGA
+#define FRAME_SIZE      FRAMESIZE_QVGA
+#define FRAME_W         320
+#define FRAME_H         240
+#elif CONFIG_OPTFLOW_FRAME_HQVGA
+#define FRAME_SIZE      FRAMESIZE_HQVGA
+#define FRAME_W         240
+#define FRAME_H         176
+#else
+#define FRAME_SIZE      FRAMESIZE_QQVGA
 #define FRAME_W         160
 #define FRAME_H         120
+#endif
+#define FRAME_BYTES     (FRAME_W * FRAME_H)
 
 /* Seconds of reflash window before GPIO0 becomes XCLK. See
    escape_hatch_delay(). */
@@ -72,8 +100,20 @@ static bool  s_streaming    = true;
 static float s_pos_x_mm = 0.0f;
 static float s_pos_y_mm = 0.0f;
 
-static uint8_t *s_prev;     /* our own copy of the previous frame */
+/* Our own copies of the previous and the current frame, in internal RAM. The
+   current one is copied out of the driver's buffer before matching, so the
+   buffer goes back to the driver at once and the matcher never reads PSRAM
+   (where the S3-WROOM CAM keeps frames above QQVGA). After a match the two
+   pointers swap: one copy per frame, as before. */
+static uint8_t *s_prev;
+static uint8_t *s_cur;
 static bool     s_have_prev;
+
+/* What the boot measured, for the banner. */
+static const char *s_sensor_name = "?";
+static float s_cam_period_ms;
+static const char *s_copies_where = "";
+static char  s_timing_note[160] = "driver default";
 
 /* UART1 to the flight board, so the S3 can log the flow beside its gyro and
    ToF (CONFIG_OPTFLOW_S3_UART). Its state is in the banner. */
@@ -137,6 +177,126 @@ static void quiesce_heat_sources(void)
        is not even linked. */
 }
 
+/*
+ * Make an OV3660 deliver one frame every CONFIG_OPTFLOW_FRAME_PERIOD_MS.
+ *
+ * The OV2640 on the AI-Thinker runs at 79.95 ms by accident of its timing at
+ * XCLK 20 MHz, and the loop leans on that: it paces a little faster than the
+ * camera (OPTFLOW_TARGET_FPS 15) and so takes every frame the sensor makes.
+ * The OV3660 needs to be told. Its frame time is HTS x VTS SYSCLK cycles
+ * (the driver's own FPS comments follow that), and for QVGA to HVGA in
+ * grayscale the driver picks SYSCLK = XCLK: 2300 x 783 / 20 MHz = 90 ms, too
+ * slow. So:
+ *
+ *   1. PLL to SYSCLK 40 MHz: VCO = XCLK x mult = 160 MHz, /4; PCLK is
+ *      PLLCLK/2/4 = 20 MHz. A 480-pixel Y8 line (HVGA) takes 24 us of PCLK
+ *      against a 54 us line period (HTS 2172 / 40 MHz). The driver's own
+ *      small-frame divider of 8 (10 MHz) was tried first and failed on the
+ *      bench (2026-11-03): QVGA and HVGA ran at 160 ms, every other frame
+ *      lost, and VGA delivered no frame at all.
+ *   2. VTS = period x SYSCLK / HTS: the extra lines are vertical blanking.
+ *      Night mode (0x3A00 bit 2) is off in the driver's table, so the sensor
+ *      will not stretch VTS itself in a dim room.
+ *
+ * Reasoned from the driver's PLL arithmetic (sensors/ov3660.c, calc_sysclk),
+ * not from a datasheet we hold; measure_camera_period() checks the result.
+ * Must run after esp_camera_init(): set_framesize() rewrites the PLL.
+ */
+static void ov3660_frame_period(sensor_t *s)
+{
+#if CONFIG_OPTFLOW_FRAME_PERIOD_MS > 0
+    const int sysclk_mhz = 40;
+    const int xclk_mhz = CONFIG_OPTFLOW_XCLK_MHZ;
+    if (160 % xclk_mhz != 0 || 160 / xclk_mhz > 31) {
+        snprintf(s_timing_note, sizeof s_timing_note,
+                 "driver default (XCLK %d MHz does not divide 160 MHz)", xclk_mhz);
+        return;
+    }
+    /* _set_pll argument order: bypass, mult, sys_div, root_2x, pre_div,
+       seld5, pclk_manual, pclk_div. */
+    /* PCLK = PLLCLK / 2 / pclk_div = 80 / 4 = 20 MHz by the same formula
+       (see 1. above for why not the driver's 8). */
+    if (s->set_pll(s, 0, 160 / xclk_mhz, 1, 0, 0, 0, 1, 4) != 0) {
+        snprintf(s_timing_note, sizeof s_timing_note, "driver default (PLL write failed)");
+        return;
+    }
+    int hts = s->get_reg(s, 0x380c, 0x0fff);     /* X_TOTAL_SIZE, 12 bits */
+    if (hts <= 0) {
+        snprintf(s_timing_note, sizeof s_timing_note, "PLL set, HTS unreadable (%d)", hts);
+        return;
+    }
+    int vts = (CONFIG_OPTFLOW_FRAME_PERIOD_MS * 1000 * sysclk_mhz + hts / 2) / hts;
+    if (vts > 0xffff || s->set_reg(s, 0x380e, 0xffff, vts) != 0) {  /* Y_TOTAL_SIZE */
+        snprintf(s_timing_note, sizeof s_timing_note, "PLL set, VTS %d write failed", vts);
+        return;
+    }
+    snprintf(s_timing_note, sizeof s_timing_note,
+             "OV3660 PLL x%d (SYSCLK %d MHz by the driver's formula), HTS %d x VTS %d = %.2f ms",
+             160 / xclk_mhz, sysclk_mhz, hts, vts,
+             (double)hts * vts / (sysclk_mhz * 1000.0));
+#else
+    (void)s;
+#endif
+}
+
+/* Brightness of one frame, for the banner: a dark or blank image and a
+   textureless scene both read as all-flat blocks, and these tell them apart. */
+static int s_img_min, s_img_max;
+static float s_img_mean, s_img_sd;
+/* The boot frame's variance in each matcher block, row by row: on a scene
+   that reads all-flat it shows how far the texture is from min_var. */
+static uint32_t s_blk_var[FLOW_MAX_BLOCKS];
+static int s_blk_n;
+
+static void image_stats(const uint8_t *p, size_t n)
+{
+    int lo = 255, hi = 0;
+    double sum = 0.0, sum2 = 0.0;
+    for (size_t i = 0; i < n; i++) {
+        int v = p[i];
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
+        sum += v;
+        sum2 += (double)v * v;
+    }
+    if (n == 0) {
+        return;
+    }
+    s_img_min = lo;
+    s_img_max = hi;
+    s_img_mean = (float)(sum / (double)n);
+    double var = sum2 / (double)n - (sum / (double)n) * (sum / (double)n);
+    s_img_sd = (float)sqrt(var > 0.0 ? var : 0.0);
+}
+
+/* Time the camera itself: the driver stamps each frame at its VSYNC, so the
+   spacing of the stamps is the sensor's period, whatever the loop does. */
+static void measure_camera_period(void)
+{
+    int64_t first = 0, last = 0;
+    int n = 0;
+    for (int i = 0; i < 9; i++) {
+        camera_fb_t *fb = esp_camera_fb_get();
+        if (fb == NULL) {
+            continue;
+        }
+        int64_t t = (int64_t)fb->timestamp.tv_sec * 1000000 + fb->timestamp.tv_usec;
+        if (i == 8) {
+            image_stats(fb->buf, fb->len);
+            if (fb->len >= (size_t)s_cfg.width * (size_t)s_cfg.height) {
+                s_blk_n = flow_block_variances(&s_cfg, fb->buf, s_blk_var);
+            }
+        }
+        esp_camera_fb_return(fb);
+        if (n == 0) {
+            first = t;
+        }
+        last = t;
+        n++;
+    }
+    s_cam_period_ms = (n > 1) ? (float)(last - first) / 1000.0f / (float)(n - 1) : 0.0f;
+}
+
 static esp_err_t camera_start(void)
 {
     camera_config_t config = {
@@ -170,8 +330,15 @@ static esp_err_t camera_start(void)
 
         /* QQVGA grayscale is 19200 bytes, so two buffers fit in internal RAM.
            Keeping them out of PSRAM means this runs on a board with no PSRAM,
-           and avoids clocking the SPI RAM at all - less power, less heat. */
+           and avoids clocking the SPI RAM at all - less power, less heat.
+           Larger frames go to PSRAM: two driver buffers plus our two copies
+           of a CIF frame would take 470 kB of internal RAM. The matcher only
+           ever reads our internal copies (s_prev, s_cur). */
+#if CONFIG_OPTFLOW_FRAME_QQVGA
         .fb_location    = CAMERA_FB_IN_DRAM,
+#else
+        .fb_location    = CAMERA_FB_IN_PSRAM,
+#endif
         .fb_count       = 2,
         .grab_mode      = CAMERA_GRAB_LATEST,
 
@@ -193,8 +360,12 @@ static esp_err_t camera_start(void)
     }
 
     camera_sensor_info_t *info = esp_camera_sensor_get_info(&s->id);
-    ESP_LOGI(TAG, "sensor PID 0x%02x (%s)", s->id.PID,
-             info ? info->name : "unknown");
+    s_sensor_name = info ? info->name : "unknown";
+    ESP_LOGI(TAG, "sensor PID 0x%02x (%s)", s->id.PID, s_sensor_name);
+
+    if (s->id.PID == OV3660_PID) {
+        ov3660_frame_period(s);
+    }
 
     /* Auto-exposure and auto-gain stay ON: floor brightness varies and a fixed
        exposure would blow out or black out the texture the matcher needs.
@@ -229,11 +400,27 @@ static void print_banner(void)
     /* A displacement of exactly `search` px puts the SAD minimum on the edge of
        the window, where the boundary check rejects it. Usable radius is one
        pixel less - verified on the host suite. */
-    float max_px_per_s = (float)(s_cfg.search - 1) * (float)s_target_fps;
+    float fps = (float)s_target_fps;
+    if (s_cam_period_ms > 0.0f && 1000.0f / s_cam_period_ms < fps) {
+        fps = 1000.0f / s_cam_period_ms;    /* the camera, not the pace, sets it */
+    }
+    float max_px_per_s = (float)(s_cfg.search - 1) * fps;
 
-    printf("\n# ESP32-CAM downward optical flow\n");
+    printf("\n# ESP32-CAM downward optical flow (%s, %s)\n", CONFIG_IDF_TARGET, s_sensor_name);
     printf("# frame        %dx%d grayscale, XCLK %d MHz, paced to %d FPS\n",
            FRAME_W, FRAME_H, CONFIG_OPTFLOW_XCLK_MHZ, s_target_fps);
+    printf("# camera       %.2f ms per frame measured at boot; timing: %s\n",
+           s_cam_period_ms, s_timing_note);
+    printf("# image        mean %.1f, sd %.1f, min %d, max %d (one frame at boot); "
+           "frame copies in %s\n",
+           (double)s_img_mean, (double)s_img_sd, s_img_min, s_img_max, s_copies_where);
+    if (s_blk_n > 0) {
+        printf("# block var   ");
+        for (int k = 0; k < s_blk_n; k++) {
+            printf(" %u", (unsigned)s_blk_var[k]);
+        }
+        printf("  (boot frame, row by row; below %u is flat)\n", (unsigned)s_cfg.min_var);
+    }
     printf("# matcher      %d px blocks, +/-%d px search, %dx%d grid, min_var %u, "
            "sub-pixel %s\n",
            s_cfg.block, s_cfg.search, s_cfg.grid_x, s_cfg.grid_y,
@@ -242,17 +429,17 @@ static void print_banner(void)
            "footprint %.2f m\n",
            s_height_mm, s_hfov_deg, mmpx, mmpx * FRAME_W / 1000.0f);
     printf("# range        +/-%.0f mm/s max, %.1f mm/s per 0.1 px\n",
-           max_px_per_s * mmpx, 0.1f * mmpx * s_target_fps);
+           max_px_per_s * mmpx, 0.1f * mmpx * fps);
     printf("# commands     h<mm> height | f<fps> rate | r<px> search | "
-           "e<0|1|2> sub-pixel | z zero | s stream | ? info\n");
+           "e<0|1|2> sub-pixel | z zero | s stream | p frame dump | ? info\n");
     printf("# WARNING      vx/vy include rotation-induced flow (~%.0f mm/s per "
            "deg/s). De-rotate with a gyro before using them.\n",
            s_height_mm * (float)M_PI / 180.0f);
     printf("# columns      t_ms,ok,dx_px,dy_px,vx_mm_s,vy_mm_s,x_mm,y_mm,"
            "spread_px,valid,total,flat,edge,ambig,dt_ms,proc_us\n");
 #if CONFIG_OPTFLOW_S3_UART
-    printf("# flight board UART1 TX IO%d, %d baud: %s\n", S3_LINK_PIN_TX,
-           CONFIG_OPTFLOW_S3_UART_BAUD, s_s3_state);
+    printf("# flight board UART1 TX IO%d (RX IO%d), %d baud: %s\n", S3_LINK_PIN_TX,
+           S3_LINK_PIN_RX, CONFIG_OPTFLOW_S3_UART_BAUD, s_s3_state);
 #else
     printf("# flight board %s\n", s_s3_state);
 #endif
@@ -370,6 +557,30 @@ static void poll_commands(void)
                     s_streaming = !s_streaming;
                     printf("# streaming %s\n", s_streaming ? "on" : "off");
                     break;
+                case 'p': {
+                    /* One frame as hex, a row per line, for a look at the
+                       scene (framing, focus, texture) when every block reads
+                       flat. s_prev is the newest frame once the loop has
+                       swapped. At 115200 baud it stalls the loop for 13 s at
+                       QVGA and 53 s at VGA; the delay per row lets the idle
+                       task feed its watchdog. */
+                    static const char hex[] = "0123456789abcdef";
+                    static char rowbuf[2 * FRAME_W + 2];
+                    printf("# pgm %d %d\n", FRAME_W, FRAME_H);
+                    for (int y = 0; y < FRAME_H; y++) {
+                        const uint8_t *r = s_prev + (size_t)y * FRAME_W;
+                        for (int x = 0; x < FRAME_W; x++) {
+                            rowbuf[2 * x]     = hex[r[x] >> 4];
+                            rowbuf[2 * x + 1] = hex[r[x] & 15];
+                        }
+                        rowbuf[2 * FRAME_W] = '\n';
+                        rowbuf[2 * FRAME_W + 1] = 0;
+                        fputs(rowbuf, stdout);
+                        vTaskDelay(1);
+                    }
+                    printf("# pgm end\n");
+                    break;
+                }
                 case '?':
                     print_banner();
                     break;
@@ -385,6 +596,80 @@ static void poll_commands(void)
         }
     }
 }
+
+#if CONFIG_OPTFLOW_BENCH
+/*
+ * The frame-size table of host/size_bench, timed on this chip. Making the
+ * synthetic floor costs seconds per frame here, so each row gets one frame
+ * pair and the match is timed several times on it; the precision columns are
+ * the host's job (same code, same arithmetic). Each row is timed with the
+ * frames in internal RAM, as the loop runs, and in PSRAM, which is what a
+ * frame too big for two internal copies would cost. Runs before the camera
+ * starts, so nothing else competes for the core or the memory.
+ */
+static void run_bench(void)
+{
+    const flow_bench_scene_t scene = {
+        .height_mm = 2000.0f, .hfov_deg = 58.0f, .period_ms = 80.0f,
+        .speed_mm_s = 300.0f, .noise = 2.0f, .trials = 1,
+    };
+    const int reps = 5;
+    printf("# bench: %s, CPU %d MHz; floor 2 m, 58 deg lens, 80 ms, 300 mm/s, noise 2\n",
+           CONFIG_IDF_TARGET, CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ);
+    printf("# bench: frame size blk srch grid mm/px range_mm_s Mops | "
+           "iram ms min/max | psram ms min/max | valid\n");
+    for (const flow_bench_case_t *c = flow_bench_cases; c->width; c++) {
+        size_t n = (size_t)c->width * (size_t)c->height;
+        uint8_t *pp = heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        uint8_t *pc = heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        uint8_t *ip = heap_caps_malloc(n, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        uint8_t *ic = heap_caps_malloc(n, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        uint8_t *gp = ip ? ip : pp, *gc = ic ? ic : pc;
+        flow_cfg_t cfg;
+        flow_bench_cfg(c, &cfg);
+        float mmpx = flow_bench_mm_per_px(c, &scene);
+        float step = scene.speed_mm_s * scene.period_ms * 1e-3f;
+
+        printf("# bench: %-5s %dx%d %d %d %dx%d %.2f %.0f %.2f |", c->name,
+               c->width, c->height, c->block, c->search, c->grid, c->grid, mmpx,
+               (float)(c->search - 1) * mmpx * 1000.0f / scene.period_ms,
+               (float)(c->grid * c->grid * (2 * c->search + 1) * (2 * c->search + 1)
+                       * c->block * c->block) * 1e-6f);
+        if (gp == NULL || gc == NULL || !flow_cfg_valid(&cfg)) {
+            printf(" no memory or invalid\n");
+        } else {
+            flow_bench_frames(gp, gc, c->width, c->height, mmpx, 0.6f * step, 0.8f * step,
+                              scene.noise, 1000u);
+            if (pp && pp != gp) memcpy(pp, gp, n);
+            if (pc && pc != gc) memcpy(pc, gc, n);
+            flow_result_t r = {0};
+            for (int m = 0; m < 2; m++) {
+                const uint8_t *a = m ? pp : ip, *b = m ? pc : ic;
+                if (a == NULL || b == NULL) {
+                    printf(" does not fit |");
+                    continue;
+                }
+                float lo = 1e9f, hi = 0.0f;
+                for (int k = 0; k < reps; k++) {
+                    int64_t t0 = esp_timer_get_time();
+                    flow_match(&cfg, a, b, &r);
+                    float ms = (float)(esp_timer_get_time() - t0) * 1e-3f;
+                    if (ms < lo) lo = ms;
+                    if (ms > hi) hi = ms;
+                }
+                printf(" %.1f/%.1f |", lo, hi);
+            }
+            printf(" %d/%d\n", r.n_valid, r.n_total);
+        }
+        fflush(stdout);
+        heap_caps_free(pp); heap_caps_free(pc);
+        heap_caps_free(ip); heap_caps_free(ic);
+        vTaskDelay(pdMS_TO_TICKS(10));   /* let the idle task feed the watchdog */
+    }
+    printf("# bench: done\n");
+    fflush(stdout);
+}
+#endif
 
 static const char *reset_reason_str(esp_reset_reason_t r)
 {
@@ -417,8 +702,8 @@ static void boot_report(void)
 
     printf("\n\n# ---- optflow_cam boot ----\n");
     printf("# reset reason  %s\n", reset_reason_str(rr));
-    printf("# chip          ESP32 rev %d, %d core(s)\n",
-           chip.revision, chip.cores);
+    printf("# chip          %s rev %d, %d core(s)\n",
+           CONFIG_IDF_TARGET, chip.revision, chip.cores);
     printf("# heap          %u B internal free\n",
            (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     size_t psram = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
@@ -450,6 +735,7 @@ static void boot_report(void)
  */
 static void escape_hatch_delay(void)
 {
+#if CAM_PIN_XCLK == 0
     printf("#\n# GPIO0 is XCLK on this board: once the camera starts, esptool\n");
     printf("# can no longer force download mode. Reflash window open:\n");
     for (int i = OPTFLOW_ESCAPE_SECONDS; i > 0; i--) {
@@ -459,6 +745,8 @@ static void escape_hatch_delay(void)
     }
     printf("# window closed, starting the camera\n");
     fflush(stdout);
+#endif
+    /* Any other board: XCLK is not GPIO0, so there is nothing to escape. */
 }
 
 void app_main(void)
@@ -475,10 +763,26 @@ void app_main(void)
         return;
     }
 
-    s_prev = heap_caps_malloc(FRAME_W * FRAME_H, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    if (s_prev == NULL) {
-        ESP_LOGE(TAG, "could not allocate the %d-byte previous-frame buffer",
-                 FRAME_W * FRAME_H);
+#if CONFIG_OPTFLOW_BENCH
+    run_bench();
+#endif
+
+    /* Internal RAM when the two copies fit (up to CIF), else PSRAM: the
+       board bench (2026-11-03) measured the match in PSRAM within 1 % of
+       internal RAM, the frames being read a block at a time through the
+       cache. */
+    s_prev = heap_caps_malloc(FRAME_BYTES, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    s_cur  = heap_caps_malloc(FRAME_BYTES, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    s_copies_where = "internal RAM";
+    if (s_prev == NULL || s_cur == NULL) {
+        heap_caps_free(s_prev);
+        heap_caps_free(s_cur);
+        s_prev = heap_caps_malloc(FRAME_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        s_cur  = heap_caps_malloc(FRAME_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        s_copies_where = "PSRAM";
+    }
+    if (s_prev == NULL || s_cur == NULL) {
+        ESP_LOGE(TAG, "could not allocate two %d-byte frame copies", FRAME_BYTES);
         return;
     }
 
@@ -513,6 +817,7 @@ void app_main(void)
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 
+    measure_camera_period();
     print_banner();
 
     int64_t prev_capture_us = 0;
@@ -549,17 +854,19 @@ void app_main(void)
             continue;
         }
 
+        memcpy(s_cur, fb->buf, FRAME_BYTES);
+        esp_camera_fb_return(fb);
+
         if (!s_have_prev) {
-            memcpy(s_prev, fb->buf, FRAME_W * FRAME_H);
+            uint8_t *t = s_prev; s_prev = s_cur; s_cur = t;
             s_have_prev = true;
             prev_capture_us = capture_us;
-            esp_camera_fb_return(fb);
             continue;
         }
 
         int64_t t0 = esp_timer_get_time();
         flow_result_t r;
-        int ok = flow_match(&s_cfg, s_prev, fb->buf, &r);
+        int ok = flow_match(&s_cfg, s_prev, s_cur, &r);
         int64_t proc_us = esp_timer_get_time() - t0;
 
         /* Measure dt from the real capture timestamps, not the target period.
@@ -602,8 +909,7 @@ void app_main(void)
             }
         }
 
-        memcpy(s_prev, fb->buf, FRAME_W * FRAME_H);
+        uint8_t *t = s_prev; s_prev = s_cur; s_cur = t;
         prev_capture_us = capture_us;
-        esp_camera_fb_return(fb);
     }
 }

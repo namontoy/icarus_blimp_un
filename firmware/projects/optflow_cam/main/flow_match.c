@@ -45,6 +45,34 @@ static uint32_t block_variance(const uint8_t *img, int stride,
     return (uint32_t)(num / ((uint64_t)n * (uint64_t)n));
 }
 
+/* Top-left corner of grid block (gx, gy): the grid spans the legal corners,
+   those that keep a full search margin, edge to edge. flow_match() and
+   flow_block_variances() share it so a diagnostic sees the matcher's blocks. */
+static void block_origin(const flow_cfg_t *cfg, int gx, int gy, int *bx, int *by)
+{
+    const int s = cfg->search, b = cfg->block;
+    const int x0 = s, x1 = cfg->width  - b - s;
+    const int y0 = s, y1 = cfg->height - b - s;
+    *bx = (cfg->grid_x == 1) ? (x0 + x1) / 2 : x0 + (x1 - x0) * gx / (cfg->grid_x - 1);
+    *by = (cfg->grid_y == 1) ? (y0 + y1) / 2 : y0 + (y1 - y0) * gy / (cfg->grid_y - 1);
+}
+
+int flow_block_variances(const flow_cfg_t *cfg, const uint8_t *img, uint32_t *var)
+{
+    if (!flow_cfg_valid(cfg) || img == 0 || var == 0) {
+        return 0;
+    }
+    int n = 0;
+    for (int gy = 0; gy < cfg->grid_y; gy++) {
+        for (int gx = 0; gx < cfg->grid_x; gx++) {
+            int bx, by;
+            block_origin(cfg, gx, gy, &bx, &by);
+            var[n++] = block_variance(img, cfg->width, bx, by, cfg->block);
+        }
+    }
+    return n;
+}
+
 static uint32_t sad_block(const uint8_t *prev, const uint8_t *cur, int stride,
                           int px, int py, int cx, int cy, int block)
 {
@@ -205,20 +233,14 @@ int flow_match(const flow_cfg_t *cfg, const uint8_t *prev, const uint8_t *cur,
     const int b      = cfg->block;
     const int span   = 2 * s + 1;
 
-    /* Legal top-left corners for a block that keeps a full search margin. */
-    const int x0 = s, x1 = cfg->width  - b - s;
-    const int y0 = s, y1 = cfg->height - b - s;
-
     float vx[FLOW_MAX_BLOCKS], vy[FLOW_MAX_BLOCKS];
     uint32_t sad[(2 * FLOW_MAX_SEARCH + 1) * (2 * FLOW_MAX_SEARCH + 1)];
     int n = 0;
 
     for (int gy = 0; gy < cfg->grid_y; gy++) {
-        int by = (cfg->grid_y == 1) ? (y0 + y1) / 2
-                                    : y0 + (y1 - y0) * gy / (cfg->grid_y - 1);
         for (int gx = 0; gx < cfg->grid_x; gx++) {
-            int bx = (cfg->grid_x == 1) ? (x0 + x1) / 2
-                                        : x0 + (x1 - x0) * gx / (cfg->grid_x - 1);
+            int bx, by;
+            block_origin(cfg, gx, gy, &bx, &by);
             out->n_total++;
 
             if (block_variance(prev, stride, bx, by, b) < cfg->min_var) {

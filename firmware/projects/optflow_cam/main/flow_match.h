@@ -90,6 +90,14 @@ int flow_cfg_valid(const flow_cfg_t *cfg);
 int flow_match(const flow_cfg_t *cfg, const uint8_t *prev, const uint8_t *cur,
                flow_result_t *out);
 
+/*
+ * The variance flow_match() tests against min_var, for each grid block of
+ * `img`, row by row into var[] (grid_x * grid_y entries). Returns the count,
+ * 0 if the configuration is invalid. A diagnostic: it tells how far a scene
+ * is from the flatness threshold, which the reject counters cannot.
+ */
+int flow_block_variances(const flow_cfg_t *cfg, const uint8_t *img, uint32_t *var);
+
 #ifdef __cplusplus
 }
 #endif

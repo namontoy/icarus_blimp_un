@@ -16,6 +16,7 @@ sdkconfig_*
 
 # Host-side builds of the camera projects' portable code (firmware/projects/*/host/)
 firmware/projects/*/host/test_flow_match
+firmware/projects/*/host/size_bench
 firmware/projects/*/host/bias_sweep
 firmware/projects/*/host/test_blob_detect
 firmware/projects/*/host/test_pipeline
