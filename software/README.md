@@ -103,6 +103,19 @@ side of the blimp it is: the sign check before anything turns. `--follow` replac
 steps with `hold follow` for `--dwell` seconds and reports the camera's row rate, how often the
 balloon was in view and the yaw error while it was.
 
+The balloon flights build on it: `target_test.py` (2026-11-02) climbs, finds one balloon and
+moves toward and away from it; `course_test.py` (2026-11-03) flies a course of balloons in
+order, the race in miniature: for each, it looks where the course puts it, follows it,
+approaches in straight pulses, touches it, moves away and turns to the next, then lands.
+`--close-px`, the patch at which it goes in to touch, comes from a motors-off camera check with
+the course's own balloons (`docs/flight-tests.md`, "The course room"):
+
+```
+python software/course_test.py --selftest                                  # the sequence against a stand-in
+python software/course_test.py --close-px 1500 2200 --trim -0.6 --param $(cat software/bench_params.txt)
+                                                                           # prints the plan; --go flies it
+```
+
 ## The ground station: `ground_station/`
 
 The GUI for the bench and the arena: motors, sensors, the forward camera's rows (relayed by the S3) and the console in one

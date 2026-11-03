@@ -16,6 +16,12 @@ of `front_reverse_ratio` (heading steps at 1 m, as test 2, at 0.74 and lower), t
 check; then the square again with `--flight-bias-tau 600`. The detection goes to namontoy (a
 taut race-size balloon, the colours tuned in this room).
 
+**2026-11-03: a second room with a two-balloon course** (below, "The course room"): balloon 1
+2 m ahead of the start, balloon 2 2 m to its right, both 1.2 m up. `software/course_test.py`
+flies it from the ground, balloons in order: find, follow, approach, touch, move away, turn to
+the next, land. Not flown yet; runs C0–C5, C0 (motors off) first, because the touch needs its
+numbers.
+
 This is a living page: after each run, update the status above and the run's line in the
 order below. What each run measured, with captures and numbers, goes in the session record:
 `docs/history/flights-2026-11-01.md` covers 2026-11-01 and 02; start a new dated file for a new
@@ -105,6 +111,10 @@ python -u software/square_test.py --legs 4 --push 3 3 --coast 3.5 --brake 3 4 --
 # toward with the proximity guard, land (the balloon's centre about 1.8-1.9 m, 2.2 m away)
 python -u software/target_test.py --trim -0.6 --param $BP --notes "balloon flight ..." --go
 
+# the course room (2026-11-03): balloon 1 alone, then the course; the patches from C0
+python -u software/course_test.py --course 2,0 --close-px <b1> --trim -0.6 --param $BP --notes "C3 ..." --go
+python -u software/course_test.py --close-px <b1> <b2> --trim -0.6 --param $BP --notes "C4 ..." --go
+
 # afterwards
 python software/blimp_log.py captures/<name>.bin                 # summary
 python software/blimp_log.py captures/<name>.bin --csv out.csv   # every 20 ms record, in units
@@ -131,11 +141,17 @@ team's report of where the blimp went (photos against the tape) is the only reco
 | 5 | one leg, A to B | done: push 3 gf 3 s, coast 3.5 s, brake 3 gf 4 s stops it at 2 m (trim −0.6, new battery); it drifts afterwards |
 | 7 | the square | flown: the legs right, the heading 96° off by the end (`core/`'s gyro-bias learning); fly again with `--flight-bias-tau 600` |
 | B1–B6 | balloon flights, `target_test.py` | done: not seen from 3 m; found from about 2.2 m, approach, guard and back-off worked (B5); the nose lags 11–20° |
-| **R** | **turn on the spot**: heading steps at 1 m (as test 2) at `front_reverse_ratio` 0.74 and lower, then a trim check | **next** |
+| **R** | **turn on the spot**: heading steps at 1 m (as test 2) at `front_reverse_ratio` 0.74 and lower, then a trim check | **next**; in the course room it is C2 |
 | 7b | the square with the workaround | after R |
-| T4 | approach and touch | after the detection is fixed (needs 4 m); B5 did a short one |
+| T4 | approach and touch | after the detection is fixed (needs 4 m); B5 did a short one; C3 is one at 2 m |
 | T5 | hold a distance from the balloon | needs code and a flash |
-| T6 | a balloon course | needs the race mode |
+| T6 | a balloon course | from the ground: C4 below; the race mode on the S3 still to come |
+| **C0** | **the course room**: the camera, motors off: each balloon's patch from 2 m to the touch, nothing else red | **next** (2026-11-03) |
+| C1 | the course room: a hover at 1.3 m, this room's air | after C0 |
+| C2 | the course room: the right turn on the spot (R) | after C1 |
+| C3 | the course room: balloon 1 alone, `course_test.py --course 2,0` | after C2 |
+| C4 | the course room: both balloons, `course_test.py` | after C3 |
+| C5 | the course room: C4 three times, as the race's three loops | after C4 |
 
 **The walk-in check (motors off).** The background: the darkest plain one available, no window
 or lamp behind the balloon, nothing red, orange or brown in view, light falling on the balloon
@@ -192,6 +208,87 @@ strong the trim and the brake are.
 blimp closes in), the blimp on the floor about 2.2 m away facing it. The proximity guard's
 350 px was set with the 34 cm balloon: a bigger balloon trips it farther away, so say the size.
 Tell: whether it turned to the balloon, how close it got, whether it backed off, where it landed.
+
+## The course room (2026-11-03)
+
+The race in miniature, in a second room (the team's photo of 2026-11-03). From the start S,
+balloon 1 is 2.0 m straight ahead; balloon 2 is 2.0 m from balloon 1 on the blimp's right, at
+about a right angle; both hang with their centres about 1.2 m up. `course_test.py --course`
+takes each balloon's floor point in metres from S, x along the start's nose and y to its left,
+so its default `2,0 2,-2` is this room. **Measure S to balloon 2's floor point:** 2.83 m means
+the right angle. Any other distance changes the course (`--course 2,0 <x>,<y>`): say it.
+
+What `course_test.py` does (the detail is in its docstring; `--selftest` flies it against a
+stand-in with no hardware):
+
+- climbs to 1.3 m looking for balloon 1; once seen, the nose follows it (`hold follow`);
+- approaches in pulses: 3 gf for 1.8 s (about 0.15 m/s), a coast of up to 5 s, the brake,
+  then 2 s still while the nose aims again. Each pulse flies straight, the nose held where the
+  balloon was last seen;
+- **close** (the balloon's patch at `--close-px`): coasts on into the balloon for 2.5 s,
+  brakes, moves back about as far, holds still;
+- turns toward balloon 2: its bearing from where balloon 1 was last seen (−76° on the plan),
+  a look, then a ±45° scan if needed. Balloon 1 is ignored there, by its bearing and its size;
+- balloon 2 the same, then the landing. Every end is a landing, as in `target_test.py`.
+
+The report gives each balloon's "seen" and "close" times from the start of the hold: the lap,
+as near as the ground can tell. Whether the envelope touched is the team's call.
+
+**Setting up.**
+
+- Nothing red, orange or pink in the camera's sweep but the two balloons. Take out the red
+  balloon in the cluster by the left wall (behind the blue one), and replace the orange disc
+  under balloon 1 with tape of another colour: from the floor at S the camera sees it right under
+  balloon 1.
+- About 1 m clear around both lines: over a chair or a desk the ToF reads short and the height
+  loop climbs (the ToF guard lands it at 1.6 m over the floor).
+- The tethers straight up from the floor points, nothing slack across the path.
+- The PC a few metres from the course, out of the camera's view.
+- The forward camera on `target_cam` again (it ran `optflow_cam` on the evening of
+  2026-11-02): `course_test.py` refuses to start without its rows.
+
+**C0 (the camera here, motors off).** The blimp carried by hand, the gondola at about 1.3 m,
+the nose forward, `cam_watch.py` running under `bench_cues.py watch`:
+
+1. Along the first line toward balloon 1, on the beeps: S (2.0 m) at 0 s, 1.5 m at 10 s,
+   1.0 m at 20 s, 0.7 m at 30 s, the envelope just touching the balloon at 40 s, back to
+   1.0 m at 50 s. Read the patch at each mark, from where it is detected, and its elevation at
+   2 m.
+2. The same along the second line toward balloon 2 (a pair of hearts: another size).
+3. At S, then about 0.5 m short of balloon 1, the blimp turned slowly through a full circle:
+   nothing but the two balloons may be detected; note where balloon 2 appears.
+
+`--close-px` for each balloon is its patch about 0.4 m before the touch, the distance the
+2.5 s coast covers (reasoned: about 0.15 m/s). If balloon 1 reads more than about 5° above
+the camera's level at 2 m, raise `--alt` by 0.1 m (3.5 cm per degree at 2 m); 1.3 m comes from
+the balloon flights, where a balloon centred 0.1–0.2 m under the hover height read level.
+
+**C1 (a hover here).** From S, nose toward balloon 1: climb, 20 s at 1.3 m, land.
+`square_test.py --legs 0 --alt 1.3 --settle 20 --trim -0.6 --wait 180 --param $BP --go`. Tell
+where it landed against S: that is this room's air. The selftest's stand-in flies the course
+with steady air up to about 1 cm/s (0.4 m in 40 s). At 2–3 cm/s across the course (the first
+room's 1–2 m in 40 s is 2.5–5) it often lands without balloon 2, and with the air to its left
+it can touch balloon 1 a second time and log it as balloon 2: nothing on board measures
+position. If C1 drifts a metre or more, look for the source (a door, a vent, the air
+conditioning) before C3.
+
+**C2 (the right turn: R, here).** 80° right and back at 1.3 m, as the course turns at balloon
+1: `hold_test.py --steps 0 0 -80 0 --dwell 10 --hold-alt 1.3 --climb-rate 0.12 --surge -0.6
+--param $BP --go`, then again with `front_reverse_ratio=0.55` added after `$BP`. Tell: whether
+each turn stayed on the spot or crept forward, and where it landed. `hold_test.py` has no
+`--flight-bias-tau`, so its turns teach `core/` some bias, a few degrees in 40 s (test 7).
+
+**C3 (balloon 1 alone).** `course_test.py --course 2,0 --close-px <b1> ...` (Commands). Tell:
+whether it touched and how (a brush, a push, the balloon swung away), how far past the balloon
+it went, and where it landed. Short of the balloon: a larger `--close-px` or a longer
+`--touch`; a hard push: the opposite.
+
+**C4 (the course).** `course_test.py --close-px <b1> <b2> ...`. Tell, balloon by balloon,
+whether it touched, and where it landed.
+
+**C5 (three loops).** The race allows three attempts per course and counts the fastest
+(docs/01-competition-brief.md): C4 three times in a row, the same settings, a fresh cell, the
+three logs' "close" times in the session record.
 
 ## Known problems
 
