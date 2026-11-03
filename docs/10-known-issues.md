@@ -27,7 +27,12 @@ exactly that), with a PC and a Steam Deck input mode (`software/ground_station/c
 `gamepad.py`; `README.md` there). Checked offscreen against the mock blimp and with a fake pad;
 not yet run against the blimp, and the Steam Deck itself has not been tried: its controls should
 appear as an event device of the kernel's `hid-steam` driver in Desktop mode, which is what the
-reader looks for. The "Go autonomous" button is on the page and disabled until the firmware has
+reader looks for. Since 2026-11-03 a *Roll* switch (off by default) adds the rear pair's difference
+on the right stick's free axis or Q/E, RL harder to roll right, an experiment the team asked for
+(does driving the heave pair apart do anything when a gust rocks the blimp?): on paper the pair at
+±5.5 cm makes a torque about the fore-aft axis that the gondola's pendulum pulls back, not a turn,
+and at hover the difference comes out of the lift, so each rear motor is clamped on its own; not
+flown. The "Go autonomous" button is on the page and disabled until the firmware has
 `MODE_SET` (control-loop plan increment 3).
 
 **2026-10-28, the motors cut when the window is busy.** With a duty held from the Flight page,

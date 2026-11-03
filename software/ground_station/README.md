@@ -213,7 +213,13 @@ throwaway settings file, so it never changes the remembered window.
   difference, rear pair heave; open loop, per motor, which is what the firmware's MANUAL mode
   takes), ramped over 0.4 s so nothing jumps, and the bridge repeats the last command to the
   blimp while armed; the limit (30 % by default; D-pad ↑/↓ on the pad) scales everything. Let go
-  and the command ramps to zero. STOP (button, Space, Esc, B on the pad, which also reaches the
+  and the command ramps to zero. *Roll* (off by default, since 2026-11-03) adds a fourth axis on
+  the right stick's free ↔ or Q/E: the rear pair's difference, RL harder to roll right, mixed like
+  the front pair's yaw. It is an experiment the team asked for, to see whether the heave pair
+  apart does anything when a gust rocks the blimp; on paper the pair at ±5.5 cm makes a torque
+  about the fore-aft axis that the gondola's pendulum pulls back, not a turn, and at hover the
+  difference comes out of the lift (both rear motors sit near the ceiling), so each rear motor is
+  clamped on its own and the roll never pulls the other one down too. STOP (button, Space, Esc, B on the pad, which also reaches the
   bridge straight from the pad reader's thread) disarms and coasts; so does a gamepad that
   disappears while driving, and the bridge's 3 s watchdog runs underneath. B latches the bridge
   from the pad's thread, so a frozen window cannot drive again when it thaws. Leaving the page
@@ -221,7 +227,7 @@ throwaway settings file, so it never changes the remembered window.
   so on every page. *Go
   autonomous* is the hand-off to `blimp_step()` on the blimp; it stays disabled until the
   firmware has its mode switch (`MODE_SET`, `docs/control-loop-plan.md` increment 3). `--mode
-  pc|deck` sets the input from the command line; the input, the layout and the limit are
+  pc|deck` sets the input from the command line; the input, the layout, the limit and *Roll* are
   remembered.
 - **Bench** (the third tab under the header): the blimp's capture. Set a length (the box is
   bounded by the blimp's own buffer, 400 s by default, once the page has asked it) and press

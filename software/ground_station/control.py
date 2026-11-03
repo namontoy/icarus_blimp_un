@@ -14,6 +14,19 @@ here is a controller. When blimp_step() runs on the blimp, going autonomous
 is a MODE_SET away; the button for it is already on this page, disabled
 until that packet exists (increment 3 of the plan).
 
+A fourth axis, roll, since 2026-11-03, off by default (the Roll switch,
+remembered): the rear pair's difference from the right stick's free axis or
+Q / E, mixed like the front pair's yaw, RL harder to roll right. The team
+wants to see whether driving the heave pair apart does anything when a gust
+rocks the blimp. On paper it cannot turn it: the pair pushes along z at
+±5.5 cm (AGENTS.md), so its difference is a torque about the fore-aft axis,
+about 0.4 gf·m at the 40 % ceiling, which the pendulum of a gondola under a
+sphere pulls back; a turn needs the front pair. What it costs is lift: at
+hover both rear motors sit near the ceiling (about 6.8 gf for a blimp 6 gf
+heavy), so a difference comes out of one of them and the blimp sinks. Hence
+opt-in, each rear motor clamped on its own so the roll never pulls the other
+one down too, and the capture to say what happened.
+
 Two input modes, kept in QSettings and settable with --mode: PC (the
 keyboard, plus a gamepad if one is plugged in) and Steam Deck (the Deck's own
 controls through gamepad.py, the legend in the Deck's names, the hints hidden
@@ -54,6 +67,7 @@ MODE_NAMES = {'pc': 'PC', 'deck': 'Steam Deck'}
 LAYOUTS = (('mode2', 'Mode 2: L heave + yaw, R surge', 'left stick: heave and yaw · right stick: surge'),
            ('mode1', 'Mode 1: L surge + yaw, R heave', 'left stick: surge and yaw · right stick: heave'))
 PAD_BUTTONS = ('a', 'b', 'start', 'up', 'down')     # the ones the page acts on, on their press edge
+AXES = ('surge', 'yaw', 'heave', 'roll')            # the command's order everywhere on the page
 
 
 # ------------------------------------------------------------ pure parts
@@ -70,19 +84,24 @@ def shape_axis(v, deadzone=DEADZONE, expo=EXPO):
     return out if v > 0 else -out
 
 
-def teleop_mix(surge, yaw, heave, limit):
-    """Surge, yaw (right positive) and heave in −1…+1 to the four duties the
-    link carries, FL RL FR RR, scaled by the limit. The front pair is sum and
-    difference: the left motor pushes harder to turn right. When the sum
-    would exceed one motor, both are scaled together so the turn the
-    operator asked for keeps its proportion (core/'s mixer instead protects
-    yaw and clamps surge, the right policy for a controller, but a hand on a
-    stick expects what it sees). The rear pair is heave, equal on both;
-    negative heave reverses them, which the DRV8833s allow."""
+def teleop_mix(surge, yaw, heave, limit, roll=0.0):
+    """Surge, yaw (right positive), heave and roll (right positive) in −1…+1
+    to the four duties the link carries, FL RL FR RR, scaled by the limit.
+    The front pair is sum and difference: the left motor pushes harder to
+    turn right. When the sum would exceed one motor, both are scaled
+    together so the turn the operator asked for keeps its proportion
+    (core/'s mixer instead protects yaw and clamps surge, the right policy
+    for a controller, but a hand on a stick expects what it sees). The rear
+    pair is heave, equal on both, plus the roll as its difference, RL harder
+    to roll right; negative heave reverses them, which the DRV8833s allow.
+    The rear pair is clamped motor by motor, not scaled together: the lift
+    is what keeps the blimp off the floor, so a roll at full heave takes
+    from one motor and never pulls the other down with it."""
     fl, fr = surge + yaw, surge - yaw
     m = max(abs(fl), abs(fr), 1.0)
     fl, fr = fl / m, fr / m
-    return [clamp(v * limit, -1.0, 1.0) for v in (fl, heave, fr, heave)]
+    rl, rr = clamp(heave + roll, -1.0, 1.0), clamp(heave - roll, -1.0, 1.0)
+    return [clamp(v * limit, -1.0, 1.0) for v in (fl, rl, fr, rr)]
 
 
 def slew(current, target, step):
@@ -95,40 +114,45 @@ def slew(current, target, step):
 
 
 def pad_axes(axes, layout):
-    """The pad's sticks to (surge, yaw, heave) under a stick layout."""
+    """The pad's sticks to (surge, yaw, heave, roll) under a stick layout;
+    the right stick's X, the axis both layouts leave free, is the roll."""
     if layout == 'mode1':
-        return axes['ly'], axes['lx'], axes['ry']
-    return axes['ry'], axes['lx'], axes['ly']
+        return axes['ly'], axes['lx'], axes['ry'], axes['rx']
+    return axes['ry'], axes['lx'], axes['ly'], axes['rx']
 
 
-def pad_names(layout):
-    """((left x, left y), (right x, right y)) axis names for the pads."""
+def pad_names(layout, roll=False):
+    """((left x, left y), (right x, right y)) axis names for the pads; the
+    right stick's X is named only while the roll is on."""
+    rx = 'roll' if roll else ''
     if layout == 'mode1':
-        return ('yaw', 'surge'), ('', 'heave')
-    return ('yaw', 'heave'), ('', 'surge')
+        return ('yaw', 'surge'), (rx, 'heave')
+    return ('yaw', 'heave'), (rx, 'surge')
 
 
 KEYS = {Qt.Key.Key_W: ('surge', 1), Qt.Key.Key_S: ('surge', -1),
         Qt.Key.Key_D: ('yaw', 1), Qt.Key.Key_A: ('yaw', -1),
         Qt.Key.Key_Right: ('yaw', 1), Qt.Key.Key_Left: ('yaw', -1),
-        Qt.Key.Key_Up: ('heave', 1), Qt.Key.Key_Down: ('heave', -1)}
+        Qt.Key.Key_Up: ('heave', 1), Qt.Key.Key_Down: ('heave', -1),
+        Qt.Key.Key_E: ('roll', 1), Qt.Key.Key_Q: ('roll', -1)}
 
 
 def key_axes(held, shift):
-    """Held keys to (surge, yaw, heave): opposite keys cancel."""
-    out = {'surge': 0, 'yaw': 0, 'heave': 0}
+    """Held keys to (surge, yaw, heave, roll): opposite keys cancel."""
+    out = {a: 0 for a in AXES}
     for k in held:
         if k in KEYS:
             axis, sign = KEYS[k]
             out[axis] += sign
     gain = 1.0 if shift else KEY_HALF
-    return tuple(clamp(out[a], -1, 1) * gain for a in ('surge', 'yaw', 'heave'))
+    return tuple(clamp(out[a], -1, 1) * gain for a in AXES)
 
 
 # ------------------------------------------------------------------- page
 
 LEGEND_PC = (('W / S', 'surge: forward / back'), ('A / D, ← / →', 'yaw: left / right'),
-             ('↑ / ↓', 'heave: up / down'), ('Shift', 'full stick; a key alone gives half'),
+             ('↑ / ↓', 'heave: up / down'), ('Q / E', 'roll: the rear pair apart, while Roll is on'),
+             ('Shift', 'full stick; a key alone gives half'),
              ('Space, Esc', 'STOP'), ('gamepad', 'if one is plugged in, as in Steam Deck mode'))
 LEGEND_DECK = {'mode2': (('left stick', 'heave ↕ · yaw ↔'), ('right stick', 'surge ↕')),
                'mode1': (('left stick', 'surge ↕ · yaw ↔'), ('right stick', 'heave ↕'))}
@@ -141,14 +165,16 @@ def legend(rows):
 
 
 class ControlPage(QWidget):
-    """Command (mode, arming, source, legend) | Sticks (the pads and the three
+    """Command (mode, arming, source, legend) | Sticks (the pads and the
     axes) | Motors (the blimp's readback, as on the Flight page)."""
     armed_changed = pyqtSignal(bool)
     stop_requested = pyqtSignal()           # B on the pad: the window's STOP, flash included
     HINT = ('Pick the input, arm, then fly: the page mixes surge, yaw and heave into the four motors, and the '
             'station repeats the last command to the blimp until you change it. Let go and everything ramps back '
             'to zero; STOP or a lost pad coast the motors at once, a window frozen for 3 s releases them. Arming '
-            'needs telemetry and the sticks at rest. "Go autonomous" waits for the firmware\'s mode switch.')
+            'needs telemetry and the sticks at rest. Roll (off by default) adds the rear pair\'s difference from '
+            'the right stick\'s free axis or Q / E, an experiment: on paper a tilt, not a turn, paid for in lift at '
+            'hover. "Go autonomous" waits for the firmware\'s mode switch.')
 
     def __init__(self, station, settings):
         super().__init__()
@@ -159,10 +185,11 @@ class ControlPage(QWidget):
         self.mode = 'pc'
         self.layout_id = 'mode2'
         self.limit = LIMIT_DEFAULT / 100.0
-        self.cmd = [0.0, 0.0, 0.0]              # surge, yaw, heave after the ramp
-        self.target = (0.0, 0.0, 0.0)
-        self.raw = (0.0, 0.0, 0.0)              # the pad's sticks before shaping
+        self.cmd = [0.0] * len(AXES)            # surge, yaw, heave, roll after the ramp
+        self.target = (0.0,) * len(AXES)
+        self.raw = (0.0,) * len(AXES)           # the pad's sticks before shaping
         self.held, self.shift = set(), False
+        self.roll_on = False                    # the Roll switch: the rear pair's difference, off by default
         self.pad = None                         # the last gamepad snapshot
         self.pad_was = {b: False for b in PAD_BUTTONS}
         self.source = 'keys'                    # what moved last: 'keys' or 'pad'
@@ -184,6 +211,7 @@ class ControlPage(QWidget):
         lim = settings.value('control/limit')
         if lim not in (None, ''):
             self.limit_in.setValue(int(lim))
+        self.set_roll(str(settings.value('control/roll')).lower() == 'true', save=False)
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.tick)
         self._timer.start(TICK_MS)
@@ -243,9 +271,15 @@ class ControlPage(QWidget):
         self.limit_in.valueChanged.connect(self._limit_changed)
         lim = QWidget()
         lim.setLayout(hbox(label('Limit', color=T.MUTED), self.limit_in, label('%', color=T.MUTED), spacing=6))
+        self.roll_sw = Switch('Roll')
+        self.roll_sw.setToolTip("the rear pair apart, RL harder to roll right, from the right stick's ↔ or Q / E; "
+                                'off: the rear pair is heave only. An experiment: on paper the pair at ±5.5 cm '
+                                'tilts, it does not turn, and at hover the difference comes out of the lift')
+        self.roll_sw.toggled.connect(self.set_roll)
         controls = FlowBox(hgap=16, vgap=10)
         controls.add(self.arm_sw)
         controls.add(lim)
+        controls.add(self.roll_sw)
         lay.addWidget(controls)
         lay.addSpacing(8)
         self.state_l = label('DISARMED', 13, 600, mono=True)
@@ -289,15 +323,17 @@ class ControlPage(QWidget):
         g.setColumnMinimumWidth(2, 64)
         g.setColumnStretch(1, 1)
         self.axis_bars, self.axis_vals = {}, {}
+        self.roll_row = []                      # hidden while the roll is off, so the panel reads as before
         for i, (name, words) in enumerate((('surge', 'back · forward'), ('yaw', 'left · right'),
-                                           ('heave', 'down · up'))):
+                                           ('heave', 'down · up'), ('roll', 'RR harder · RL harder'))):
             bar, val = CentreBar(), label('+0.00', 13, mono=True)
             val.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            g.addWidget(label(name, 12, 700, T.MUTED, spacing=0.08, caps=True), i, 0)
-            g.addWidget(bar, i, 1)
-            g.addWidget(val, i, 2)
-            g.addWidget(label(words, 11, color=T.FAINT), i, 3)
+            row = (label(name, 12, 700, T.MUTED, spacing=0.08, caps=True), bar, val, label(words, 11, color=T.FAINT))
+            for col, w in enumerate(row):
+                g.addWidget(w, i, col)
             self.axis_bars[name], self.axis_vals[name] = bar, val
+            if name == 'roll':
+                self.roll_row = list(row)
         lay.addLayout(g)
         lay.addSpacing(12)
         self.mix_l = label('', 12, color=T.FAINT, mono=True, wrap=True)
@@ -354,7 +390,7 @@ class ControlPage(QWidget):
             self.layout_in.blockSignals(True)
             self.layout_in.setCurrentIndex(idx)
             self.layout_in.blockSignals(False)
-        (lx, ly), (rx, ry) = pad_names(lid)
+        (lx, ly), (rx, ry) = pad_names(lid, self.roll_on)
         self.pad_l.set_axes(lx, ly)
         self.pad_r.set_axes(rx, ry)
         if save:
@@ -363,7 +399,10 @@ class ControlPage(QWidget):
 
     def _legend(self):
         if self.mode == 'deck':
-            self.legend_l.setText(legend(LEGEND_DECK[self.layout_id] + LEGEND_DECK_BUTTONS))
+            rows = LEGEND_DECK[self.layout_id]
+            if self.roll_on:
+                rows = tuple((k, v + ' · roll ↔' if k == 'right stick' else v) for k, v in rows)
+            self.legend_l.setText(legend(rows + LEGEND_DECK_BUTTONS))
         else:
             self.legend_l.setText(legend(LEGEND_PC))
 
@@ -377,6 +416,32 @@ class ControlPage(QWidget):
         self.limit = clamp(pct / 100.0, 0.05, 1.0)
         self.settings.setValue('control/limit', pct)
         self.station.log('warn' if self.limit > 0.5 else 'info', 'control: limit %d %%' % pct)
+        self.render()
+
+    def set_roll(self, on, save=True):
+        """The roll axis on or off. Off, the right stick's X and Q / E are
+        nothing, and the axis row and the pad's label go, so the page reads
+        as it did; on, a command already on the stick ramps in like any
+        other, and off again ramps it out: nothing jumps either way."""
+        on = bool(on)
+        self.roll_on = on
+        if self.roll_sw.isChecked() != on:
+            self.roll_sw.blockSignals(True)
+            self.roll_sw.setChecked(on)
+            self.roll_sw.blockSignals(False)
+        for w in self.roll_row:
+            w.setVisible(on)
+        (lx, ly), (rx, ry) = pad_names(self.layout_id, on)
+        self.pad_l.set_axes(lx, ly)
+        self.pad_r.set_axes(rx, ry)
+        if save:
+            self.settings.setValue('control/roll', on)
+            if on:
+                self.station.log('warn', 'control: roll on: the rear pair apart from the right stick and Q / E; '
+                                         'at hover the difference comes out of the lift')
+            else:
+                self.station.log('info', 'control: roll off: the rear pair is heave only')
+        self._legend()
         self.render()
 
     # -------------------------------------------------------------- arming
@@ -406,12 +471,13 @@ class ControlPage(QWidget):
             self.station.log('warn', 'control: sticks at rest and keys up before arming')
             return False
         self.armed = True
-        self.cmd = [0.0, 0.0, 0.0]
+        self.cmd = [0.0] * len(AXES)
         self.arm_sw.blockSignals(True)
         self.arm_sw.setChecked(True)
         self.arm_sw.blockSignals(False)
-        self.station.log('info', 'manual control armed from the %s, limit %d %%'
-                         % ('gamepad' if source == 'pad' else 'keyboard', round(self.limit * 100)))
+        self.station.log('info', 'manual control armed from the %s, limit %d %%%s'
+                         % ('gamepad' if source == 'pad' else 'keyboard', round(self.limit * 100),
+                            ', roll on' if self.roll_on else ''))
         self.armed_changed.emit(True)
         self.render()
         return True
@@ -419,7 +485,7 @@ class ControlPage(QWidget):
     def disarm(self, send_stop=True):
         """Off, with a STOP unless the caller sends its own (the window's
         STOP does, for both pages at once)."""
-        self.cmd = [0.0, 0.0, 0.0]
+        self.cmd = [0.0] * len(AXES)
         if not self.armed:
             self.render()
             return
@@ -475,10 +541,14 @@ class ControlPage(QWidget):
                 self.pad_was[b] = now
             self.raw = pad_axes(pad['axes'], self.layout_id)
         else:
-            self.raw = (0.0, 0.0, 0.0)
+            self.raw = (0.0,) * len(AXES)
             self.pad_was = {b: False for b in PAD_BUTTONS}
+        if not self.roll_on:                    # off, the right stick's X and Q / E are nothing
+            self.raw = self.raw[:3] + (0.0,)
         shaped = tuple(shape_axis(v) for v in self.raw)
         keys = key_axes(self.held, self.shift)
+        if not self.roll_on:
+            keys = keys[:3] + (0.0,)
         if any(shaped):
             self.source = 'pad'
         elif any(keys):
@@ -487,7 +557,7 @@ class ControlPage(QWidget):
         step = TICK_MS / 1000.0 / SLEW_S
         self.cmd = [slew(c, t, step) for c, t in zip(self.cmd, self.target)]
         if self.armed:
-            self.station.set_motors(teleop_mix(self.cmd[0], self.cmd[1], self.cmd[2], self.limit))
+            self.station.set_motors(teleop_mix(self.cmd[0], self.cmd[1], self.cmd[2], self.limit, self.cmd[3]))
         self.render()
 
     def _pad_button(self, b):
@@ -526,29 +596,30 @@ class ControlPage(QWidget):
     # -------------------------------------------------------------- render
 
     def render(self):
-        surge, yaw, heave = self.cmd
+        surge, yaw, heave, roll = self.cmd
         pad = self.pad
         live = self.armed
         if self.layout_id == 'mode1':
             self.pad_l.set(yaw, surge, (pad['axes']['lx'], pad['axes']['ly']) if pad and pad['connected'] else None,
                            DEADZONE, live)
-            self.pad_r.set(0.0, heave, (pad['axes']['rx'], pad['axes']['ry']) if pad and pad['connected'] else None,
+            self.pad_r.set(roll, heave, (pad['axes']['rx'], pad['axes']['ry']) if pad and pad['connected'] else None,
                            DEADZONE, live)
         else:
             self.pad_l.set(yaw, heave, (pad['axes']['lx'], pad['axes']['ly']) if pad and pad['connected'] else None,
                            DEADZONE, live)
-            self.pad_r.set(0.0, surge, (pad['axes']['rx'], pad['axes']['ry']) if pad and pad['connected'] else None,
+            self.pad_r.set(roll, surge, (pad['axes']['rx'], pad['axes']['ry']) if pad and pad['connected'] else None,
                            DEADZONE, live)
-        for name, v in (('surge', surge), ('yaw', yaw), ('heave', heave)):
+        for name, v in zip(AXES, self.cmd):
             self.axis_bars[name].set(v, live)
             self.axis_vals[name].setText(sfmt(v, 2))
-        fl, rl, fr, rr = teleop_mix(surge, yaw, heave, self.limit)
+        fl, rl, fr, rr = teleop_mix(surge, yaw, heave, self.limit, roll)
         self.mix_l.setText('to the blimp  FL %+.3f  FR %+.3f  RL %+.3f  RR %+.3f%s'
                            % (fl, fr, rl, rr, '' if self.armed else '  (not armed: nothing sent)'))
         # state line
         if self.armed:
-            self.state_l.setText('ARMED · %s · limit %d %%'
-                                 % ('gamepad' if self.source == 'pad' else 'keyboard', round(self.limit * 100)))
+            self.state_l.setText('ARMED · %s · limit %d %%%s'
+                                 % ('gamepad' if self.source == 'pad' else 'keyboard', round(self.limit * 100),
+                                    ' · roll' if self.roll_on else ''))
             set_color(self.state_l, T.PAPAYA)
         elif not self.alive:
             self.state_l.setText('DISARMED · no telemetry')

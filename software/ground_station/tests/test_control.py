@@ -22,18 +22,26 @@ m = Cm.teleop_mix(1, 1, 0, 1.0)
 check(all(near(x, y) for x, y in zip(m, [1, 0, 0, 0])), 'mix: full surge + full right yaw -> FL 1, FR 0 (scaled)')
 m = Cm.teleop_mix(0, 0.5, -0.4, 1.0)
 check(all(near(x, y) for x, y in zip(m, [0.5, -0.4, -0.5, -0.4])), 'mix: yaw right alone -> FL +, FR -; heave down reverses both rear')
+m = Cm.teleop_mix(0, 0, 1, 0.3, 0.5)
+check(all(near(x, y) for x, y in zip(m, [0, 0.3, 0, 0.15])), 'mix: roll at full heave takes from RR only, RL stays at the limit')
+m = Cm.teleop_mix(0, 0, 0, 1.0, -1)
+check(all(near(x, y) for x, y in zip(m, [0, -1, 0, 1])), 'mix: roll left alone -> RL reversed, RR up')
+m = Cm.teleop_mix(0, 0, -0.6, 1.0, -0.6)
+check(all(near(x, y) for x, y in zip(m, [0, -1, 0, 0])), 'mix: roll with heave down: RL clamped at full reverse, RR at zero')
 check(Cm.shape_axis(0.05) == 0.0 and near(Cm.shape_axis(1.0), 1.0) and near(Cm.shape_axis(-1.0), -1.0),
       'shape: dead band and full travel')
 xs = [Cm.shape_axis(i / 50.0) for i in range(51)]
 check(all(b >= a for a, b in zip(xs, xs[1:])), 'shape: monotonic')
-check(Cm.key_axes({Qt.Key.Key_W}, False) == (0.5, 0.0, 0.0), 'keys: W alone is half surge')
-check(Cm.key_axes({Qt.Key.Key_W, Qt.Key.Key_S}, True) == (0.0, 0.0, 0.0), 'keys: W and S cancel')
-check(Cm.key_axes({Qt.Key.Key_Left, Qt.Key.Key_Up}, True) == (0.0, -1.0, 1.0), 'keys: Left + Up with Shift')
+check(Cm.key_axes({Qt.Key.Key_W}, False) == (0.5, 0.0, 0.0, 0.0), 'keys: W alone is half surge')
+check(Cm.key_axes({Qt.Key.Key_W, Qt.Key.Key_S}, True) == (0.0, 0.0, 0.0, 0.0), 'keys: W and S cancel')
+check(Cm.key_axes({Qt.Key.Key_Left, Qt.Key.Key_Up}, True) == (0.0, -1.0, 1.0, 0.0), 'keys: Left + Up with Shift')
+check(Cm.key_axes({Qt.Key.Key_E}, True) == (0.0, 0.0, 0.0, 1.0) and Cm.key_axes({Qt.Key.Key_Q}, False) == (0.0, 0.0, 0.0, -0.5),
+      'keys: E is roll right, Q alone half roll left')
 check(Cm.slew(0.0, 1.0, 0.125) == 0.125 and Cm.slew(0.1, 0.0, 0.125) == 0.0, 'slew: step and arrival')
-check(Cm.pad_axes({'lx': 0.1, 'ly': 0.2, 'rx': 0.3, 'ry': 0.4, 'lt': 0, 'rt': 0}, 'mode2') == (0.4, 0.1, 0.2),
-      'pad axes mode 2: right Y surge, left X yaw, left Y heave')
-check(Cm.pad_axes({'lx': 0.1, 'ly': 0.2, 'rx': 0.3, 'ry': 0.4, 'lt': 0, 'rt': 0}, 'mode1') == (0.2, 0.1, 0.4),
-      'pad axes mode 1: left Y surge, left X yaw, right Y heave')
+check(Cm.pad_axes({'lx': 0.1, 'ly': 0.2, 'rx': 0.3, 'ry': 0.4, 'lt': 0, 'rt': 0}, 'mode2') == (0.4, 0.1, 0.2, 0.3),
+      'pad axes mode 2: right Y surge, left X yaw, left Y heave, right X roll')
+check(Cm.pad_axes({'lx': 0.1, 'ly': 0.2, 'rx': 0.3, 'ry': 0.4, 'lt': 0, 'rt': 0}, 'mode1') == (0.2, 0.1, 0.4, 0.3),
+      'pad axes mode 1: left Y surge, left X yaw, right Y heave, right X roll')
 
 # evdev parsing without a device: a 64-bit input_event stream
 ev = G.Evdev.__new__(G.Evdev)
@@ -137,6 +145,29 @@ key(Qt.Key.Key_Shift, False)
 spin(0.8)
 check(readback() == {'FL': 0, 'RL': 0, 'FR': 0, 'RR': 0}, 'fly: keys up -> zero on the mock')
 
+# the roll: off by default, E is nothing; on, Shift + E splits the rear pair, RL harder
+check(not c.roll_on and not c.roll_sw.isChecked() and c.pad_r.xn == '' and not c.roll_row[0].isVisible(),
+      'roll: off by default, no label on the right pad, no axis row')
+key(Qt.Key.Key_E, True)
+key(Qt.Key.Key_Shift, True)
+spin(0.6)
+check(c.cmd[3] == 0.0 and readback() == {'FL': 0, 'RL': 0, 'FR': 0, 'RR': 0}, 'roll off: E does nothing')
+c.roll_sw.click()
+spin(0.8)
+rb = readback()
+check(c.roll_on and rb and near(rb['RL'], 0.3, 0.002) and near(rb['RR'], -0.3, 0.002) and rb['FL'] == 0,
+      'roll on: Shift + E -> RL at the limit, RR reversed: %s' % rb)
+check('roll' in c.state_l.text() and c.pad_r.xn == 'roll' and c.roll_row[0].isVisible(),
+      'roll on: in the state line, on the right pad and as an axis row')
+key(Qt.Key.Key_E, False)
+key(Qt.Key.Key_Shift, False)
+spin(0.8)
+check(readback() == {'FL': 0, 'RL': 0, 'FR': 0, 'RR': 0}, 'roll: keys up -> zero on the mock')
+c.set_roll(False)
+spin(0.1)
+check(not c.roll_sw.isChecked() and c.pad_r.xn == '' and not c.roll_row[0].isVisible(),
+      'roll off again: label and row gone')
+
 # a key held across a window deactivation is released
 key(Qt.Key.Key_W, True)
 spin(0.3)
@@ -180,6 +211,20 @@ spin(0.15)
 fake[0] = pad_on
 spin(0.1)
 check(c.armed and c.source == 'keys' or c.armed, 'pad: A arms')
+side = dict(pad_on, axes=dict(pad_on['axes'], rx=0.9), buttons=dict(pad_on['buttons']))
+fake[0] = side
+spin(0.6)
+check(c.target[3] == 0.0 and readback() == {'FL': 0, 'RL': 0, 'FR': 0, 'RR': 0},
+      'pad: the right stick\'s X is nothing while the roll is off')
+c.set_roll(True)
+spin(0.8)
+rb = readback()
+want = Cm.shape_axis(0.9) * 0.3
+check(rb and near(rb['RL'], want, 0.003) and near(rb['RR'], -want, 0.003) and rb['FL'] == 0,
+      'pad: roll on, right stick to the right -> RL +%.3f, RR -%.3f: %s' % (want, want, rb))
+c.set_roll(False)
+spin(0.8)
+check(readback() == {'FL': 0, 'RL': 0, 'FR': 0, 'RR': 0}, 'pad: roll off ramps the rear pair back to zero')
 up = dict(pad_on, axes=dict(pad_on['axes'], ly=0.9), buttons=dict(pad_on['buttons']))
 fake[0] = up
 spin(0.8)
@@ -217,6 +262,9 @@ spin(0.4)
 check(c.mode == 'deck' and c.mode_b['deck'].isChecked() and 'MODE_SET' in c.auto_note.text(),
       "deck: mode set, the hand-off's note behind its info icon")
 check('left stick' in c.legend_l.text(), 'deck: legend in the pad\'s names')
+c.set_roll(True)
+spin(0.1)
+check('roll' in c.legend_l.text() and c.pad_r.xn == 'roll', 'deck: the roll in the legend and on the right pad')
 c.set_layout('mode1')
 spin(0.1)
 check(c.pad_l.yn == 'surge' and c.pad_r.yn == 'heave', 'layout: mode 1 relabels the pads')
@@ -227,8 +275,8 @@ check(c.pad_notice.isVisible(), 'deck: the missing-pad notice shows')
 # settings persisted
 settings = QSettings(ini, QSettings.Format.IniFormat)
 settings.sync()
-check(settings.value('control/mode') == 'deck' and settings.value('control/layout') == 'mode1',
-      'settings: mode and layout saved')
+check(settings.value('control/mode') == 'deck' and settings.value('control/layout') == 'mode1'
+      and str(settings.value('control/roll')).lower() == 'true', 'settings: mode, layout and roll saved')
 
 win.close()
 spin(0.2)

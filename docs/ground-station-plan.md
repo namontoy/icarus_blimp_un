@@ -243,7 +243,7 @@ serial port with the target_cam viewer's parser (`--cam PORT`, pyserial). That w
 | 6 | Bench: run against the real blimp with the stream, record what the page gets wrong | next |
 | 7 | Logging to CSV, parameter tuning from the window, Spanish labels if wanted | the capture and its traces on the Bench page done 2026-10-27 (`bench.py`; in demo and against `mock_blimp.py`, not yet against the blimp); parameters and labels later |
 | 8 | Native PyQt6 window in place of the Tornado server and the page (`docs/ground-station-native-plan.md`) | done 2026-10-27 in demo and against `mock_blimp.py`; not yet run against the blimp |
-| 9 | Control page: flying by hand (surge, yaw and heave from the keyboard or a gamepad, mixed on the ground into the four duties, as the firmware's MANUAL mode expects, D5 of the control-loop plan), PC and Steam Deck input modes, the autonomous hand-off button | done 2026-10-28 in demo (`control.py`, `gamepad.py`); the hand-off waits for `MODE_SET` (control-loop plan increment 3); not yet run on a Steam Deck or against the blimp |
+| 9 | Control page: flying by hand (surge, yaw and heave from the keyboard or a gamepad, mixed on the ground into the four duties, as the firmware's MANUAL mode expects, D5 of the control-loop plan), PC and Steam Deck input modes, the autonomous hand-off button | done 2026-10-28 in demo (`control.py`, `gamepad.py`); the hand-off waits for `MODE_SET` (control-loop plan increment 3); not yet run on a Steam Deck or against the blimp; a *Roll* switch since 2026-11-03 (the rear pair's difference on the right stick's free axis, off by default, an experiment: a tilt the pendulum cancels, not a turn, paid for in lift at hover), not flown |
 
 ## 9. Running it
 
