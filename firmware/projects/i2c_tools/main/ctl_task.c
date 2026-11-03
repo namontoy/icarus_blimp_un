@@ -219,8 +219,9 @@ static struct {
  * one oneshot conversion per tick as the schedule has it, because it is on
  * the ADC and owes nothing to the stream; its fresh bit is set whenever a
  * calibrated sample came in. The forward camera's mailbox (cam_link.c) is
- * peeked the same way, fresh when its frame_seq moved; the downward camera
- * has no producer yet.
+ * peeked the same way, fresh when its frame_seq moved, and so is the optical
+ * flow's (2026-11-02: optflow_cam's rows on the same UART, from the forward
+ * camera's module pointed down); the downward camera itself is not wired.
  */
 static void read_sensors(uint32_t tick, sensors_raw_t *raw)
 {
@@ -233,6 +234,13 @@ static void read_sensors(uint32_t tick, sensors_raw_t *raw)
         raw->cam[CTL_CAM_FORWARD] = cam;
     } else {
         raw->cam_fresh[CTL_CAM_FORWARD] = false;
+    }
+    cam_flow_t flow;
+    if (cam_link_latest_flow(&flow)) {
+        raw->flow_fresh = flow.frame_seq != raw->flow.frame_seq;
+        raw->flow = flow;
+    } else {
+        raw->flow_fresh = false;
     }
 
     sensors_raw_t latest;
@@ -639,17 +647,24 @@ static void log_tick(const sensors_raw_t *raw, const setpoint_t *sp, const motor
     r.fresh = (raw->imu_fresh  ? CTL_FRESH_IMU  : 0) | (raw->mag_fresh ? CTL_FRESH_MAG : 0) |
               (raw->baro_fresh ? CTL_FRESH_BARO : 0) | (raw->tof_fresh ? CTL_FRESH_TOF : 0) |
               (raw->cam_fresh[CTL_CAM_FORWARD] ? CTL_FRESH_CAM0 : 0) |
-              (raw->cam_fresh[CTL_CAM_DOWN] ? CTL_FRESH_CAM1 : 0) |
+              (raw->flow_fresh ? CTL_FRESH_CAM1 : 0) |
               (raw->bat_fresh ? CTL_FRESH_BAT : 0);
     r.mode     = (uint8_t)sp->mode;
     r.fs_flags = fs_flags;
-    for (int c = 0; c < CTL_CAM_COUNT; c++) {
-        r.cam[c].seq   = (uint8_t)raw->cam[c].frame_seq;
-        r.cam[c].flags = raw->cam[c].detected ? 1 : 0;
-        r.cam[c].cx    = raw->cam[c].cx_px;
-        r.cam[c].cy    = raw->cam[c].cy_px;
-        r.cam[c].area  = raw->cam[c].area_px;
-    }
+    const cam_result_t *fwd = &raw->cam[CTL_CAM_FORWARD];
+    r.cam[CTL_CAM_FORWARD].seq   = (uint8_t)fwd->frame_seq;
+    r.cam[CTL_CAM_FORWARD].flags = fwd->detected ? 1 : 0;
+    r.cam[CTL_CAM_FORWARD].cx    = fwd->cx_px;
+    r.cam[CTL_CAM_FORWARD].cy    = fwd->cy_px;
+    r.cam[CTL_CAM_FORWARD].area  = fwd->area_px;
+    /* The downward slot carries the optical flow (ctl_types.h, log_record_t):
+       the shift in thousandths of a pixel, so the sub-pixel drift survives. */
+    const cam_flow_t *fl = &raw->flow;
+    r.cam[CTL_CAM_DOWN].seq   = (uint8_t)fl->frame_seq;
+    r.cam[CTL_CAM_DOWN].flags = (uint8_t)((fl->ok ? 1u : 0u) | ((unsigned)(fl->valid & 0x7Fu) << 1));
+    r.cam[CTL_CAM_DOWN].cx    = (uint16_t)(int16_t)lroundf(fminf(fmaxf(fl->dx_px * 1000.0f, -32767.0f), 32767.0f));
+    r.cam[CTL_CAM_DOWN].cy    = (uint16_t)(int16_t)lroundf(fminf(fmaxf(fl->dy_px * 1000.0f, -32767.0f), 32767.0f));
+    r.cam[CTL_CAM_DOWN].area  = (uint16_t)lroundf(fminf(fmaxf(fl->spread_px * 1000.0f, 0.0f), 65535.0f));
     if (sp->mode == CTL_MODE_MANUAL) {
         for (int m = 0; m < MOTOR_COUNT; m++) {
             r.setpoint[m] = q15(sp->cmd[m]);

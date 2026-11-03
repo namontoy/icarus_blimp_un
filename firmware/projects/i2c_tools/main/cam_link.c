@@ -1,6 +1,7 @@
 /*
  * cam_link.c - the forward ESP32-CAM's rows on UART1, and 'cam'. The wiring
- * is in cam_link.h; what counts as a row, and why strictly, in cam_row.c.
+ * is in cam_link.h; what counts as a row, and why strictly, in cam_row.c and
+ * (optflow_cam's rows, since 2026-11-02) flow_row.c.
  *
  * The S3 writes to the camera only on 'cam --tx', a line a person typed:
  * target_cam takes single-letter commands, and a stray 's' would stop its
@@ -22,6 +23,7 @@
 #include "sdkconfig.h"
 #include "cam_link.h"
 #include "cam_row.h"
+#include "flow_row.h"
 
 static const char *TAG = "cam";
 
@@ -49,6 +51,13 @@ static struct {
     bool              have;
     int               sign;
     uint32_t          window_start_us, window_rows;
+    /* optflow_cam's rows: their own mailbox, so a flow row never reads as a
+       balloon and 'hold follow' never takes one for the forward camera */
+    cam_flow_t        flow;
+    flow_row_t        flow_row;         /* the same row, every column kept */
+    bool              have_flow;
+    uint32_t          flow_window_start_us, flow_window_rows, flow_window_ok;
+    float             flow_sum_x, flow_sum_y;   /* px since boot or 'cam --zero' */
     kept_line_t       recent[CAM_RECENT];
     uint32_t          recent_n;         /* lines ever kept; the ring index is n % size */
     kept_line_t       info[CAM_INFO];
@@ -105,8 +114,10 @@ static void handle_line(char *line, size_t len)
     const uint32_t t = now_us();
     cam_result_t r;
     cam_row_t parsed;
+    flow_row_t fr;
     const bool info = line[0] == '#';
     const bool row = !info && parse_row(line, &r, &parsed);
+    const bool flow = !info && !row && flow_row_parse(line, &fr);
 
     portENTER_CRITICAL(&s.mux);
     keep(s.recent, CAM_RECENT, &s.recent_n, line, t);
@@ -137,6 +148,32 @@ static void handle_line(char *line, size_t len)
             s.window_rows = 0;
         }
         s.window_rows++;
+    } else if (flow) {
+        s.flow.frame_seq = s.flow.frame_seq + 1u;
+        s.flow.t_us      = t;
+        s.flow.dx_px     = fr.dx_px;
+        s.flow.dy_px     = fr.dy_px;
+        s.flow.spread_px = fr.spread_px;
+        s.flow.ok        = fr.ok ? 1 : 0;
+        s.flow.valid     = fr.valid;
+        s.flow.total     = fr.total;
+        s.flow_row = fr;
+        s.have_flow = true;
+        s.flow_sum_x += fr.dx_px;
+        s.flow_sum_y += fr.dy_px;
+        s.st.flow_rows++;
+        s.st.flow_rows_ok += fr.ok ? 1u : 0u;
+        s.st.flow_last_row_us = t;
+        s.st.streaming_off = false;
+        if (s.flow_window_start_us == 0u || (uint32_t)(t - s.flow_window_start_us) >= 1000000u) {
+            s.st.flow_rows_last_s = s.flow_window_rows;
+            s.st.flow_ok_last_s = s.flow_window_ok;
+            s.flow_window_start_us = t;
+            s.flow_window_rows = 0;
+            s.flow_window_ok = 0;
+        }
+        s.flow_window_rows++;
+        s.flow_window_ok += fr.ok ? 1u : 0u;
     } else {
         s.st.rejected++;
     }
@@ -237,6 +274,15 @@ bool cam_link_latest_row(cam_link_row_t *out)
     return have;
 }
 
+bool cam_link_latest_flow(cam_flow_t *out)
+{
+    portENTER_CRITICAL(&s.mux);
+    const bool have = s.have_flow;
+    *out = s.flow;
+    portEXIT_CRITICAL(&s.mux);
+    return have;
+}
+
 int cam_link_bearing_sign(void)
 {
     return s.sign;
@@ -250,9 +296,38 @@ void cam_link_status(cam_link_status_t *out)
     if (out->last_row_us == 0u || (uint32_t)(now_us() - out->last_row_us) > 1500000u) {
         out->rows_last_s = 0;
     }
+    if (out->flow_last_row_us == 0u || (uint32_t)(now_us() - out->flow_last_row_us) > 1500000u) {
+        out->flow_rows_last_s = 0;
+        out->flow_ok_last_s = 0;
+    }
 }
 
 /* ------------------------------------------------------------- console */
+
+/* optflow_cam's rows: the rate, how many measured, the latest, and the sum
+   since 'cam --zero', so a person can slide a surface 30 cm and read it. */
+static void print_flow(const cam_link_status_t *st)
+{
+    cam_flow_t f;
+    flow_row_t fr;
+    float sx, sy;
+    portENTER_CRITICAL(&s.mux);
+    f = s.flow;
+    fr = s.flow_row;
+    sx = s.flow_sum_x;
+    sy = s.flow_sum_y;
+    portEXIT_CRITICAL(&s.mux);
+    printf("optical flow (optflow_cam): %" PRIu32 " rows/s, %" PRIu32 " measured; rows %" PRIu32
+           " (measured %" PRIu32 "), last %" PRIu32 " ms ago\n",
+           st->flow_rows_last_s, st->flow_ok_last_s, st->flow_rows, st->flow_rows_ok,
+           (now_us() - f.t_us) / 1000u);
+    printf("latest: %s  dx %+.3f  dy %+.3f px  spread %.3f  blocks %u of %u (flat %u, edge %u, ambig %u), "
+           "match %" PRIu32 " us\n",
+           f.ok ? "ok" : "REFUSED", (double)f.dx_px, (double)f.dy_px, (double)f.spread_px, (unsigned)f.valid,
+           (unsigned)f.total, (unsigned)fr.flat, (unsigned)fr.edge, (unsigned)fr.ambig, fr.proc_us);
+    printf("moved since boot or 'cam --zero': x %+.1f px, y %+.1f px (image axes; mm = px x distance / 144)\n",
+           (double)sx, (double)sy);
+}
 
 static void print_status(void)
 {
@@ -277,13 +352,16 @@ static void print_status(void)
     printf("\nrows %" PRIu32 " (detected in %" PRIu32 "), '#' lines %" PRIu32 ", rejected %" PRIu32
            ", overlong %" PRIu32 ", bytes %" PRIu32 "\n",
            st.rows, st.rows_detected, st.info_lines, st.rejected, st.overflows, st.bytes);
+    if (st.flow_rows > 0) {
+        print_flow(&st);
+    }
     if (!have) {
         if (st.bytes == 0) {
             printf("nothing has arrived: check the camera is powered, CAM IO14 -> 470 ohm -> "
                    "S3 GPIO%d, and the grounds joined\n", st.rx_gpio);
-        } else {
-            printf("bytes arrive but no row parses: a wrong baud, or not target_cam's rows; "
-                   "'cam --raw' shows what arrives\n");
+        } else if (st.flow_rows == 0) {
+            printf("bytes arrive but no row parses: a wrong baud, or neither target_cam's nor "
+                   "optflow_cam's rows; 'cam --raw' shows what arrives\n");
         }
     } else if (r.detected) {
         printf("latest: DETECTED  az %+.1f deg  el %+.1f deg  cx %u  cy %u  area %u px\n",
@@ -363,7 +441,8 @@ static int cam_usage(void)
     printf("cam                  the forward camera's link: rows/s, the latest detection, core/'s bearing\n"
            "cam --raw            the last %d lines exactly as they arrived\n"
            "cam --tx <text>      send one line to the camera ('?' lists its settings; 's' toggles its rows)\n"
-           "cam --sign <-1|1>    core/'s bearing = sign x the camera's az, until the next boot\n",
+           "cam --sign <-1|1>    core/'s bearing = sign x the camera's az, until the next boot\n"
+           "cam --zero           restart the optical flow's 'moved since' sum\n",
            CAM_RECENT);
     return 1;
 }
@@ -380,6 +459,13 @@ static int do_cam_cmd(int argc, char **argv)
     }
     if (strcmp(argv[1], "--tx") == 0 && argc >= 3) {
         return send_line(argc, argv);
+    }
+    if (strcmp(argv[1], "--zero") == 0 && argc == 2) {
+        portENTER_CRITICAL(&s.mux);
+        s.flow_sum_x = s.flow_sum_y = 0.0f;
+        portEXIT_CRITICAL(&s.mux);
+        printf("optical flow sum zeroed\n");
+        return 0;
     }
     if (strcmp(argv[1], "--sign") == 0 && argc == 3) {
         const int v = atoi(argv[2]);
@@ -399,9 +485,10 @@ void register_cam(void)
 {
     const esp_console_cmd_t cmd = {
         .command = "cam",
-        .help = "The forward camera's link (target_cam over UART1): rows, the latest detection and the "
-                "bearing core/ gets. 'cam --raw' shows the last lines, 'cam --tx ?' asks the camera.",
-        .hint = "[--raw | --tx <text> | --sign <-1|1>]",
+        .help = "The forward camera's link (target_cam, or optflow_cam's flow, over UART1): rows, the latest "
+                "detection or flow and the bearing core/ gets. 'cam --raw' shows the last lines, "
+                "'cam --tx ?' asks the camera.",
+        .hint = "[--raw | --tx <text> | --sign <-1|1> | --zero]",
         .func = &do_cam_cmd,
     };
     ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));

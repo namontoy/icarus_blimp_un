@@ -21,6 +21,12 @@
  * camera's UART0 pads (U0T GPIO1, U0R GPIO3), which the 2026-10-30 build was
  * first wired to.
  *
+ * The same wires can carry optflow_cam's rows instead (the module flashed
+ * with the optical-flow firmware and pointed down, 2026-11-02): 16 columns,
+ * parsed by flow_row.c into their own mailbox (cam_link_latest_flow()), which
+ * the log stage records; 'cam' shows them and 'cam --zero' restarts the sum
+ * it prints.
+ *
  * A reader task (core 0, below the link) assembles lines and keeps the latest
  * row as a cam_result_t under a spinlock; the control task peeks it every
  * tick (ctl_types.h, the camera mailboxes). frame_seq counts rows, t_us is
@@ -53,6 +59,13 @@ typedef struct {
     uint32_t last_row_us;       /* S3 clock at the last row, 0: none yet         */
     int      csv_version;       /* 1 or 2, from the column count                 */
     bool     streaming_off;     /* the camera said "# streaming off" last        */
+    /* optflow_cam's rows (flow_row.h); the counts above are target_cam's only,
+       so 'hold follow' never mistakes a flow row for the forward camera */
+    uint32_t flow_rows;         /* parsed flow rows                              */
+    uint32_t flow_rows_ok;      /* of which ok = 1                               */
+    uint32_t flow_rows_last_s;  /* in the last whole second                      */
+    uint32_t flow_ok_last_s;
+    uint32_t flow_last_row_us;  /* S3 clock at the last flow row, 0: none yet    */
 } cam_link_status_t;
 
 /**
@@ -78,6 +91,13 @@ typedef struct {
 } cam_link_row_t;
 
 bool cam_link_latest_row(cam_link_row_t *out);
+
+/**
+ * The latest optflow_cam row (2026-11-02: the forward camera's module run
+ * pointed down, for the surface tests). Its own mailbox, never the forward
+ * camera's; false until a flow row has arrived. Any task, no waiting.
+ */
+bool cam_link_latest_flow(cam_flow_t *out);
 
 /** core/'s bearing = this x the camera's az: CONFIG_CAM_FWD_BEARING_SIGN,
     or what 'cam --sign' set since boot. */

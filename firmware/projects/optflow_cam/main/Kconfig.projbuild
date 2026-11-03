@@ -14,6 +14,26 @@ menu "Optical Flow Configuration"
             bool "Seeed XIAO ESP32S3 Sense"
     endchoice
 
+    config OPTFLOW_S3_UART
+        bool "Copy the CSV rows to the flight board on UART1 (TX IO14, RX IO13)"
+        depends on OPTFLOW_BOARD_AI_THINKER
+        default y
+        help
+            Every CSV row also goes out on UART1, TX IO14, for the S3 to read
+            and log (its cam_link.c tells these rows from target_cam's by their
+            16 columns). The wiring target_cam uses, so the forward camera's
+            module runs this firmware on the same wires. Only data rows; the
+            's' command stops the PC copy only. Nothing reads RX IO13.
+
+    config OPTFLOW_S3_UART_BAUD
+        int "Flight-board UART baud rate"
+        depends on OPTFLOW_S3_UART
+        range 9600 2000000
+        default 115200
+        help
+            The S3 reads its camera UART at 115200. A ~90-byte row takes about
+            8 ms on the wire, well within the 80 ms frame period.
+
     config OPTFLOW_TARGET_FPS
         int "Target frame rate (frames per second)"
         range 1 30

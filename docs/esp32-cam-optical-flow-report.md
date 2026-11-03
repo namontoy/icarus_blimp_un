@@ -1456,6 +1456,80 @@ editing:
 
 ---
 
+## 12. Through the S3 (2026-11-02)
+
+Everything above is the camera alone on a bench. Whether a downward camera
+is worth carrying is a question about the blimp: the flow next to the S3's
+gyro and ToF, on surfaces like the floor, at flight height. So the team runs
+the next tests through the S3, with the forward camera's module flashed with
+optflow_cam and pointed down; no second camera, no new wires.
+
+**What changed (built and host-tested; not yet run on hardware):**
+
+- optflow_cam copies every row to UART1, TX IO14 (`CONFIG_OPTFLOW_S3_UART`,
+  on by default), target_cam's wiring to the S3's GPIO6.
+- The S3's `cam_link.c` tells the 16-column flow rows from target_cam's 25 or
+  35 (`main/flow_row.c`; `host/test_flow_row.c` also checks that each parser
+  refuses the other's rows) and keeps them in their own mailbox: a flow row is
+  never a balloon, and `hold follow` refuses without target_cam's rows as
+  before. `cam` shows the flow (rate, blocks, the latest shift, the sum since
+  `cam --zero`). Nothing in `core/` reads it.
+- The capture records each flow frame in the downward camera's slot, unused
+  until now (`ctl_types.h`, `log_record_t`): ok, the blocks matched, dx and dy
+  and the spread in 0.001 px. `software/blimp_log.py` decodes them as the
+  `flow_*` columns; `software/flow_test.py` records one test per capture and
+  analyses it (texture, drift at rest, each motion against the tape, the
+  shift a tilt makes against the gyro, and the rows' delay).
+
+**Measured in the 2026-11-02 flights** (four captures, T3b, H6, 5b and the
+square, gyro offset taken on the floor before the climb): the gondola tilts at
+1.0–1.6 °/s median, 1.9–3.2 °/s at the 90th percentile, an upper bound because
+the gyro also feels the motors; over any 4 s it swings 0.5–1.3° (median) to
+0.7–2.3° (90th percentile). Yaw reached 32 °/s in the square's turns.
+
+**Reasoned from those:** at 1 m a tilt rate ω looks like a motion of h·ω,
+17 mm/s per °/s, so the swing reads as 20–55 mm/s, as large as the drift the
+camera is meant to see (1–5 m in 40–100 s, 20–50 mm/s). A speed therefore
+needs the gyro subtracted; a distance over a leg hardly does (1–2° is 2–4 cm).
+§4.5's "yaw" names the wrong axis for a downward camera: a yaw turns the image
+about its centre, which the median of the 25 blocks cancels; pitch and roll
+shift it. At 1 m one pixel is about 7 mm (f = 144 px, the forward module's
+58° lens), so the drift is 0.2–0.6 px a frame, where §8.15 measured 92–116 %,
+and a leg's 0.3 m/s is 3.5 px, under the usable 6.
+
+**The tests.** Gondola only, motors off, the PC on the blimp's Wi-Fi. The
+camera on the gondola looks at the surface; the distance is taped for each
+run (the ToF gives it too when it sees the same surface). One run each:
+`python software/flow_test.py <surface> <action> --dist <m>`, with the
+action done while it records (it prints what to do; nothing beeps).
+
+| Action | What the people do | Pass |
+|---|---|---|
+| `still` | nothing moves for 30 s | measured in ≥ 95 % of frames, ≥ 10 of 25 blocks, drift ≤ 5 mm/s as at 1 m |
+| `move` | slide the surface (or the gondola, for a floor or a wall) 30 cm along a tape in about 5 s and back | each way within ±15 %, back within 3 cm, no frames lost |
+| `slow` | the same in about 15 s each way: the drift's speed at 1 m when the camera is at 0.5 m | as `move` |
+| `tilt` | rock the gondola about ±5° over a still surface, both axes | about 2.5 px per degree, and at most 20 % of the shift left after the gyro |
+| `turn` | 90° on the spot and back | under 5 cm of motion read (more if the camera is off the turn's axis) |
+| `height` | raise 30 cm and lower back | under 3 cm of motion read |
+
+Surfaces: the floor, a plain wall, towels (plain and patterned), a rug, a
+sheet, cardboard, and one shiny surface with a lamp's reflection in view
+(a reflection moves with the camera, not with the floor). 0.5 m for every
+surface (the view is about 55 × 40 cm, so a towel fills it) and 1 m (about
+110 × 80 cm, the flight height) for the floor and a wall.
+
+**Worth carrying if** a floor like the race venue's passes `still` and
+`move` at 1 m and `tilt` shows the gyro removes the swing. The cost then: a
+second module (weigh it; the heave pair has about 2 gf above hover at the
+40 % ceiling, so a module of ~10 g needs more helium or less weight
+elsewhere), a second UART on the S3, and the flow into `core/`'s estimator.
+
+**Afterwards** the module goes back to namontoy's target_cam. Both firmwares
+use the default partition table and optflow_cam never touches NVS, so
+target_cam's settings should survive; do not erase the flash.
+
+---
+
 ## Appendix: hardware reference
 
 **AI-Thinker ESP32-CAM pin map** (in `main/camera_pins.h`):

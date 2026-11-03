@@ -75,6 +75,12 @@ static float s_pos_y_mm = 0.0f;
 static uint8_t *s_prev;     /* our own copy of the previous frame */
 static bool     s_have_prev;
 
+/* UART1 to the flight board, so the S3 can log the flow beside its gyro and
+   ToF (CONFIG_OPTFLOW_S3_UART). Its state is in the banner. */
+#define S3_UART         UART_NUM_1
+static const char *s_s3_state = "off in this build";
+static bool s_s3_ok;
+
 static flow_cfg_t s_cfg = {
     .width   = FRAME_W,
     .height  = FRAME_H,
@@ -244,7 +250,46 @@ static void print_banner(void)
            s_height_mm * (float)M_PI / 180.0f);
     printf("# columns      t_ms,ok,dx_px,dy_px,vx_mm_s,vy_mm_s,x_mm,y_mm,"
            "spread_px,valid,total,flat,edge,ambig,dt_ms,proc_us\n");
+#if CONFIG_OPTFLOW_S3_UART
+    printf("# flight board UART1 TX IO%d, %d baud: %s\n", S3_LINK_PIN_TX,
+           CONFIG_OPTFLOW_S3_UART_BAUD, s_s3_state);
+#else
+    printf("# flight board %s\n", s_s3_state);
+#endif
     fflush(stdout);
+}
+
+/* Start UART1 to the S3, as target_cam does. A failure is reported, not
+   fatal: the PC link on UART0 is how the failure gets diagnosed. */
+static void s3_uart_init(void)
+{
+#if CONFIG_OPTFLOW_S3_UART
+    const uart_config_t cfg = {
+        .baud_rate  = CONFIG_OPTFLOW_S3_UART_BAUD,
+        .data_bits  = UART_DATA_8_BITS,
+        .parity     = UART_PARITY_DISABLE,
+        .stop_bits  = UART_STOP_BITS_1,
+        .flow_ctrl  = UART_HW_FLOWCTRL_DISABLE,
+        .source_clk = UART_SCLK_DEFAULT,
+    };
+    /* The 1 kB TX ring holds several rows, so uart_write_bytes() copies and
+       returns: the copy costs the frame loop no wire time. Nothing reads RX;
+       256 B is the smallest buffer the driver accepts. */
+    esp_err_t err = uart_driver_install(S3_UART, 256, 1024, 0, NULL, 0);
+    if (err == ESP_OK) err = uart_param_config(S3_UART, &cfg);
+    if (err == ESP_OK) err = uart_set_pin(S3_UART, S3_LINK_PIN_TX, S3_LINK_PIN_RX,
+                                          UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+    /* An unconnected RX must idle high, or noise reads as a break storm. */
+    if (err == ESP_OK) err = gpio_pullup_en(S3_LINK_PIN_RX);
+    if (err != ESP_OK) {
+        static char why[48];
+        snprintf(why, sizeof why, "FAILED (%s), rows go to the PC only", esp_err_to_name(err));
+        s_s3_state = why;
+        return;
+    }
+    s_s3_ok = true;
+    s_s3_state = "every CSV row copied ('s' does not stop it)";
+#endif
 }
 
 /* Single-character commands, read without blocking so the frame pacing is
@@ -439,6 +484,7 @@ void app_main(void)
 
     /* Take over UART0 so reads can be non-blocking. stdout keeps working. */
     ESP_ERROR_CHECK(uart_driver_install(UART_NUM_0, 256, 0, 0, NULL, 0));
+    s3_uart_init();
 
     escape_hatch_delay();
 
@@ -534,14 +580,26 @@ void app_main(void)
             s_pos_y_mm += vy * dt_s;
         }
 
-        if (s_streaming) {
-            printf("%lld,%d,%.3f,%.3f,%.1f,%.1f,%.1f,%.1f,%.3f,"
-                   "%d,%d,%d,%d,%d,%.1f,%lld\n",
-                   capture_us / 1000, ok, r.dx, r.dy, vx, vy,
-                   s_pos_x_mm, s_pos_y_mm, r.spread,
-                   r.n_valid, r.n_total, r.n_flat, r.n_edge, r.n_ambig,
-                   dt_s * 1000.0f, proc_us);
-            fflush(stdout);
+        /* One row, printed once into a buffer so the PC and the S3 get the
+           same bytes. */
+        char row[160];
+        int at = snprintf(row, sizeof row,
+                          "%lld,%d,%.3f,%.3f,%.1f,%.1f,%.1f,%.1f,%.3f,"
+                          "%d,%d,%d,%d,%d,%.1f,%lld",
+                          capture_us / 1000, ok, r.dx, r.dy, vx, vy,
+                          s_pos_x_mm, s_pos_y_mm, r.spread,
+                          r.n_valid, r.n_total, r.n_flat, r.n_edge, r.n_ambig,
+                          dt_s * 1000.0f, proc_us);
+        if (at > 0 && at < (int)sizeof row) {
+            if (s_streaming) {
+                printf("%s\n", row);
+                fflush(stdout);
+            }
+            if (s_s3_ok) {
+                /* CRLF, as target_cam sends, so the S3 reads either. */
+                uart_write_bytes(S3_UART, row, at);
+                uart_write_bytes(S3_UART, "\r\n", 2);
+            }
         }
 
         memcpy(s_prev, fb->buf, FRAME_W * FRAME_H);

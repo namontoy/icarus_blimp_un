@@ -12,6 +12,12 @@ firmware sent in its LOG_INFO packet (the scales the counts need), then one
 The decoder applies the same scale factors the firmware's estimate stage
 will: a bug there shows up here, instead of being baked into the log.
 
+The downward camera's slot carries the optical flow since 2026-11-02
+(optflow_cam's rows, through the S3; ctl_types.h, log_record_t): the flow_*
+columns, the image's shift between two camera frames in pixels. A frame
+lasts 80 ms and a record 20 ms, so each frame repeats over about four records;
+the 'flow' fresh bit marks the record that brought a new one.
+
 Also a module: the ground station imports `read_file`, `decode` and
 `to_units` to plot a capture.
 """
@@ -44,7 +50,7 @@ RESULT = {0: 'ok', 1: 'no buffer', 2: 'busy', 3: 'range', 4: 'bad command'}
 MAG_CHIP = {0: 'none', 1: 'HMC5883L', 2: 'QMC5883L'}
 BARO_CHIP = {0: 'none', 1: 'BMP180', 2: 'BMP280', 3: 'BME280'}
 MODE = {0: 'MANUAL', 1: 'OPEN_LOOP', 2: 'CLOSED_LOOP', 3: 'KILLED'}
-FRESH = ('imu', 'mag', 'baro', 'tof', 'cam0', 'cam1', 'bat', 'link')               # CTL_FRESH_* bits
+FRESH = ('imu', 'mag', 'baro', 'tof', 'cam0', 'flow', 'bat', 'link')               # CTL_FRESH_* bits
 FLAGS = ('link_lost', 'cmd_stale', 'killed', 'batt_low', 'suspended', 'clamp_total', 'overrun',
          'motor_fs')                                                             # CTL_FS_* bits
 
@@ -53,7 +59,8 @@ COLUMNS = (['t_s', 'dt_ms'] +
            ['acc_%s_g' % a for a in 'xyz'] + ['gyro_%s_dps' % a for a in 'xyz'] +
            ['mag_%s_gauss' % a for a in 'xyz'] +
            ['pressure_pa', 'baro_temp_c', 'humidity_pct', 'tof_mm', 'tof_status', 'fresh', 'mode', 'flags'] +
-           ['cam%d_%s' % (c, k) for c in (0, 1) for k in ('seq', 'detected', 'cx', 'cy', 'area')] +
+           ['cam0_%s' % k for k in ('seq', 'detected', 'cx', 'cy', 'area')] +
+           ['flow_seq', 'flow_ok', 'flow_valid', 'flow_dx_px', 'flow_dy_px', 'flow_spread_px'] +
            ['setpoint_%s' % m for m in MOTORS] + ['throttle_%s' % m for m in MOTORS] +
            ['hold_fx_n', 'hold_fz_n', 'hold_tz_nm', 'hold_err_rad'] +
            ['bat_v', 'exec_us'] +
@@ -96,7 +103,7 @@ def decode_record(blob):
     cams = []
     for c in range(2):
         seq, flags, cx, cy, area = f[_IDX['cam'] + 5 * c:_IDX['cam'] + 5 * c + 5]
-        cams.append({'seq': seq, 'detected': flags & 1, 'cx': cx, 'cy': cy, 'area': area})
+        cams.append({'seq': seq, 'flags': flags, 'detected': flags & 1, 'cx': cx, 'cy': cy, 'area': area})
     return {'t_us': f[_IDX['t_us']],
             'acc': f[slice(*_IDX['acc'])], 'gyro': f[slice(*_IDX['gyro'])], 'mag': f[slice(*_IDX['mag'])],
             'baro_p_dpa': u24(f[_IDX['baro_p']]), 'baro_t_cc': s24(f[_IDX['baro_t']]),
@@ -113,7 +120,8 @@ def encode_record(r):
         return bytes((v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF))
     cams = []
     for c in r['cam']:
-        cams += [c['seq'] & 0xFF, 1 if c['detected'] else 0, c['cx'], c['cy'], c['area']]
+        cams += [c['seq'] & 0xFF, c.get('flags', 1 if c['detected'] else 0), c['cx'] & 0xFFFF,
+                 c['cy'] & 0xFFFF, c['area']]
     return RECORD.pack(r['t_us'] & 0xFFFFFFFF, *r['acc'], *r['gyro'], *r['mag'], p24(r['baro_p_dpa']),
                        p24(r['baro_t_cc']), r['baro_h_cpct'], r['tof_mm'], r['tof_status'], r['fresh'],
                        r['mode'], r['fs_flags'], *cams, *r['setpoint'], *r['throttle'], r['bat_mv'],
@@ -173,9 +181,17 @@ def to_units(h, records):
         row['fresh'] = r['fresh']
         row['mode'] = MODE.get(r['mode'], str(r['mode']))
         row['flags'] = r['fs_flags']
-        for c in (0, 1):
-            for k in ('seq', 'detected', 'cx', 'cy', 'area'):
-                row['cam%d_%s' % (c, k)] = r['cam'][c][k]
+        for k in ('seq', 'detected', 'cx', 'cy', 'area'):
+            row['cam0_%s' % k] = r['cam'][0][k]
+        # The flow: flags bit 0 ok, bits 1-7 the blocks that matched; the
+        # shift and the spread in 0.001 px, the shift as int16.
+        fl = r['cam'][1]
+        row['flow_seq'] = fl['seq']
+        row['flow_ok'] = fl['flags'] & 1
+        row['flow_valid'] = fl['flags'] >> 1
+        row['flow_dx_px'] = (fl['cx'] - 65536 if fl['cx'] & 0x8000 else fl['cx']) / 1000.0
+        row['flow_dy_px'] = (fl['cy'] - 65536 if fl['cy'] & 0x8000 else fl['cy']) / 1000.0
+        row['flow_spread_px'] = fl['area'] / 1000.0
         # The setpoint slots are the four link commands in MANUAL; in the bench
         # hold (and KILLED) they are the wrench given to the motors and the
         # heading error (ctl_types.h, log_record_t, 2026-10-30).
@@ -261,6 +277,14 @@ def summary(h, records):
     for key in ('acc_x_g', 'acc_y_g', 'acc_z_g', 'gyro_x_dps', 'gyro_y_dps', 'gyro_z_dps',
                 'mag_x_gauss', 'mag_y_gauss', 'mag_z_gauss', 'pressure_pa', 'baro_temp_c', 'tof_mm'):
         out[key] = _stats([r[key] for r in rows])
+    # One row per optical-flow frame: the records whose 'flow' bit is set.
+    frames = [row for row, rec in zip(rows, records) if rec['fresh'] & (1 << FRESH.index('flow'))]
+    if frames:
+        valid = sorted(f['flow_valid'] for f in frames)
+        out['flow'] = {'frames': len(frames), 'ok_pct': 100.0 * sum(f['flow_ok'] for f in frames) / len(frames),
+                       'valid_median': valid[len(valid) // 2],
+                       'sum_dx_px': sum(f['flow_dx_px'] for f in frames),
+                       'sum_dy_px': sum(f['flow_dy_px'] for f in frames)}
     return out
 
 
@@ -282,6 +306,11 @@ def format_summary(s):
     lines.append('fresh per second: ' + '  '.join('%s %.1f' % (k, v) for k, v in s['fresh_hz'].items() if v))
     if s['flags_seen']:
         lines.append('flags seen: ' + ', '.join(s['flags_seen']))
+    fl = s.get('flow')
+    if fl:
+        lines.append('optical flow: %d frames, measured in %.0f %%, blocks matched median %d, '
+                     'summed shift x %+.1f px, y %+.1f px' % (fl['frames'], fl['ok_pct'], fl['valid_median'],
+                                                             fl['sum_dx_px'], fl['sum_dy_px']))
     lines.append('modes: ' + ', '.join(s['modes_seen']))
     for key, unit, d in (('acc_x_g', 'g', 3), ('acc_y_g', 'g', 3), ('acc_z_g', 'g', 3),
                          ('gyro_x_dps', 'deg/s', 2), ('gyro_y_dps', 'deg/s', 2), ('gyro_z_dps', 'deg/s', 2),

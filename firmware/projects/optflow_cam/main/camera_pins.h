@@ -30,6 +30,13 @@
    GPIO4 also floats bright on some boards, so we drive it low explicitly. */
 #define CAM_PIN_FLASH_LED 4
 
+/* UART1 to the flight board (S3), the wiring target_cam uses
+   (firmware/projects/target_cam/main/camera_pins.h): the camera transmits on
+   IO14 and receives on IO13, the microSD slot's CLK and DAT3, so the slot
+   stays empty. The same module can run either firmware on the same wires. */
+#define S3_LINK_PIN_RX  13
+#define S3_LINK_PIN_TX  14
+
 #elif defined(CONFIG_OPTFLOW_BOARD_ESP_EYE)
 
 #define CAM_PIN_PWDN    -1

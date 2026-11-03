@@ -80,6 +80,12 @@ typedef enum {
  * the loop peeks it every tick and marks it fresh when frame_seq moved.
  * Peeking every tick rather than every fourth keeps the latency at one tick,
  * not up to 60 ms.
+ *
+ * Since 2026-11-02 the forward camera's module can run optflow_cam instead,
+ * pointed down, on the same wires (the surface tests before a second camera
+ * is bought): cam_link.c tells its rows from target_cam's and keeps the
+ * latest as a cam_flow_t, which the loop peeks the same way and the log
+ * stage records in the downward camera's slot. Nothing in core/ reads it.
  */
 #define CTL_CAM_COUNT 2
 enum { CTL_CAM_FORWARD = 0, CTL_CAM_DOWN = 1 };
@@ -98,6 +104,19 @@ typedef struct {
        applies the mounting sign. */
     float    az_deg, el_deg;
 } cam_result_t;
+
+/* One optical-flow measurement, optflow_cam's row (flow_row.h) as the loop
+   sees it: the image's shift between two frames 80 ms apart, in pixels,
+   image x to the right and y down. ok = 0 is no information, never zero
+   motion. */
+typedef struct {
+    uint32_t frame_seq;     /* flow rows parsed since boot; fresh when it changes */
+    uint32_t t_us;          /* S3 clock at receipt                                */
+    float    dx_px, dy_px;  /* 0 when !ok                                         */
+    float    spread_px;     /* the blocks' disagreement (median absolute deviation) */
+    uint8_t  ok;
+    uint8_t  valid, total;  /* blocks that matched, of those tried                */
+} cam_flow_t;
 
 /* ---------------------------------------------------------- raw sensors */
 
@@ -144,6 +163,8 @@ typedef struct {
     /* the camera mailboxes as last peeked */
     cam_result_t cam[CTL_CAM_COUNT];
     bool         cam_fresh[CTL_CAM_COUNT];
+    cam_flow_t   flow;          /* the optical flow, whichever camera sends it */
+    bool         flow_fresh;
 
     /* battery divider on CONFIG_BATTERY_ADC_GPIO (GPIO1, ADC1_CH0, by
        default; cmd_battery.c): raw count, calibrated millivolts at the pin
@@ -260,6 +281,14 @@ typedef struct {
  * motors were given, fx and fz in 0.1 mN and tz in 10 uN m, and the heading
  * error the yaw loop ran on in mrad. mode says which. (The plan's whole-mN
  * units were too coarse for the bench: the rope rig turns on 1 mN m.)
+ *
+ * The downward camera's slot, cam[CTL_CAM_DOWN], carries the optical flow
+ * (2026-11-02; it was never written before): seq the flow row's frame_seq,
+ * flags bit 0 ok and bits 1-7 the blocks that matched, cx and cy the shift dx
+ * and dy in 0.001 px as int16 (to +/-32 px; the matcher's radius is at most
+ * 10), area the spread in 0.001 px. Thousandths, because a drift at 1 m moves
+ * the image a few tenths of a pixel a frame and the matcher resolves about
+ * 0.02. Its fresh bit is CTL_FRESH_CAM1.
  */
 typedef struct __attribute__((packed)) {
     uint32_t t_us;
