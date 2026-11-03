@@ -436,6 +436,50 @@ menu "Forward camera (target_cam over UART)"
 
 endmenu
 
+menu "Downward camera (optflow_cam over UART2)"
+
+    # cam_link.c reads the downward ESP32-CAM's optical flow: the CSV rows that
+    # optflow_cam copies to the CAM's IO14 (CONFIG_OPTFLOW_S3_UART, since
+    # 2026-11-02), about 12.5 a second. The S3 pins are the link plan's
+    # CAM-DOWN (docs/inter-board-link-plan.md): UART2, TX on GPIO17, RX on
+    # GPIO18, the back pads of the S3-Zero. UART2 has no IO-MUX pins, so
+    # cam_link.c always routes it with uart_set_pin(). Either port takes either
+    # camera's rows (the column count picks the mailbox), so swapped cables
+    # still work; 'cam' says which port each kind arrived on.
+
+    config CAM_DOWN_UART_RX_GPIO
+        int "S3 RX GPIO (from the downward CAM's IO14)"
+        range 0 48
+        default 18
+        help
+            The flow rows arrive here, through 470 ohm in series, with the
+            pull-up cam_link.c enables (the plan also allows an external
+            10 k to 3.3 V). Not a strapping pin: IO14 toggles while the camera
+            boots, and the S3 counts those bytes as rejected.
+
+    config CAM_DOWN_UART_TX_GPIO
+        int "S3 TX GPIO (to the downward CAM's IO13), or -1 for none"
+        range -1 48
+        default 17
+        help
+            optflow_cam does not read its IO13, so this wire is optional;
+            only 'cam --tx-down', a line a person typed, writes to it. Leave
+            it unwired until the camera reads it: the S3 configures the UART
+            at boot, and an idle-high TX feeds an unpowered camera through
+            its pin (docs/inter-board-link-plan.md, "S3 rule for every
+            phase"). -1 leaves the pin alone.
+
+    config CAM_DOWN_UART_BAUD
+        int "Baud rate"
+        range 9600 2000000
+        default 115200
+        help
+            CONFIG_OPTFLOW_S3_UART_BAUD on the camera: 115200 by default. A
+            16-column row is about 70 characters, so 12.5 rows a second use
+            under a tenth of the line.
+
+endmenu
+
 menu "Capture (the control loop's records, kept in PSRAM)"
 
     # capture.c stores one 72-byte log record per 20 ms tick of the control

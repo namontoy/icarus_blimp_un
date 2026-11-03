@@ -152,6 +152,8 @@ motors stay off while the pins float during reset.
 | 4, 5 | I2C SDA, SCL |
 | 2 | UART1 TX to the forward camera's IO13 (`CAM_FWD_UART_TX_GPIO`; since 2026-10-30, only `cam --tx` writes, and target_cam does not read IO13 yet) |
 | 6 | UART1 RX from the forward camera's IO14 (`CAM_FWD_UART_RX_GPIO`; since 2026-10-30) |
+| 17 | UART2 TX to the downward camera's IO13 (`CAM_DOWN_UART_TX_GPIO`; since 2026-11-02, only `cam --tx-down` writes, and optflow_cam does not read IO13; optional wire) |
+| 18 | UART2 RX from the downward camera's IO14 (`CAM_DOWN_UART_RX_GPIO`; since 2026-11-02) |
 | 7–14 | Motor driver inputs (all eight LEDC channels) |
 | 21 | WS2812 status LED (RMT) |
 | 38 | Planned for the parked PING))) sensor (not built in; its default was 6 until the camera took it) |
@@ -583,7 +585,7 @@ reports the camera's row rate, how often the balloon was in view and the
 yaw error while it was; check the bearing's sign first with
 `software/cam_watch.py`, motors off.
 
-### `cam`: the forward camera's link
+### `cam`: the cameras' links
 
 The forward ESP32-CAM runs namontoy's `target_cam`
 (`firmware/projects/target_cam/`) and prints one CSV row per frame, 12.5 a
@@ -615,11 +617,36 @@ assumed. U0T/U0R are also the camera's programming port: with the 470 Ω in
 the S3's TX line a programmer on U0R still wins, or unplug that wire to
 reflash.
 
+**The downward camera** (since 2026-11-02; measured that day on the bench:
+optflow_cam's rows on GPIO18 at 13 a second, all parsed, with the forward
+camera not connected, so both at once is not yet run) runs `optflow_cam` with `CONFIG_OPTFLOW_S3_UART`, which copies every
+16-column flow row to its IO14 at 115200; the S3 reads it on UART2, the link
+plan's CAM-DOWN:
+
+| ESP32-CAM (down) | | ESP32-S3-Zero |
+|---|---|---|
+| IO14 | → 470 Ω → | GPIO18 (UART2 RX) |
+| IO13 (optional: optflow_cam does not read it) | ← 470 Ω ← | GPIO17 (UART2 TX) |
+| GND | — | GND |
+
+UART2 has no IO-MUX pins, so `cam_link.c` always routes it with
+`uart_set_pin()`. Each port has its own reader task, and both offer every
+line to both parsers: the column count, not the port, picks the balloon or
+the flow mailbox. A swapped pair of cables therefore still works, `cam` says
+which port each kind arrived on, and a flow row never reads as a balloon.
+The flow was first run on 2026-11-02 with the forward module flashed with
+optflow_cam on UART1's wires (`docs/history/flow-s3-2026-11-02.md`). A
+second camera on the 5 V step-up adds 100–180 mA (300–500 mA peaks while
+it streams): check the rail before the blimp carries both.
+
 ```
-cam                  rows/s, counts, the latest detection and the bearing core/ gets
-cam --raw            the last 8 lines exactly as they arrived (wiring, baud, format)
-cam --tx ?           send a line to the camera and print its '#' replies (? lists its settings)
+cam                  the forward rate first (scripts read it), then each port's counts,
+                     the optical flow, the latest detection and the bearing core/ gets
+cam --raw            each port's last 8 lines exactly as they arrived (wiring, baud, format)
+cam --tx ?           send a line to the forward camera and print its '#' replies (? lists its settings)
+cam --tx-down <text> the same to the downward camera
 cam --sign -1|1      core/'s bearing = sign x the camera's az, until the next boot
+cam --zero           restart the optical flow's 'moved since' sum
 ```
 
 target_cam's az is + to the right of the image centre; `core/`'s bearing is
@@ -955,7 +982,7 @@ i2c_tools/
     ├── cmd_battery.c/.h          battery divider on ADC1, sampled by the control task, + `battery`
     ├── param_table.c/.h          every field of core/'s blimp_params_t by name, with its range
     ├── cmd_param.c/.h            the live parameters, their hand-over to the control task, + `param`
-    ├── cam_link.c/.h             the forward camera's rows on UART1 (RX 6, TX 2) + `cam`; `cam_link_latest_row()` feeds the relay
+    ├── cam_link.c/.h             the cameras' rows: forward on UART1 (RX 6, TX 2), downward on UART2 (RX 18, TX 17) + `cam`; `cam_link_latest_row()` feeds the relay
     ├── cam_row.c/.h              target_cam's CSV row, parsed (portable, host-tested)
     ├── cmd_motor.c/.h            DRV8833 ×2, failsafe
     ├── cmd_ping.c/.h             PING))) ultrasonic, PARKED (not in SRCS)

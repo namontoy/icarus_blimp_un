@@ -228,12 +228,13 @@ void app_main(void)
     }
 
     /*
-     * The forward camera's rows (cam_link.c: target_cam on UART1, RX GPIO6,
-     * TX GPIO2), peeked by the control task's read stage like the stream.
-     * Not fatal: without it the loop sees no target and 'cam' says why.
+     * The cameras' rows (cam_link.c: target_cam on UART1, RX GPIO6, TX GPIO2;
+     * optflow_cam on UART2, RX GPIO18, TX GPIO17, since 2026-11-02), peeked by
+     * the control task's read stage like the stream. Not fatal: a port that
+     * fails stays down alone, and 'cam' says which.
      */
     if (cam_link_start() != ESP_OK) {
-        ESP_LOGE(TAG, "forward camera link unavailable - no target for 'hold follow'");
+        ESP_LOGE(TAG, "a camera link is unavailable - 'cam' shows which");
     }
 
     /*
@@ -276,7 +277,7 @@ void app_main(void)
     printf(" | 17. Try 'param' for the controller's gains, changed live   |\n");
     printf(" | 18. Try 'hold' to run the controller on a set heading      |\n");
     printf(" | 19. Try 'motormap' for each motor's name, place and sign   |\n");
-    printf(" | 20. Try 'cam' for the forward camera's link and target     |\n");
+    printf(" | 20. Try 'cam' for the cameras: the balloon and the flow    |\n");
     printf(" | 21. Type 'exit' or 'quit' to see how to leave the monitor  |\n");
     printf(" |                                                            |\n");
     printf(" ==============================================================\n\n");

@@ -3,7 +3,7 @@
  * firmware/projects/optflow_cam/), parsed. Portable C with no ESP-IDF, so
  * tools/fw_host_test.py checks it on the host
  * (firmware/projects/i2c_tools/host/test_flow_row.c); cam_link.c offers it the
- * lines on UART1 that are not target_cam's rows.
+ * lines on either camera port (UART1, UART2) that are not target_cam's rows.
  *
  * The row, as optflow_cam prints it per frame pair:
  *
@@ -17,8 +17,9 @@
  * camera's own height setting and are not kept: on the S3 the ToF gives the
  * height, and the ground tools scale the pixels with it.
  *
- * Since 2026-11-02 the forward camera's module can run optflow_cam on
- * target_cam's wires, so one UART carries either firmware's rows; 16 columns
+ * The downward camera has its own UART (UART2, RX GPIO18), but the flow was
+ * first run with the forward module flashed with optflow_cam on target_cam's
+ * wires, and either port still takes either firmware's rows; 16 columns
  * against target_cam's 25 or 35 tell them apart, and each parser rejects the
  * other's row.
  */

@@ -15,6 +15,15 @@
 > No binary protocol yet: the S3 parses those rows (`cam_row.c`). The firmware README's `cam`
 > section has the wiring.
 >
+> **Built for the downward camera, 2026-11-02; measured that day:** optflow_cam's rows on GPIO18
+> at 13 a second, all parsed (the forward camera not connected; both at once not yet run). UART2 with RX on
+> GPIO18 and TX on GPIO17, as proposed below (`CONFIG_CAM_DOWN_UART_*`, `cam_link.c`). optflow_cam
+> copies its 16-column CSV rows to its IO14 at 115200 (`CONFIG_OPTFLOW_S3_UART`), so the wire is
+> CAM IO14 → 470 Ω → S3 GPIO18; it does not read IO13, so GPIO17 → CAM IO13 can stay unwired
+> (and should, while the S3 starts its UARTs at boot: see the S3 rule under the phases). The S3
+> parses the ASCII rows (`flow_row.c`), so this is Phase 0's ASCII link on IO14 rather than on
+> the camera's UART0. Either port takes either camera's rows: the column count picks the mailbox.
+>
 > **Not the same link as the UDP packets, 2026-11-01:** the codes `0x01`..`0x87` below are this UART
 > protocol, CAM to S3. The ground station's UDP link (`link_protocol.h`, `docs/wireless-link.md`)
 > reuses numbers like `0x81`..`0x84` for other packets. The S3 relays the forward camera's parsed rows
@@ -181,8 +190,8 @@ wiki): edge pads, small top-side pads 14/15/16, and one column of 8 back pads
 | 9, 8 / 7, 14 | DRV8833 #2 IN1, IN2 (FR) / IN3, IN4 (RR). 14 is a small top pad | Cableado |
 | 15 | VL53L1X INT (the sensor's GPIO1 pad), optional. Small top pad | Cableado |
 | 16 | VL53L1X XSHUT, open-drain. Small top pad | Cableado |
-| **17** | **UART2 TX → 470 Ω → CAM-DOWN IO13** | **proposed** (back pad) |
-| **18** | **UART2 RX ← 470 Ω ← CAM-DOWN IO14** | **proposed** (back pad) |
+| **17** | **UART2 TX → 470 Ω → CAM-DOWN IO13** | **proposed** (back pad); configured since 2026-11-02, wire optional |
+| **18** | **UART2 RX ← 470 Ω ← CAM-DOWN IO14** | **proposed** (back pad); read since 2026-11-02 (`cam_link.c`) |
 | **38** | **PING))) 28015 SIG** (backup altimeter), through the 1.0k / 1.8k divider in `cmd_ping.c` | **proposed** (back pad) |
 | **39** | **MPU-6050 INT** (GY-88 `G_INT`), optional; `sensor-fusion-plan.md` §5.1 asks for it | **proposed** (back pad) |
 | 40, 41, 42 | spare | back pads |

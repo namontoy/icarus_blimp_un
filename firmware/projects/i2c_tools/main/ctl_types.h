@@ -75,17 +75,18 @@ typedef enum {
  * Two ESP32-CAMs are planned over UART (docs/inter-board-link-plan.md): a
  * forward camera that detects the balloon and a downward one for optical
  * flow. The forward one is read since 2026-10-30 (cam_link.c: target_cam's
- * CSV rows on UART1, RX GPIO6); the downward one is not wired. cam_link.c
+ * CSV rows on UART1, RX GPIO6), the downward one since 2026-11-02
+ * (optflow_cam's rows on UART2, RX GPIO18). cam_link.c
  * keeps the latest cam_result_t per frame (12.5 fps, 80 ms) under a lock,
  * the loop peeks it every tick and marks it fresh when frame_seq moved.
  * Peeking every tick rather than every fourth keeps the latency at one tick,
  * not up to 60 ms.
  *
- * Since 2026-11-02 the forward camera's module can run optflow_cam instead,
- * pointed down, on the same wires (the surface tests before a second camera
- * is bought): cam_link.c tells its rows from target_cam's and keeps the
- * latest as a cam_flow_t, which the loop peeks the same way and the log
- * stage records in the downward camera's slot. Nothing in core/ reads it.
+ * optflow_cam's rows (first run on 2026-11-02 with the forward module
+ * flashed with it, on UART1's wires): cam_link.c tells them from
+ * target_cam's by their columns, on either port, and keeps the latest as a
+ * cam_flow_t, which the loop peeks the same way and the log stage records in
+ * the downward camera's slot. Nothing in core/ reads it.
  */
 #define CTL_CAM_COUNT 2
 enum { CTL_CAM_FORWARD = 0, CTL_CAM_DOWN = 1 };

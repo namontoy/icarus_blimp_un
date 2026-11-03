@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """The optical-flow surface tests through the S3: no motors, no envelope.
 
-The forward camera's module runs optflow_cam pointed down (or at a wall), on
-the same UART1 wires target_cam uses; the S3 logs each flow frame in its
+The downward camera runs optflow_cam (or the forward module flashed with it,
+pointed down or at a wall), wired to the S3's UART2 (CAM IO14 -> GPIO18; the
+S3 takes flow rows on UART1's wires too); the S3 logs each flow frame in its
 capture beside the gyro, the ToF and the battery (ctl_types.h, log_record_t;
 since 2026-11-02). One run is one capture of one surface and one action:
 
@@ -516,7 +517,7 @@ def run(args):
         line = next((ln for ln in status.splitlines() if ln.startswith('optical flow')), None)
         if line is None or ' 0 rows/s' in line:
             sys.exit("no optical-flow rows on the S3 ('cam' below): is the camera running optflow_cam, "
-                     "powered, and wired to GPIO6?\n" + status)
+                     "powered, and wired to GPIO18 (or GPIO6)?\n" + status)
         print(line)
         ht.console(con, 'cam --zero')
         cap = bl.CaptureClient(link)
