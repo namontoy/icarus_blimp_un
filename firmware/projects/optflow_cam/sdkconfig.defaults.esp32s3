@@ -1,0 +1,16 @@
+# ESP32-S3-WROOM CAM (Freenove pin map) with an OV3660: what differs from the
+# AI-Thinker defaults in sdkconfig.defaults, which still apply.
+
+# The module is an ESP32-S3-WROOM-1 N8R8 or N16R8: its PSRAM is OCTAL and
+# runs at 80 MHz. Frames above QQVGA live there (optflow_main.c,
+# camera_start). A module marked ...R2 has quad PSRAM instead: change
+# SPIRAM_MODE_OCT to SPIRAM_MODE_QUAD, or the PSRAM is not found and the
+# camera cannot allocate its buffers.
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+
+# The console stays on UART0, which on this board is wired to the CH343
+# USB-serial chip (GPIO43/44): the "COM" USB-C port, not the native "USB" one.
+# poll_commands() reads UART0 directly, so the console must not move to
+# USB-Serial-JTAG here.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y

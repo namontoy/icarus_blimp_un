@@ -37,6 +37,39 @@
 #define S3_LINK_PIN_RX  13
 #define S3_LINK_PIN_TX  14
 
+#elif defined(CONFIG_OPTFLOW_BOARD_S3_WROOM_CAM)
+
+/* ESP32-S3-WROOM CAM, Freenove pin map (the same as Espressif's ESP32-S3-EYE
+   and Arduino's CAMERA_MODEL_ESP32S3_EYE), from
+   docs/s3-wroom-cam-wiring-plan.md. PWDN and RESET are not wired to the S3. */
+#define CAM_PIN_PWDN    -1
+#define CAM_PIN_RESET   -1
+#define CAM_PIN_XCLK    15
+#define CAM_PIN_SIOD     4
+#define CAM_PIN_SIOC     5
+#define CAM_PIN_D7      16
+#define CAM_PIN_D6      17
+#define CAM_PIN_D5      18
+#define CAM_PIN_D4      12
+#define CAM_PIN_D3      10
+#define CAM_PIN_D2       8
+#define CAM_PIN_D1       9
+#define CAM_PIN_D0      11
+#define CAM_PIN_VSYNC    6
+#define CAM_PIN_HREF     7
+#define CAM_PIN_PCLK    13
+/* No flash LED: the board's light is a WS2812 on GPIO48, dark unless driven. */
+#define CAM_PIN_FLASH_LED -1
+
+/* UART1 to the flight board. TX stays on IO14, as on the AI-Thinker, so the
+   S3-Zero's UART2 (RX GPIO18) needs no change. RX cannot stay on IO13: on this
+   board IO13 is the camera's PCLK. IO21 is free (not camera, PSRAM, USB,
+   UART0, LED or microSD) and nothing is wired to it today; the S3-Zero never
+   transmits to this camera. Check both pins on the board's silk before wiring:
+   clones of this board differ in what they break out. */
+#define S3_LINK_PIN_RX  21
+#define S3_LINK_PIN_TX  14
+
 #elif defined(CONFIG_OPTFLOW_BOARD_ESP_EYE)
 
 #define CAM_PIN_PWDN    -1

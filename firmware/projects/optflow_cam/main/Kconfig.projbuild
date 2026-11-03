@@ -2,28 +2,62 @@ menu "Optical Flow Configuration"
 
     choice OPTFLOW_BOARD
         prompt "Camera board"
+        default OPTFLOW_BOARD_S3_WROOM_CAM if IDF_TARGET_ESP32S3
         default OPTFLOW_BOARD_AI_THINKER
         help
             Selects the pin map in camera_pins.h.
 
         config OPTFLOW_BOARD_AI_THINKER
             bool "AI-Thinker ESP32-CAM"
+            depends on IDF_TARGET_ESP32
+        config OPTFLOW_BOARD_S3_WROOM_CAM
+            bool "ESP32-S3-WROOM CAM (Freenove pin map, OV3660)"
+            depends on IDF_TARGET_ESP32S3
+            help
+                The ESP32-S3-WROOM CAM board with the Freenove / ESP32-S3-EYE
+                camera pin map (docs/s3-wroom-cam-wiring-plan.md), fitted with
+                an OV3660. The OV2640 also works on it; the OV3660 frame timing
+                below applies only when the sensor reports PID 0x3660.
         config OPTFLOW_BOARD_ESP_EYE
             bool "ESP-EYE"
         config OPTFLOW_BOARD_XIAO_S3
             bool "Seeed XIAO ESP32S3 Sense"
     endchoice
 
+    choice OPTFLOW_FRAME
+        prompt "Frame size (grayscale)"
+        default OPTFLOW_FRAME_QVGA if OPTFLOW_BOARD_S3_WROOM_CAM
+        default OPTFLOW_FRAME_QQVGA
+        help
+            The matcher's cost follows grid^2 x (2*search+1)^2 x block^2, and
+            the search radius must grow with the frame width to keep the same
+            velocity range, so the frame size is decided by the match time,
+            not by the camera or the memory. host/size_bench (make bench) and
+            OPTFLOW_BENCH measure it; docs/esp32-cam-optical-flow-report.md
+            section 13 has the table. QVGA with a 4x4 grid is the largest that
+            keeps 80 ms with margin by that table; CIF fits only on paper.
+
+        config OPTFLOW_FRAME_QQVGA
+            bool "QQVGA 160x120"
+        config OPTFLOW_FRAME_HQVGA
+            bool "HQVGA 240x176"
+        config OPTFLOW_FRAME_QVGA
+            bool "QVGA 320x240"
+        config OPTFLOW_FRAME_CIF
+            bool "CIF 400x296"
+    endchoice
+
     config OPTFLOW_S3_UART
-        bool "Copy the CSV rows to the flight board on UART1 (TX IO14, RX IO13)"
-        depends on OPTFLOW_BOARD_AI_THINKER
+        bool "Copy the CSV rows to the flight board on UART1"
+        depends on OPTFLOW_BOARD_AI_THINKER || OPTFLOW_BOARD_S3_WROOM_CAM
         default y
         help
-            Every CSV row also goes out on UART1, TX IO14, for the S3 to read
-            and log (its cam_link.c tells these rows from target_cam's by their
-            16 columns). The wiring target_cam uses, so the forward camera's
-            module runs this firmware on the same wires. Only data rows; the
-            's' command stops the PC copy only. Nothing reads RX IO13.
+            Every CSV row also goes out on UART1 for the S3-Zero to read and
+            log (its cam_link.c tells these rows from target_cam's by their 16
+            columns). Only data rows; the 's' command stops the PC copy only.
+            Nothing reads RX. Pins are in camera_pins.h: TX IO14 and RX IO13 on
+            the AI-Thinker (target_cam's wiring); TX IO14 and RX IO21 on the
+            S3-WROOM CAM, whose IO13 is the camera's PCLK.
 
     config OPTFLOW_S3_UART_BAUD
         int "Flight-board UART baud rate"
@@ -33,6 +67,22 @@ menu "Optical Flow Configuration"
         help
             The S3 reads its camera UART at 115200. A ~90-byte row takes about
             8 ms on the wire, well within the 80 ms frame period.
+
+    config OPTFLOW_FRAME_PERIOD_MS
+        int "OV3660 frame period (ms, 0 = the driver's own timing)"
+        range 0 200
+        default 80
+        help
+            With an OV3660, set the sensor's own frame length so that it
+            delivers one frame every this many milliseconds; the loop then
+            takes every frame, as it does on the AI-Thinker, where the OV2640
+            at XCLK 20 MHz happens to run at 79.95 ms. The esp32-camera driver
+            clocks the OV3660 at SYSCLK = XCLK for QVGA to HVGA in grayscale,
+            which by its own timing gives about 90 ms at XCLK 20 MHz; this
+            raises SYSCLK to 40 MHz (it needs an XCLK that divides 160 MHz)
+            and stretches the vertical blanking to the period. Reasoned from
+            the driver's PLL formula, not measured: the boot banner prints the
+            period actually measured. Ignored for other sensors.
 
     config OPTFLOW_TARGET_FPS
         int "Target frame rate (frames per second)"
@@ -81,14 +131,19 @@ menu "Optical Flow Configuration"
     config OPTFLOW_SEARCH
         int "Search radius (pixels)"
         range 1 10
+        default 10 if OPTFLOW_FRAME_CIF
+        default 8 if OPTFLOW_FRAME_QVGA
         default 7
         help
-            Bounds the largest measurable motion: at QQVGA, 2 m height and
-            15 FPS, 7 px is about +/-1.3 m/s. Larger costs cycles quadratically.
+            Bounds the largest measurable motion to search - 1 px per frame:
+            at 2 m, 12.5 FPS and a 58 degree lens, 7 at QQVGA is about
+            +/-1.0 m/s, 8 at QVGA about +/-0.6 m/s. Larger costs cycles
+            quadratically.
 
     config OPTFLOW_GRID
         int "Grid of match blocks (N x N)"
         range 1 8
+        default 4 if OPTFLOW_FRAME_QVGA || OPTFLOW_FRAME_CIF
         default 5
         help
             N*N blocks are matched per frame and the median is reported, so a
@@ -101,5 +156,15 @@ menu "Optical Flow Configuration"
         help
             A featureless floor patch has no recoverable motion. Blocks below
             this are reported as rejected rather than matched to noise.
+
+    config OPTFLOW_BENCH
+        bool "Run the frame-size benchmark at boot"
+        default n
+        help
+            Before the camera starts, time flow_match on synthetic frames at
+            every candidate frame size (main/flow_bench.c, the table host/
+            size_bench prints) with the frames in internal RAM and in PSRAM,
+            print the table, then carry on as usual. It needs no camera, so
+            it runs on any board of the target. About 30 s at boot.
 
 endmenu

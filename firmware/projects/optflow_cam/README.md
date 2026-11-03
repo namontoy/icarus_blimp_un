@@ -139,6 +139,21 @@ Last clean build: **310 KB**, 70% of the app partition free, zero warnings.
 > GND** before power-up to enter the bootloader; remove the jumper and reset to
 > run. Power the board from 5 V, not the adapter's 3.3 V.
 
+### ESP32-S3-WROOM CAM with an OV3660 (branch `optflow-s3-ov3660`, 2026-11-03, not yet run on a board)
+
+`set-target esp32s3` selects the S3-WROOM CAM pin map (Freenove / ESP32-S3-EYE)
+and `sdkconfig.defaults.esp32s3` (octal PSRAM, console on the CH343 "COM"
+port). The frame is QVGA 320x240 with block 16, search 8, grid 4x4 by default
+(menuconfig, "Frame size"; CIF only after the board benchmark), and an OV3660
+is timed to one frame every 80 ms (`OPTFLOW_FRAME_PERIOD_MS`; the driver alone
+gives 90 ms). The UART to the S3-Zero transmits on **IO14**, as on the
+AI-Thinker (to the S3-Zero's GPIO18); it receives on **IO21**, because IO13 is
+PCLK on this board. `OPTFLOW_BENCH=y` times every candidate frame size at boot;
+`make -C host bench` runs the same table on the PC. Why QVGA, and the checks
+to run on the board: `docs/esp32-cam-optical-flow-report.md` §13.
+
+The AI-Thinker build (`set-target esp32`) is unchanged: QQVGA, 16/7/5x5.
+
 ## Running
 
 ```bash
