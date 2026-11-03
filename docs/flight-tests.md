@@ -1,9 +1,13 @@
 # Flight tests: where they stand and how to run the next one
 
-**Status, 2026-11-02 afternoon.** The blimp climbs, holds 1 m and its heading, brakes and lands
-on its own; it follows the red balloon with its nose when the forward camera sees the balloon.
-The open problem is the camera's detection: in the last check it did not see the 34 cm test
-balloon at 3 m at all. **Next: the walk-in camera check (motors off), then T3 again.**
+**Status, 2026-11-02 evening.** The blimp climbs, holds 1 m and its heading, goes 2 m along
+the line and stops there (test 5), and lands on its own; it follows the red balloon with its
+nose when the forward camera sees the balloon (T3 done for the controller). Two open problems:
+the camera's detection (the crumpled 34 cm foil test balloon is found reliably only within about
+2 m, and only when a good face looks at the camera), and the open-loop drift, which grows with
+the flight's length and changes with the battery (each battery type needs its own trim). **Next:
+test 7 (the square), on a freshly charged cell of the new type with `--trim -0.6`.** The
+detection goes to namontoy (a taut race-size balloon, the colours tuned in this room).
 
 This is a living page: after each run, update the status above and the run's line in the
 order below. What each run measured, with captures and numbers, goes in the session record:
@@ -39,8 +43,12 @@ day.
   battery swap restores `core/src/params.c`'s simulator placeholders, with which the blimp does
   not leave the floor. The values are the ones kept on 2026-10-31
   (`docs/history/envelope-2026-10-31.md`) plus `front_reverse_ratio` 0.74 (reverse on).
-- **Every flight passes `--trim -1`:** the rear motors lean forward, and without the trim the
-  blimp climbs at 45° and drifts metres forward.
+- **Every flight passes the battery's trim:** the rear motors lean forward, and without a trim
+  the blimp climbs at 45° and drifts metres forward. The trim depends on the battery type:
+  **−0.6 gf for the new type** used from test 5 on 2026-11-02 (the blimp 5.1 gf heavy with it),
+  −1 gf for the earlier cells. A new type, or a big change in the blimp's weight, needs a
+  trim check: climb, 20 s at 1 m, land (`--legs 0 --settle 20`); the drift halved for each
+  0.2 gf less trim. Use one battery type for all the tests and the race.
 - Limits: the firmware's 40 % duty ceiling and 10 % deadband (its defaults since 2026-11-01);
   the scripts kill on yaw over 62 °/s, roll or pitch over 120 °/s, ToF over 1.5 m.
 - Captures land in the gitignored `captures/` of the PC that ran them; give each run `--notes`.
@@ -58,13 +66,18 @@ BP=$(cat software/bench_params.txt)
 # camera check, motors off, with the beeps that pace the balloon holder (10 s lead)
 python software/bench_cues.py watch cam.log -- python -u software/cam_watch.py --seconds 62
 
-# T3, the follow hover: climb, 5 s settle, 80 s following the balloon, landing
-python software/bench_cues.py fly t3.log -- python -u software/square_test.py --legs 0 \
-    --settle 5 --hold 80 --follow --trim -1 --wait 180 --param $BP --notes "T3 ..." --go
+# --trim: -0.6 for the new battery type, -1 for the earlier cells (Rules)
 
-# test 4, one push and brake along the line: stops within about 1 m
-python -u software/square_test.py --legs 1 --push 3 3 --coast 0 --brake 3 4 --hold 10 \
-    --trim -1 --wait 180 --param $BP --notes "test 4 ..." --go
+# T3, the follow hover: climb, 5 s settle, 40 s following the balloon, landing
+python software/bench_cues.py fly t3.log -- python -u software/square_test.py --legs 0 \
+    --settle 5 --hold 40 --follow --trim -0.6 --wait 180 --param $BP --notes "T3 ..." --go
+
+# test 5, one leg along the line: stops at 2 m (B)
+python -u software/square_test.py --legs 1 --push 3 3 --coast 3.5 --brake 3 4 --hold 10 \
+    --trim -0.6 --wait 180 --param $BP --notes "test 5 ..." --go
+
+# a trim check: climb, 20 s at 1 m, land; tell where it landed against the start
+python -u software/square_test.py --legs 0 --settle 20 --trim -0.6 --wait 180 --param $BP --go
 
 # afterwards
 python software/blimp_log.py captures/<name>.bin                 # summary
@@ -87,11 +100,11 @@ team's report of where the blimp went (photos against the tape) is the only reco
 |---|---|---|
 | 1–3, H0–H3, 4 | reverse, turns, push and coast, hovers to find the trim, push and brake | done (session record) |
 | T0–T2 | the camera's link, its sign, its range | done |
-| T3 | follow the balloon while hovering | flown once: the follow worked, the camera lost the balloon |
-| **check** | **the walk-in camera check** | **next** |
-| T3 | again, at the distance the check finds | then |
-| T4 | approach and touch | then |
-| 5 | one leg, A to B | then |
+| T3 | follow the balloon while hovering | flown twice; done for the controller (turns to a seen balloon, holds when it is lost, finds it again); the left step was never detected |
+| check | the walk-in camera check | done: reliable from about 2.2 m in, patches of 26–70 px |
+| 5 | one leg, A to B | done: push 3 gf 3 s, coast 3.5 s, brake 3 gf 4 s stops it at 2 m (trim −0.6, new battery); it drifts afterwards |
+| **7** | **the square** | **next, on a fresh cell** |
+| T4 | approach and touch | after the detection is fixed (needs 4 m) |
 | T5 | hold a distance from the balloon | needs code and a flash |
 | 7 | the square | later |
 | T6 | a balloon course | needs the race mode |
@@ -151,3 +164,12 @@ hold).
 - **The camera reads about 3° right** of a balloon on the tape line.
 - **The trim lives in the script,** a constant −1 gf. It belongs in `core/`, scaled with the
   rear pair's thrust, before the race.
+- **The front pair's fixed commands weaken with the battery.** The rear pair is in the height
+  loop and compensates; the trim, the push and the brake do not. At 3.22 V hovering (3.40 V in
+  H3) the trim lost about 6 % and the follow hover drifted 4–5 m forward in 100 s. Fly charged
+  cells (3.7 V or more at rest, about 3.4 V hovering) and keep follow tests to about 40 s.
+  The fix: scale the thrust-to-command conversion with the battery voltage where the firmware
+  turns `core/`'s thrusts into motor commands (a flash).
+- **The test balloon is a poor stand-in:** crumpled 34 cm foil, mostly glare and folds; the
+  race uses taut 22-inch (50–60 cm) red mylar balloons (Rule 21). If a balloon's other face is
+  not red, keep the red face toward the blimp.

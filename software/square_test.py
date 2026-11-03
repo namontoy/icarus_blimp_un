@@ -48,6 +48,16 @@ boot's default since 2026-11-01; set anyway, since the thrust stand leaves
 it plain). Kills, from here: yaw over --max-rate, roll or pitch over
 --max-tilt-rate, the ToF over --max-alt; the end, Ctrl-C and any error send
 'hold off', and MOTOR_STOP three times if the console does not answer.
+
+--flight-bias-tau S (2026-11-02) slows core/'s gyro-bias learning to S s
+(param gyro_bias_tau_s) from the floor check to 'hold off', and puts back the
+ground value (20 s unless --param sets it) before the wait and after the run.
+core/'s estimator learns the bias whenever the gyro reads under 11.5 deg/s
+near 1 g, which a hovering blimp always does: in the square of 2026-11-02 it
+took part of each left turn as bias (+1.7 deg/s by the third), and the
+heading hold then turned the blimp 96 deg further left than it believed
+(docs/history/flights-2026-11-01.md). 600 s, the most 'param' accepts, makes
+that 30 times slower. A stopgap until core/ stops learning in flight.
 Standard library only.
 """
 import argparse
@@ -175,6 +185,12 @@ def run(args):
     link = bl.BlimpLink(args.host, args.port).start()
     con = bl.BlimpConsole(args.host, args.console_port)
     started = killed = cap_started = False
+    tau_flight_set = False
+    ground_tau = 20.0   # core/src/params.c's gyro_bias_tau_s, unless --param sets another
+    for p in args.param:
+        name, _, value = p.partition('=')
+        if name == 'gyro_bias_tau_s':
+            ground_tau = float(value)
     data = info = tel0 = None
     params = {}
     t_cap = t_hold = None
@@ -233,6 +249,10 @@ def run(args):
             log(reply.strip().splitlines()[0] if reply.strip() else '?')
             if not m or int(m.group(1)) == 0:
                 sys.exit("--follow needs the forward camera's rows, and 'cam' shows none:\n" + reply)
+        if args.flight_bias_tau:
+            # the floor's minute learns the bias at the ground rate, whatever
+            # a run cut short may have left behind
+            send('param gyro_bias_tau_s %g' % ground_tau)
         t_wait = time.monotonic()
         while True:
             try:
@@ -253,6 +273,9 @@ def run(args):
         if why:
             sys.exit(why + '\nnothing started')
         log('the ToF sees the floor')
+        if args.flight_bias_tau:
+            tau_flight_set = True
+            send('param gyro_bias_tau_s %g' % args.flight_bias_tau)
 
         cap = bl.CaptureClient(link)
         if cap.info()['state'] == 1:
@@ -325,6 +348,12 @@ def run(args):
             for _ in range(3):
                 link.stop_motors()
                 time.sleep(0.05)
+        if tau_flight_set:
+            try:
+                log('param gyro_bias_tau_s %g: %s' % (ground_tau, ht.console(
+                    con, 'param gyro_bias_tau_s %g' % ground_tau).strip().splitlines()[0]))
+            except (TimeoutError, ConnectionError, OSError, IndexError) as e:
+                log('gyro_bias_tau_s was not put back to %g s (%s): the next run sets it, or a reboot' % (ground_tau, e))
         if cap_started:
             try:
                 cap = bl.CaptureClient(link)
@@ -359,7 +388,7 @@ def run(args):
             'notes': args.notes, 'header': h, 'records': len(records), 'params': params,
             'test': {'legs': args.legs, 'turn_deg': args.turn, 'alt_m': args.alt, 'climb_rate_mps': args.climb_rate,
                      'settle_s': args.settle, 'push': args.push, 'coast_s': args.coast, 'brake': args.brake,
-                     'trim_gf': args.trim, 'follow': args.follow,
+                     'trim_gf': args.trim, 'follow': args.follow, 'flight_bias_tau_s': args.flight_bias_tau,
                      'hold_s': args.hold, 'turn_time_s': args.turn_time, 'land': args.land,
                      'land_rate_mps': args.land_rate, 'final_rate_mps': args.final_rate,
                      'phases': [list(p) for p in phases], 'hold_start_in_capture_s': offset,
@@ -402,6 +431,9 @@ def main(argv=None):
     ap.add_argument('--follow', action='store_true',
                     help="aim at the forward camera's balloon from the end of the settle ('hold follow'), "
                          'instead of holding heading 0; with --legs 0 for --hold s, with --legs 1 through the leg')
+    ap.add_argument('--flight-bias-tau', type=float, default=0.0, metavar='S',
+                    help="core/'s gyro-bias time constant in the air (param gyro_bias_tau_s), the ground value "
+                         'before and after (default 0: unchanged); 600 keeps the bias learned on the floor')
     ap.add_argument('--hold', type=float, default=5.0,
                     help='s still after each leg and after each turn (default %(default)s)')
     ap.add_argument('--turn-time', type=float, default=8.0,
@@ -459,6 +491,8 @@ def main(argv=None):
     for pair, sign in ((args.push, 1.0), (args.brake, -1.0)):
         if pair is not None and abs(sign * pair[0] + args.trim) > 30.0:
             sys.exit("the trim takes a phase's surge past the firmware's 'hold surge' range (-30 .. 30 gf)")
+    if args.flight_bias_tau and not (math.isfinite(args.flight_bias_tau) and 0.5 <= args.flight_bias_tau <= 600.0):
+        sys.exit("--flight-bias-tau is 0.5 .. 600 s (the S3's 'param' range for gyro_bias_tau_s), or 0")
     if not math.isfinite(args.land_rate) or not 0.02 <= args.land_rate <= 0.5:
         sys.exit('--land-rate is 0.02 .. 0.5 m/s')
     if not math.isfinite(args.final_rate) or not 0.01 <= args.final_rate <= 0.2:
