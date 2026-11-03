@@ -22,6 +22,16 @@ flies it from the ground, balloons in order: find, follow, approach, touch, move
 the next, land. Not flown yet; runs C0–C5, C0 (motors off) first, because the touch needs its
 numbers.
 
+**2026-11-03 afternoon: two cameras, and the optical flow in every run.** The forward
+AI-Thinker goes back to `target_cam` (UART1, GPIO6, as before); the downward camera is the
+ESP32-S3-WROOM CAM with an OV3660 running `optflow_cam` (namontoy's `optflow-s3-ov3660`, merged
+at `ac1ea94`): its IO14 → 470 Ω → the S3's GPIO18, the grounds joined, and **never GPIO17 to its
+IO13**, the camera's PCLK. The S3 reads it from `i2c_tools` at `3fe7911` on. Every capture then
+holds the flow beside the gyro and the ToF, and `software/flow_track.py` turns a run's into a
+track over the floor: the first measurement of where the blimp went, against the team's report.
+F0 (motors off, with C0) calibrates the camera in this room first. The two cameras have not yet
+run on the S3 together, and the new board's current on the 5 V rail is not measured.
+
 This is a living page: after each run, update the status above and the run's line in the
 order below. What each run measured, with captures and numbers, goes in the session record:
 `docs/history/flights-2026-11-01.md` covers 2026-11-01 and 02; start a new dated file for a new
@@ -35,7 +45,10 @@ day.
 - **The blimp:** on the floor (never on the black launch stand: the ToF then misreads and the
   run refuses to start), the nose along the run's direction, still for a minute before the
   first run after a power-up (the estimator needs 60 s of stillness; the scripts wait for it).
-  Firmware `i2c_tools` at `408d96e` or later from `pid-tuning`; the forward camera powered.
+  Firmware `i2c_tools` at `3fe7911` or later from `pid-tuning` (the downward camera's UART2);
+  both cameras powered, and `python software/blimp_link.py console cam` showing the forward
+  camera's rows and the optical flow's, about 12 a second each. `course_test.py` says the flow's
+  rate at its start and warns when there is none (the run still flies, without a track).
 - **The PC:** joined to the blimp's Wi-Fi (`ICARUS-<mac>`; the ground station's "Join blimp
   Wi-Fi" button does it) and close to the blimp: the link runs at −80 to −86 dBm under the
   metallized envelope. Then **close the ground station, or switch its motors off**: one source
@@ -115,6 +128,22 @@ python -u software/target_test.py --trim -0.6 --param $BP --notes "balloon fligh
 python -u software/course_test.py --course 2,0 --close-px <b1> --trim -0.6 --param $BP --notes "C3 ..." --go
 python -u software/course_test.py --close-px <b1> <b2> --trim -0.6 --param $BP --notes "C4 ..." --go
 
+# the downward camera here (F0, motors off; the blimp carried at about 1.3 m; 480 px: the S3-WROOM CAM)
+python software/flow_test.py room-floor still --seconds 30 --width 480 --window
+python software/flow_test.py room-fwd move --moved 0.5 --width 480 --window --marks Out,Back \
+    --say "Wait 5 s. Carry the blimp 50 cm from S toward balloon 1 in about 5 s, stop 3 s, back to S, keep still"
+python software/flow_test.py room-left move --moved 0.5 --width 480 --window --marks Out,Back \
+    --say "Wait 5 s. Step 50 cm to the blimp's LEFT, its nose still toward balloon 1, stop 3 s, back to S, keep still"
+python software/flow_test.py room-floor tilt --width 480 --window
+python software/flow_test.py --calibrate captures/flow-room-fwd-move-<date>.bin captures/flow-room-left-move-<date>.bin \
+    --moved 0.5 --width 480 --cal-out captures/flow-cal-room.json
+python software/flow_test.py --analyse captures/flow-room-fwd-move-<date>.bin --moved 0.5 --width 480 \
+    --cal captures/flow-cal-room.json      # motion 1's direction is <fwd>; the left run's gives <left>
+
+# after every flight (C1-C5): the optical flow's track over the course, and its plot
+python software/flow_track.py captures/<run>.bin --cal captures/flow-cal-room.json --image-dirs <fwd> <left> \
+    --tilt captures/flow-room-floor-tilt-<date>.json --svg captures/<run>-track.svg
+
 # afterwards
 python software/blimp_log.py captures/<name>.bin                 # summary
 python software/blimp_log.py captures/<name>.bin --csv out.csv   # every 20 ms record, in units
@@ -146,6 +175,7 @@ team's report of where the blimp went (photos against the tape) is the only reco
 | T4 | approach and touch | after the detection is fixed (needs 4 m); B5 did a short one; C3 is one at 2 m |
 | T5 | hold a distance from the balloon | needs code and a flash |
 | T6 | a balloon course | from the ground: C4 below; the race mode on the S3 still to come |
+| **F0** | **the course room, the downward camera**, motors off: the floor's texture, the scale, the forward and left directions, the tilt (`flow_test.py`) | **next** (2026-11-03), with C0 |
 | **C0** | **the course room**: the camera, motors off: each balloon's patch from 2 m to the touch, nothing else red | **next** (2026-11-03) |
 | C1 | the course room: a hover at 1.3 m, this room's air | after C0 |
 | C2 | the course room: the right turn on the spot (R) | after C1 |
@@ -246,6 +276,30 @@ as near as the ground can tell. Whether the envelope touched is the team's call.
 - The PC a few metres from the course, out of the camera's view.
 - The forward camera on `target_cam` again (it ran `optflow_cam` on the evening of
   2026-11-02): `course_test.py` refuses to start without its rows.
+- The downward camera on GPIO18 and the S3 at `3fe7911` or later (Before a session), its
+  view nothing but the floor. F0's still run says whether this floor has texture enough at
+  1.3 m; a plain one needs tape strips or a patterned mat along the two lines.
+
+**F0 (the downward camera here, motors off; with C0, the blimp carried the same way).** One
+person carries the blimp with the gondola at about 1.3 m and level (its ToF gives the height);
+`--window` shows when each run records. The commands are under Commands, all with `--width 480`:
+
+1. **still**, 30 s at S: the floor's texture (the blocks matched, of 16) and the drift at
+   rest. Under about 8 blocks, or many frames refused, the floor is too plain here: tape or a
+   mat first, or the tracks will have holes.
+2. **forward**: from S 0.5 m along the line to balloon 1 in about 5 s, 3 s still, back to S.
+   Its analysis's first motion gives `<fwd>`, the direction in which the image moves when the
+   gondola goes forward.
+3. **left**: the same 0.5 m to the blimp's left, a sideways step with the nose kept toward
+   balloon 1: `<left>`, about 90° from `<fwd>` one way or the other (the image is mirrored).
+4. **tilt**: at S, the blimp rocked by hand about 5° each way, about once a second: 10 s nose
+   up and down, 10 s side to side. The shift a swing makes against the gyro; its fit goes in the
+   run's `.json`, which `flow_track.py --tilt` reads.
+5. **`--calibrate`** the forward and left runs: f and the matcher's offset, from the ToF's
+   heights, into `captures/flow-cal-room.json`. f near 430 px means a 58° lens; the desk
+   calibration of 2026-11-02 (`flow-cal.json`) was the old camera's and does not apply.
+
+Tell: whatever the window or the reports said, and whether the blimp stayed level.
 
 **C0 (the camera here, motors off).** The blimp carried by hand, the gondola at about 1.3 m,
 the nose forward, `cam_watch.py` running under `bench_cues.py watch`:
@@ -289,6 +343,15 @@ whether it touched, and where it landed.
 **C5 (three loops).** The race allows three attempts per course and counts the fastest
 (docs/01-competition-brief.md): C4 three times in a row, the same settings, a fresh cell, the
 three logs' "close" times in the session record.
+
+**After every flight (C1–C5): the track.** `flow_track.py` on the run's capture (Commands):
+where the flow says the blimp went, phase by phase, how far from each balloon's floor point it
+was when it went in to touch, and an SVG of the track over S and the balloons. Set its end
+against where the team saw it land: C1's hover is the first check, and the runs after it say
+how far to trust it (reasoned: the heading drifts a few degrees a minute, a refused frame is a
+hole in the track, the scale is the calibration's). C1's track is the room's air measured; C2's
+shows whether a turn crept forward and how far. Nothing on board uses the flow yet: the track
+is the ground's, after the run.
 
 ## Known problems
 

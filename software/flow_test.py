@@ -34,6 +34,16 @@ is 144 px across 160 px, the forward module's measured 58 deg lens (AGENTS.md;
 the October board's 54 deg lens gave 157). A drift in px/s does not depend on
 the distance, so it is also given "as at 1 m", the flight height.
 
+The downward camera since 2026-11-03 is the ESP32-S3-WROOM CAM at HVGA, 480
+px across: give it --width 480, and the default focal length scales with the
+width (432 px, the same 58 deg; its OV3660 lens is not measured) until a
+calibration gives it. Its image is mirrored, so read the directions of its
+first runs before anything uses their signs. In the flight room the gondola
+is carried, not on a desk: --calibrate then takes each run's distance from
+the ToF when no --dist is given, and software/flow_track.py turns a flight's
+flow into a track with the calibration, the forward and left moves'
+directions and a tilt run's fit.
+
 The calibration (2026-11-02, docs/history/flow-s3-2026-11-02.md): desk runs
 that each go down and back up the same distance give the matcher's constant
 offset and the true scale,
@@ -239,37 +249,48 @@ def calibrate(paths, dist_m, moved_m, f_lens=F_PX):
     The runs go down and up the same distance, so their true moves sum to
     zero and what the moves sum to is the offset times their time; with the
     offset out, each move is the travel, and f = px x distance / travel is the
-    scale. The lens's own f (144 px for the 58 deg lens) is kept beside it."""
-    moves = []
+    scale. The lens's own f (144 px for the 58 deg lens) is kept beside it.
+    Without dist_m each run's distance is its ToF median: the gondola carried
+    over the floor at about the flight height (2026-11-03), not taped."""
+    moves, dists = [], []
     for p in paths:
         h, records = blimp_log.read_file(p)
-        _, frames = frames_of(h, records)
+        rows, frames = frames_of(h, records)
+        d = dist_m
+        if not d:
+            tof = [r['tof_mm'] for r in rows if r['tof_status'] == 0 and r['tof_mm'] > 0]
+            if not tof:
+                raise ValueError('%s has no ToF reading: give --dist' % os.path.basename(p))
+            d = statistics.median(tof) / 1000.0
+        dists.append(d)
         st, _, pos = stretches_of(frames)
         for s in st:
             if s['px'] < 5.0:
                 continue
             p0 = pos[max(0, s['a'] - 3)]
             v = (pos[s['b']][0] - p0[0], pos[s['b']][1] - p0[1])
-            moves.append({'file': os.path.basename(p), 'v': v, 's': frames[s['b']]['t'] - frames[max(0, s['a'] - 3)]['t']})
+            moves.append({'file': os.path.basename(p), 'v': v, 'dist': d,
+                          's': frames[s['b']]['t'] - frames[max(0, s['a'] - 3)]['t']})
     if len(moves) < 2 or len(moves) % 2:
         raise ValueError('%d moves found; a calibration needs each run to go down and back up once' % len(moves))
     t_all = sum(m['s'] for m in moves)
     bias = (sum(m['v'][0] for m in moves) / t_all, sum(m['v'][1] for m in moves) / t_all)
     true_px = [math.hypot(m['v'][0] - bias[0] * m['s'], m['v'][1] - bias[1] * m['s']) for m in moves]
-    f_cal = statistics.mean(true_px) * dist_m / moved_m
-    return {'f_px': f_cal, 'bias_px_s': list(bias), 'f_lens_px': f_lens, 'dist_m': dist_m, 'moved_m': moved_m,
+    f_cal = statistics.mean(px * m['dist'] for px, m in zip(true_px, moves)) / moved_m
+    return {'f_px': f_cal, 'bias_px_s': list(bias), 'f_lens_px': f_lens,
+            'dist_m': dist_m if dist_m else dists, 'dist_source': 'taped' if dist_m else 'ToF', 'moved_m': moved_m,
             'moves_px_raw': [math.hypot(*m['v']) for m in moves], 'moves_px_corrected': true_px,
             'from': [os.path.basename(p) for p in paths], 'made': time.strftime('%Y-%m-%d %H:%M:%S')}
 
 
-def analyse(h, records, dist_m=None, moved_m=None, f_px=F_PX, marks=(), cal=None):
+def analyse(h, records, dist_m=None, moved_m=None, f_px=F_PX, marks=(), cal=None, width_px=160):
     rows, frames = frames_of(h, records)
     if len(frames) < 10:
         return {'error': 'only %d flow frames in the capture: was the camera running optflow_cam?' % len(frames)}
     if cal:
         apply_cal(frames, cal)
         f_px = cal['f_px']
-    res = {'frames': len(frames), 'cal': cal}
+    res = {'frames': len(frames), 'cal': cal, 'width_px': width_px}
     dur = frames[-1]['t'] - frames[0]['t']
     res['frames_per_s'] = (len(frames) - 1) / dur if dur > 0 else float('nan')
     tof = [r['tof_mm'] for r in rows if r['tof_status'] == 0 and r['tof_mm'] > 0]
@@ -383,7 +404,9 @@ def report(res, moved_m=None):
         print(s)
         if 'f_px_fit' in d:
             print('          calibration: f = %.0f px (%.1f deg across) makes this move exactly %.0f mm; '
-                  'the lens assumed is %.0f px' % (d['f_px_fit'], math.degrees(2 * math.atan(80.0 / d['f_px_fit'])),
+                  'the lens assumed is %.0f px' % (d['f_px_fit'],
+                                                   math.degrees(2 * math.atan(res.get('width_px', 160) / 2.0
+                                                                              / d['f_px_fit'])),
                                                    moved_m * 1000.0, res['f_px']))
     if not res['stretches']:
         print('motion    none')
@@ -559,13 +582,14 @@ def run(args):
     blimp_log.write_file(path, info['raw'], data)
     h, records = blimp_log.decode(info['raw'], data)
     res = analyse(h, records, args.dist, args.moved if args.action in ('move', 'slow') else None, args.f_px, marks,
-                  args.cal_data)
+                  args.cal_data, args.width)
     print()
     report(res, args.moved)
     meta = {'file': os.path.basename(path), 'saved': time.strftime('%Y-%m-%d %H:%M:%S'), 'source': 'flow_test',
             'notes': args.notes, 'header': h, 'records': len(records),
             'test': {'surface': args.surface, 'action': args.action, 'seconds': seconds, 'dist_m': args.dist,
-                     'moved_m': args.moved, 'f_px': args.f_px, 'instruction': instruction, 'marks': marks,
+                     'moved_m': args.moved, 'f_px': args.f_px, 'width_px': args.width, 'instruction': instruction,
+                     'marks': marks,
                      'cal_file': args.cal,
                      'cam_before': status, 'cam_after': after},
             'metrics': res}
@@ -582,7 +606,11 @@ def main(argv=None):
     ap.add_argument('--dist', type=float, help='lens to surface, m, taped (default: the ToF median)')
     ap.add_argument('--moved', type=float, default=0.3, help='how far a move slides, m (default %(default)s)')
     ap.add_argument('--seconds', type=float, help='the capture length (default per action)')
-    ap.add_argument('--f-px', type=float, default=F_PX, help='focal length at 160 px wide (default %(default)s)')
+    ap.add_argument('--width', type=int, default=160,
+                    help="the camera's frame width, px: 160 for the AI-Thinker (QQVGA), 480 for the S3-WROOM CAM "
+                         "(HVGA) (default %(default)s)")
+    ap.add_argument('--f-px', type=float,
+                    help='focal length in px (default 144 x width / 160, the 58 deg lens)')
     ap.add_argument('--analyse', metavar='BIN', help='analyse a saved run instead of recording one')
     ap.add_argument('--host', default=bl.BLIMP_IP)
     ap.add_argument('--port', type=int, default=bl.LINK_PORT)
@@ -597,24 +625,29 @@ def main(argv=None):
                          "(default %(default)s)")
     ap.add_argument('--say', help="what the people do, instead of the action's text")
     ap.add_argument('--calibrate', nargs='+', metavar='BIN',
-                    help='make a calibration from desk runs (each down and back up --moved m at --dist m)')
+                    help='make a calibration from runs that each go and come back --moved m, at --dist m '
+                         "(taped) or else each run's ToF median")
     ap.add_argument('--cal-out', default=os.path.join('captures', 'flow-cal.json'),
                     help='where --calibrate writes (default %(default)s)')
     ap.add_argument('--cal', metavar='JSON', help='apply a calibration from --calibrate to the analysis')
     args = ap.parse_args(argv)
+    args.f_px = args.f_px or F_PX * args.width / 160.0
     args.cal_data = json.load(open(args.cal)) if args.cal else None
     if args.calibrate:
-        if not args.dist:
-            sys.exit('--calibrate needs --dist, the taped distance of those runs')
-        cal = calibrate(args.calibrate, args.dist, args.moved, args.f_px)
+        try:
+            cal = calibrate(args.calibrate, args.dist, args.moved, args.f_px)
+        except ValueError as e:
+            sys.exit(str(e))
         os.makedirs(os.path.dirname(args.cal_out) or '.', exist_ok=True)
         with open(args.cal_out, 'w') as f:
             json.dump(cal, f, indent=2)
+        at = ('%.2f m' % args.dist if args.dist else
+              '%s m from the ToF' % ', '.join('%.2f' % d for d in cal['dist_m']))
         print('moves, raw:       %s px' % ', '.join('%.1f' % v for v in cal['moves_px_raw']))
         print('offset            %+.3f, %+.3f px/s (image x, y)' % tuple(cal['bias_px_s']))
         print('moves, offset out: %s px' % ', '.join('%.1f' % v for v in cal['moves_px_corrected']))
-        print('scale             f = %.1f px for %.0f mm at %.2f m (the lens alone: %.0f px, so the camera reads '
-              '%.0f %% of the travel)' % (cal['f_px'], args.moved * 1000, args.dist, args.f_px,
+        print('scale             f = %.1f px for %.0f mm at %s (the lens alone: %.0f px, so the camera reads '
+              '%.0f %% of the travel)' % (cal['f_px'], args.moved * 1000, at, args.f_px,
                                           100.0 * cal['f_px'] / args.f_px))
         print('written to %s' % args.cal_out)
         return 0
@@ -630,7 +663,7 @@ def main(argv=None):
             if args.dist is None:
                 args.dist = t.get('dist_m')
                 moved = t.get('moved_m', moved) if t.get('action') in ('move', 'slow') else None
-        report(analyse(h, records, args.dist, moved, args.f_px, marks, args.cal_data), moved)
+        report(analyse(h, records, args.dist, moved, args.f_px, marks, args.cal_data, args.width), moved)
         return 0
     if not args.surface or not args.action:
         ap.error('give a surface and an action, or --analyse FILE.bin')

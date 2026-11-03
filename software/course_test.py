@@ -686,6 +686,15 @@ def run(args):
                      'add --param front_reverse_ratio=0.74' % ratio)
         reply = ht.console(con, 'cam')
         log(reply.strip().splitlines()[0] if reply.strip() else '?')
+        # The downward camera's optical flow goes into the capture for
+        # flow_track.py (2026-11-03); nothing in the flight uses it, so a
+        # missing camera is said, not refused.
+        m = re.search(r'optical flow \(optflow_cam\): (\d+) rows/s', reply)
+        if m and int(m.group(1)) > 0:
+            log('the downward camera: %s flow rows/s, in the capture' % m.group(1))
+        else:
+            log("WARNING: %s: this run's capture will have no track (the downward camera on GPIO18, "
+                "the S3 at 3fe7911 or later?)" % ('no optical-flow rows' if m else "no optical-flow line in 'cam'"))
         # A row, detected or not, is target_cam's: the S3 relays only those as
         # CAMERA rows. The forward module ran optflow_cam on the evening of
         # 2026-11-02, whose rows reach 'cam''s count but never this packet.
