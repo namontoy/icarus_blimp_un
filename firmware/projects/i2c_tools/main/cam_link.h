@@ -29,8 +29,10 @@
  * 'cam --zero' restarts the sum it prints. Its wiring (the link plan's
  * CAM-DOWN, on UART2, which has no IO-MUX pins and so is always routed
  * through the GPIO matrix): CAM IO14 -> 470 ohm -> S3 GPIO18, S3 GPIO17 ->
- * 470 ohm -> CAM IO13, the grounds joined. optflow_cam does not read IO13,
- * so GPIO17 is optional wiring; 'cam --tx-down' writes to it.
+ * 470 ohm -> the CAM's RX, the grounds joined. The RX is IO13 on an
+ * AI-Thinker and IO21 on the ESP32-S3-WROOM CAM that carries optflow_cam
+ * since 2026-11-03, whose IO13 is the camera's PCLK. optflow_cam reads
+ * neither, so GPIO17 is optional wiring; 'cam --tx-down' writes to it.
  *
  * On 2026-11-02 the flow was first run with the forward module flashed with
  * optflow_cam on UART1's wires. Both ports therefore offer every line to both

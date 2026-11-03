@@ -23,6 +23,9 @@
 > (and should, while the S3 starts its UARTs at boot: see the S3 rule under the phases). The S3
 > parses the ASCII rows (`flow_row.c`), so this is Phase 0's ASCII link on IO14 rather than on
 > the camera's UART0. Either port takes either camera's rows: the column count picks the mailbox.
+> Since 2026-11-03 the downward camera is an ESP32-S3-WROOM CAM with an OV3660 (optflow_cam for
+> esp32s3): TX still IO14, but its IO13 is the camera's PCLK and its RX is IO21, so GPIO17 must
+> never go to its IO13.
 >
 > **Not the same link as the UDP packets, 2026-11-01:** the codes `0x01`..`0x87` below are this UART
 > protocol, CAM to S3. The ground station's UDP link (`link_protocol.h`, `docs/wireless-link.md`)

@@ -152,7 +152,7 @@ motors stay off while the pins float during reset.
 | 4, 5 | I2C SDA, SCL |
 | 2 | UART1 TX to the forward camera's IO13 (`CAM_FWD_UART_TX_GPIO`; since 2026-10-30, only `cam --tx` writes, and target_cam does not read IO13 yet) |
 | 6 | UART1 RX from the forward camera's IO14 (`CAM_FWD_UART_RX_GPIO`; since 2026-10-30) |
-| 17 | UART2 TX to the downward camera's IO13 (`CAM_DOWN_UART_TX_GPIO`; since 2026-11-02, only `cam --tx-down` writes, and optflow_cam does not read IO13; optional wire) |
+| 17 | UART2 TX to the downward camera's RX: IO13 on an AI-Thinker, IO21 on the ESP32-S3-WROOM CAM, whose IO13 is its camera's PCLK (`CAM_DOWN_UART_TX_GPIO`; since 2026-11-02, only `cam --tx-down` writes, and optflow_cam reads neither; leave it unwired) |
 | 18 | UART2 RX from the downward camera's IO14 (`CAM_DOWN_UART_RX_GPIO`; since 2026-11-02) |
 | 7–14 | Motor driver inputs (all eight LEDC channels) |
 | 21 | WS2812 status LED (RMT) |
@@ -623,11 +623,19 @@ camera not connected, so both at once is not yet run) runs `optflow_cam` with `C
 16-column flow row to its IO14 at 115200; the S3 reads it on UART2, the link
 plan's CAM-DOWN:
 
-| ESP32-CAM (down) | | ESP32-S3-Zero |
+| Downward camera | | ESP32-S3-Zero |
 |---|---|---|
 | IO14 | → 470 Ω → | GPIO18 (UART2 RX) |
-| IO13 (optional: optflow_cam does not read it) | ← 470 Ω ← | GPIO17 (UART2 TX) |
+| RX: IO13 on an AI-Thinker, IO21 on the S3-WROOM CAM (optional: optflow_cam does not read it) | ← 470 Ω ← | GPIO17 (UART2 TX) |
 | GND | — | GND |
+
+Since 2026-11-03 the downward camera is an ESP32-S3-WROOM CAM with an OV3660
+(namontoy's `optflow-s3-ov3660`, merged into `pid-tuning` that day; optflow_cam
+built for esp32s3, `docs/esp32-cam-optical-flow-report.md` §13): the same
+16-column rows on the same IO14 at 115200, from HVGA frames at 80 ms, so
+nothing changes on this side. **Never wire GPIO17 to that board's IO13**: it
+is the camera's PCLK, and UART2's TX idles high from the S3's boot. Its RX is
+IO21, and nothing needs it. Not yet run on the S3-Zero.
 
 UART2 has no IO-MUX pins, so `cam_link.c` always routes it with
 `uart_set_pin()`. Each port has its own reader task, and both offer every
@@ -637,7 +645,8 @@ which port each kind arrived on, and a flow row never reads as a balloon.
 The flow was first run on 2026-11-02 with the forward module flashed with
 optflow_cam on UART1's wires (`docs/history/flow-s3-2026-11-02.md`). A
 second camera on the 5 V step-up adds 100–180 mA (300–500 mA peaks while
-it streams): check the rail before the blimp carries both.
+it streams; the AI-Thinker's figures, the S3-WROOM CAM's are not measured):
+check the rail before the blimp carries both.
 
 ```
 cam                  the forward rate first (scripts read it), then each port's counts,

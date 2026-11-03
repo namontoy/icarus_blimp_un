@@ -458,11 +458,14 @@ menu "Downward camera (optflow_cam over UART2)"
             boots, and the S3 counts those bytes as rejected.
 
     config CAM_DOWN_UART_TX_GPIO
-        int "S3 TX GPIO (to the downward CAM's IO13), or -1 for none"
+        int "S3 TX GPIO (to the downward CAM's RX), or -1 for none"
         range -1 48
         default 17
         help
-            optflow_cam does not read its IO13, so this wire is optional;
+            The camera's RX is IO13 on an AI-Thinker and IO21 on the
+            ESP32-S3-WROOM CAM (since 2026-11-03), whose IO13 is the camera's
+            PCLK: never wire this pin to that IO13.
+            optflow_cam does not read its RX, so this wire is optional;
             only 'cam --tx-down', a line a person typed, writes to it. Leave
             it unwired until the camera reads it: the S3 configures the UART
             at boot, and an idle-high TX feeds an unpowered camera through

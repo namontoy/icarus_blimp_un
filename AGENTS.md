@@ -22,7 +22,9 @@ CLAUDE.md, and others). Keep it tool-neutral; tool-specific notes belong in that
 - Electronics, all on the bench and reading: two DRV8833 dual H-bridges, so every motor is
   reversible; stand-alone MPU-6050, QMC5883L (sold as HMC5883L), BME280 (sold as BMP280) and a
   VL53L1X on one I2C bus; a battery divider on ADC1; and AI-Thinker ESP32-CAM modules (OV2640,
-  measured 58 x 45 degree lens) as the perception sensor. The lidar was ruled out as too heavy.
+  measured 58 x 45 degree lens) as the perception sensor, forward, with since 2026-11-03 an
+  ESP32-S3-WROOM CAM with an OV3660 (lens not yet measured) as the downward optical-flow camera.
+  The lidar was ruled out as too heavy.
   Details: CLAUDE.md "Hardware facts that shape code" and docs/sensor-bringup-report.md.
 - Four fixed brushed motors, named FL, FR, RL, RR in the driver, the link packets and `core/`.
   Surge pair FL, FR: push along +x, on the rear bar at +/-12 cm (24 cm between the shafts,
@@ -61,7 +63,9 @@ CLAUDE.md, and others). Keep it tool-neutral; tool-specific notes belong in that
   merged from the `target-cam-*` branches 2026-11-01). CSV rows to the PC on UART0, a copy to
   the S3 on UART1 (TX IO14); `host/` has its tests and the `tcview` viewer; reports in
   `docs/learned-detector-report.md` and `docs/lens-focus-procedure.md`.
-- `firmware/projects/optflow_cam/`: ESP32-CAM optical-flow experiment. `blink/`: toolchain test.
+- `firmware/projects/optflow_cam/`: the downward optical-flow camera, built for esp32s3 (the
+  ESP32-S3-WROOM CAM with an OV3660, since 2026-11-03) or esp32 (an AI-Thinker); its rows go to
+  the S3's UART2. `blink/`: toolchain test.
 - `sim/`: MuJoCo closed loop that runs the same core, built as `build/libblimp.dll`, through
   ctypes (`sim/blimp_ffi.py`). `sim/scene/build_scene.py` generates the course from the rulebook.
 - `software/`: ground tools: `blimp_link.py`, `mock_blimp.py`, `blimp_log.py` (decodes captures),
