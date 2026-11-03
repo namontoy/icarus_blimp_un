@@ -26,7 +26,7 @@ menu "Optical Flow Configuration"
 
     choice OPTFLOW_FRAME
         prompt "Frame size (grayscale)"
-        default OPTFLOW_FRAME_QVGA if OPTFLOW_BOARD_S3_WROOM_CAM
+        default OPTFLOW_FRAME_HVGA if OPTFLOW_BOARD_S3_WROOM_CAM
         default OPTFLOW_FRAME_QQVGA
         help
             The matcher's cost follows grid^2 x (2*search+1)^2 x block^2, and
@@ -34,8 +34,11 @@ menu "Optical Flow Configuration"
             velocity range, so the frame size is decided by the match time,
             not by the camera or the memory. host/size_bench (make bench) and
             OPTFLOW_BENCH measure it; docs/esp32-cam-optical-flow-report.md
-            section 13 has the table. QVGA with a 4x4 grid is the largest that
-            keeps 80 ms with margin by that table; CIF fits only on paper.
+            section 13 has the table. On the ESP32-S3-WROOM CAM (OV3660) HVGA
+            is the choice, from the bench on 2026-11-03: every size up to HVGA
+            kept 80 ms per frame with the match at about 21 ms (40 ms at most
+            on a moving rail), HVGA tracked the rail most smoothly, and VGA
+            found too few textured blocks. The AI-Thinker stays at QQVGA.
 
         config OPTFLOW_FRAME_QQVGA
             bool "QQVGA 160x120"
@@ -45,6 +48,12 @@ menu "Optical Flow Configuration"
             bool "QVGA 320x240"
         config OPTFLOW_FRAME_CIF
             bool "CIF 400x296"
+        config OPTFLOW_FRAME_HVGA
+            bool "HVGA 480x320 (frame copies in PSRAM)"
+            depends on SPIRAM
+        config OPTFLOW_FRAME_VGA
+            bool "VGA 640x480 (frame copies in PSRAM; search too short for 0.6 m/s)"
+            depends on SPIRAM
     endchoice
 
     config OPTFLOW_S3_UART
@@ -131,7 +140,7 @@ menu "Optical Flow Configuration"
     config OPTFLOW_SEARCH
         int "Search radius (pixels)"
         range 1 10
-        default 10 if OPTFLOW_FRAME_CIF
+        default 10 if OPTFLOW_FRAME_CIF || OPTFLOW_FRAME_HVGA || OPTFLOW_FRAME_VGA
         default 8 if OPTFLOW_FRAME_QVGA
         default 7
         help
@@ -143,7 +152,7 @@ menu "Optical Flow Configuration"
     config OPTFLOW_GRID
         int "Grid of match blocks (N x N)"
         range 1 8
-        default 4 if OPTFLOW_FRAME_QVGA || OPTFLOW_FRAME_CIF
+        default 4 if OPTFLOW_FRAME_QVGA || OPTFLOW_FRAME_CIF || OPTFLOW_FRAME_HVGA || OPTFLOW_FRAME_VGA
         default 5
         help
             N*N blocks are matched per frame and the median is reported, so a

@@ -57,7 +57,15 @@ static const char *TAG = "optflow";
 
 /* The frame size is a menuconfig choice because it is set by the match time
    (Kconfig OPTFLOW_FRAME, host/size_bench), not by the camera. */
-#if CONFIG_OPTFLOW_FRAME_CIF
+#if CONFIG_OPTFLOW_FRAME_VGA
+#define FRAME_SIZE      FRAMESIZE_VGA
+#define FRAME_W         640
+#define FRAME_H         480
+#elif CONFIG_OPTFLOW_FRAME_HVGA
+#define FRAME_SIZE      FRAMESIZE_HVGA
+#define FRAME_W         480
+#define FRAME_H         320
+#elif CONFIG_OPTFLOW_FRAME_CIF
 #define FRAME_SIZE      FRAMESIZE_CIF
 #define FRAME_W         400
 #define FRAME_H         296
@@ -104,7 +112,8 @@ static bool     s_have_prev;
 /* What the boot measured, for the banner. */
 static const char *s_sensor_name = "?";
 static float s_cam_period_ms;
-static char  s_timing_note[96] = "driver default";
+static const char *s_copies_where = "";
+static char  s_timing_note[160] = "driver default";
 
 /* UART1 to the flight board, so the S3 can log the flow beside its gyro and
    ToF (CONFIG_OPTFLOW_S3_UART). Its state is in the banner. */
@@ -180,9 +189,11 @@ static void quiesce_heat_sources(void)
  * slow. So:
  *
  *   1. PLL to SYSCLK 40 MHz: VCO = XCLK x mult = 160 MHz, /4; PCLK is
- *      PLLCLK/2/8 = 10 MHz, the same divider the driver uses for its small
- *      frames. A 400-pixel Y8 line takes 40 us of PCLK against a 57.5 us
- *      line period (HTS 2300 / 40 MHz), so CIF still fits.
+ *      PLLCLK/2/4 = 20 MHz. A 480-pixel Y8 line (HVGA) takes 24 us of PCLK
+ *      against a 54 us line period (HTS 2172 / 40 MHz). The driver's own
+ *      small-frame divider of 8 (10 MHz) was tried first and failed on the
+ *      bench (2026-11-03): QVGA and HVGA ran at 160 ms, every other frame
+ *      lost, and VGA delivered no frame at all.
  *   2. VTS = period x SYSCLK / HTS: the extra lines are vertical blanking.
  *      Night mode (0x3A00 bit 2) is off in the driver's table, so the sensor
  *      will not stretch VTS itself in a dim room.
@@ -203,7 +214,9 @@ static void ov3660_frame_period(sensor_t *s)
     }
     /* _set_pll argument order: bypass, mult, sys_div, root_2x, pre_div,
        seld5, pclk_manual, pclk_div. */
-    if (s->set_pll(s, 0, 160 / xclk_mhz, 1, 0, 0, 0, 1, 8) != 0) {
+    /* PCLK = PLLCLK / 2 / pclk_div = 80 / 4 = 20 MHz by the same formula
+       (see 1. above for why not the driver's 8). */
+    if (s->set_pll(s, 0, 160 / xclk_mhz, 1, 0, 0, 0, 1, 4) != 0) {
         snprintf(s_timing_note, sizeof s_timing_note, "driver default (PLL write failed)");
         return;
     }
@@ -218,11 +231,42 @@ static void ov3660_frame_period(sensor_t *s)
         return;
     }
     snprintf(s_timing_note, sizeof s_timing_note,
-             "OV3660 SYSCLK %d MHz, HTS %d x VTS %d = %.2f ms", sysclk_mhz, hts, vts,
+             "OV3660 PLL x%d (SYSCLK %d MHz by the driver's formula), HTS %d x VTS %d = %.2f ms",
+             160 / xclk_mhz, sysclk_mhz, hts, vts,
              (double)hts * vts / (sysclk_mhz * 1000.0));
 #else
     (void)s;
 #endif
+}
+
+/* Brightness of one frame, for the banner: a dark or blank image and a
+   textureless scene both read as all-flat blocks, and these tell them apart. */
+static int s_img_min, s_img_max;
+static float s_img_mean, s_img_sd;
+/* The boot frame's variance in each matcher block, row by row: on a scene
+   that reads all-flat it shows how far the texture is from min_var. */
+static uint32_t s_blk_var[FLOW_MAX_BLOCKS];
+static int s_blk_n;
+
+static void image_stats(const uint8_t *p, size_t n)
+{
+    int lo = 255, hi = 0;
+    double sum = 0.0, sum2 = 0.0;
+    for (size_t i = 0; i < n; i++) {
+        int v = p[i];
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
+        sum += v;
+        sum2 += (double)v * v;
+    }
+    if (n == 0) {
+        return;
+    }
+    s_img_min = lo;
+    s_img_max = hi;
+    s_img_mean = (float)(sum / (double)n);
+    double var = sum2 / (double)n - (sum / (double)n) * (sum / (double)n);
+    s_img_sd = (float)sqrt(var > 0.0 ? var : 0.0);
 }
 
 /* Time the camera itself: the driver stamps each frame at its VSYNC, so the
@@ -237,6 +281,12 @@ static void measure_camera_period(void)
             continue;
         }
         int64_t t = (int64_t)fb->timestamp.tv_sec * 1000000 + fb->timestamp.tv_usec;
+        if (i == 8) {
+            image_stats(fb->buf, fb->len);
+            if (fb->len >= (size_t)s_cfg.width * (size_t)s_cfg.height) {
+                s_blk_n = flow_block_variances(&s_cfg, fb->buf, s_blk_var);
+            }
+        }
         esp_camera_fb_return(fb);
         if (n == 0) {
             first = t;
@@ -361,6 +411,16 @@ static void print_banner(void)
            FRAME_W, FRAME_H, CONFIG_OPTFLOW_XCLK_MHZ, s_target_fps);
     printf("# camera       %.2f ms per frame measured at boot; timing: %s\n",
            s_cam_period_ms, s_timing_note);
+    printf("# image        mean %.1f, sd %.1f, min %d, max %d (one frame at boot); "
+           "frame copies in %s\n",
+           (double)s_img_mean, (double)s_img_sd, s_img_min, s_img_max, s_copies_where);
+    if (s_blk_n > 0) {
+        printf("# block var   ");
+        for (int k = 0; k < s_blk_n; k++) {
+            printf(" %u", (unsigned)s_blk_var[k]);
+        }
+        printf("  (boot frame, row by row; below %u is flat)\n", (unsigned)s_cfg.min_var);
+    }
     printf("# matcher      %d px blocks, +/-%d px search, %dx%d grid, min_var %u, "
            "sub-pixel %s\n",
            s_cfg.block, s_cfg.search, s_cfg.grid_x, s_cfg.grid_y,
@@ -371,7 +431,7 @@ static void print_banner(void)
     printf("# range        +/-%.0f mm/s max, %.1f mm/s per 0.1 px\n",
            max_px_per_s * mmpx, 0.1f * mmpx * fps);
     printf("# commands     h<mm> height | f<fps> rate | r<px> search | "
-           "e<0|1|2> sub-pixel | z zero | s stream | ? info\n");
+           "e<0|1|2> sub-pixel | z zero | s stream | p frame dump | ? info\n");
     printf("# WARNING      vx/vy include rotation-induced flow (~%.0f mm/s per "
            "deg/s). De-rotate with a gyro before using them.\n",
            s_height_mm * (float)M_PI / 180.0f);
@@ -497,6 +557,30 @@ static void poll_commands(void)
                     s_streaming = !s_streaming;
                     printf("# streaming %s\n", s_streaming ? "on" : "off");
                     break;
+                case 'p': {
+                    /* One frame as hex, a row per line, for a look at the
+                       scene (framing, focus, texture) when every block reads
+                       flat. s_prev is the newest frame once the loop has
+                       swapped. At 115200 baud it stalls the loop for 13 s at
+                       QVGA and 53 s at VGA; the delay per row lets the idle
+                       task feed its watchdog. */
+                    static const char hex[] = "0123456789abcdef";
+                    static char rowbuf[2 * FRAME_W + 2];
+                    printf("# pgm %d %d\n", FRAME_W, FRAME_H);
+                    for (int y = 0; y < FRAME_H; y++) {
+                        const uint8_t *r = s_prev + (size_t)y * FRAME_W;
+                        for (int x = 0; x < FRAME_W; x++) {
+                            rowbuf[2 * x]     = hex[r[x] >> 4];
+                            rowbuf[2 * x + 1] = hex[r[x] & 15];
+                        }
+                        rowbuf[2 * FRAME_W] = '\n';
+                        rowbuf[2 * FRAME_W + 1] = 0;
+                        fputs(rowbuf, stdout);
+                        vTaskDelay(1);
+                    }
+                    printf("# pgm end\n");
+                    break;
+                }
                 case '?':
                     print_banner();
                     break;
@@ -683,11 +767,22 @@ void app_main(void)
     run_bench();
 #endif
 
+    /* Internal RAM when the two copies fit (up to CIF), else PSRAM: the
+       board bench (2026-11-03) measured the match in PSRAM within 1 % of
+       internal RAM, the frames being read a block at a time through the
+       cache. */
     s_prev = heap_caps_malloc(FRAME_BYTES, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     s_cur  = heap_caps_malloc(FRAME_BYTES, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    s_copies_where = "internal RAM";
     if (s_prev == NULL || s_cur == NULL) {
-        ESP_LOGE(TAG, "could not allocate two %d-byte frame copies in internal RAM",
-                 FRAME_BYTES);
+        heap_caps_free(s_prev);
+        heap_caps_free(s_cur);
+        s_prev = heap_caps_malloc(FRAME_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        s_cur  = heap_caps_malloc(FRAME_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        s_copies_where = "PSRAM";
+    }
+    if (s_prev == NULL || s_cur == NULL) {
+        ESP_LOGE(TAG, "could not allocate two %d-byte frame copies", FRAME_BYTES);
         return;
     }
 
