@@ -521,6 +521,19 @@ class BlimpConsole:
             except (socket.timeout, OSError):
                 return
 
+    def flush(self):
+        """Drop what has already arrived, without drain()'s wait: for a caller
+        sending several lines a second, where a reply that came after its
+        command was given up on must not pass for the next command's."""
+        self.sock.setblocking(False)
+        try:
+            while True:
+                self.sock.recvfrom(4096)
+        except OSError:                 # BlockingIOError: nothing left
+            pass
+        finally:
+            self.sock.settimeout(0.1)
+
     def run(self, line, timeout=300.0, idle=10.0, echo=None):
         """Send one line and return its whole output as text.
 

@@ -45,13 +45,23 @@ does not disarm: the pad keeps driving while another page is in view (the
 team's choice of 2026-10-29: looking at a plot must not change the motors),
 and the header's Drive pill and STOP stay in view on every page. With
 --race the page cannot arm at all: no manual control during the race.
-"""
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtWidgets import QButtonGroup, QComboBox, QGridLayout, QSizePolicy, QSpinBox, QWidget
 
+Two ways to fly, the Fly switch, remembered (since 2026-11-04). Manual is
+everything above. Assisted (assist.py) gives height and heading to core/'s
+loops: the sticks move the setpoints, surge stays a push, and Land brings the
+blimp down. Its flight runs on its own thread, so this page only says what the
+sticks and boxes say: the arming below is the take-off, STOP and the watchdog
+work as above, a pad that disappears lands instead of stopping, and the
+Flight page's motors stay off until the flight ends. Assisted starts from the
+floor and Land works only there: a hold cannot start in the air (assist.py).
+"""
+from PyQt6.QtCore import QLocale, Qt, QTimer, pyqtSignal
+from PyQt6.QtWidgets import QButtonGroup, QComboBox, QDoubleSpinBox, QGridLayout, QSizePolicy, QSpinBox, QWidget
+
+from . import assist as Ax
 from . import theme as T
 from .panels import MOTORS, Panel, button, code, h3, info_text, notice
-from .widgets import (CentreBar, FlowBox, InfoIcon, SegBar, StickPad, Switch, TopView, clamp, hbox, label,
+from .widgets import (CentreBar, FlowBox, InfoIcon, Readout, SegBar, StickPad, Switch, TopView, clamp, hbox, label,
                       set_color, sfmt)
 
 TICK_MS = 50            # pad, keys, ramp and send; the bridge streams to the blimp at 20 Hz anyway
@@ -66,7 +76,8 @@ MODE_NAMES = {'pc': 'PC', 'deck': 'Steam Deck'}
 # which for a blimp is heave and yaw, and the right stick's vertical is surge.
 LAYOUTS = (('mode2', 'Mode 2: L heave + yaw, R surge', 'left stick: heave and yaw · right stick: surge'),
            ('mode1', 'Mode 1: L surge + yaw, R heave', 'left stick: surge and yaw · right stick: heave'))
-PAD_BUTTONS = ('a', 'b', 'start', 'up', 'down')     # the ones the page acts on, on their press edge
+# The ones the page acts on, on their press edge.
+PAD_BUTTONS = ('a', 'b', 'x', 'y', 'start', 'up', 'down', 'left', 'right')
 AXES = ('surge', 'yaw', 'heave', 'roll')            # the command's order everywhere on the page
 
 
@@ -121,13 +132,15 @@ def pad_axes(axes, layout):
     return axes['ry'], axes['lx'], axes['ly'], axes['rx']
 
 
-def pad_names(layout, roll=False):
+def pad_names(layout, roll=False, assisted=False):
     """((left x, left y), (right x, right y)) axis names for the pads; the
-    right stick's X is named only while the roll is on."""
-    rx = 'roll' if roll else ''
+    right stick's X is named only while the roll is on. Assisted, yaw and
+    heave move setpoints, and there is no roll: the hold has no such axis."""
+    rx = 'roll' if roll and not assisted else ''
+    yaw, heave = ('turn', 'height') if assisted else ('yaw', 'heave')
     if layout == 'mode1':
-        return ('yaw', 'surge'), (rx, 'heave')
-    return ('yaw', 'heave'), (rx, 'surge')
+        return (yaw, 'surge'), (rx, heave)
+    return (yaw, heave), (rx, 'surge')
 
 
 KEYS = {Qt.Key.Key_W: ('surge', 1), Qt.Key.Key_S: ('surge', -1),
@@ -158,6 +171,14 @@ LEGEND_DECK = {'mode2': (('left stick', 'heave ↕ · yaw ↔'), ('right stick',
                'mode1': (('left stick', 'surge ↕ · yaw ↔'), ('right stick', 'heave ↕'))}
 LEGEND_DECK_BUTTONS = (('A', 'arm manual control (sticks at rest)'), ('B', 'STOP'),
                        ('D-pad ↑ / ↓', 'limit +5 / −5 %'), ('Start (menu)', 'autonomous: not in the firmware yet'))
+LEGEND_ASSIST_PC = (('W / S', 'surge: a push forward / back'), ('A / D, ← / →', 'turn; let go and it holds the heading'),
+                    ('↑ / ↓', 'move the height; let go and it holds'), ('Shift', 'full stick; a key alone gives half'),
+                    ('L', 'land'), ('Space, Esc', 'STOP: the motors coast in the air'),
+                    ('gamepad', 'if one is plugged in, as in Steam Deck mode'))
+# The buttons only: the pads name the sticks, and the Deck's 800 px have no row to spare.
+LEGEND_ASSIST_DECK = (('A', 'take off (sticks at rest)'), ('X or Y', 'land'), ('B', 'STOP: coast in the air'),
+                         ('D-pad ↑ / ↓', 'height ±%.1f m' % Ax.HEIGHT_STEP_M),
+                         ('D-pad ← / →', 'trim −%.1f / +%.1f gf' % (Ax.TRIM_STEP_GF, Ax.TRIM_STEP_GF)))
 
 
 def legend(rows):
@@ -169,12 +190,23 @@ class ControlPage(QWidget):
     axes) | Motors (the blimp's readback, as on the Flight page)."""
     armed_changed = pyqtSignal(bool)
     stop_requested = pyqtSignal()           # B on the pad: the window's STOP, flash included
+    mode_changed = pyqtSignal(str)          # 'pc' or 'deck'
     HINT = ('Pick the input, arm, then fly: the page mixes surge, yaw and heave into the four motors, and the '
             'station repeats the last command to the blimp until you change it. Let go and everything ramps back '
             'to zero; STOP or a lost pad coast the motors at once, a window frozen for 3 s releases them. Arming '
             'needs telemetry and the sticks at rest. Roll (off by default) adds the rear pair\'s difference from '
             'the right stick\'s free axis or Q / E, an experiment: on paper a tilt, not a turn, paid for in lift at '
             'hover. "Go autonomous" waits for the firmware\'s mode switch.')
+    HINT_ASSIST = ('Assisted: the blimp\'s own loops keep the height and the heading, and the sticks move what they '
+                   'keep. Take off sets the bench parameters, waits for 60 s of stillness on the floor and climbs to '
+                   'the height in the box. The height stick and the D-pad move the setpoint, the turn stick swings '
+                   'the nose and stops it when let go, and the surge stick pushes on top of the trim. Nothing '
+                   'measures speed, so pull the stick back to brake. Land comes down by itself and stops the motors. '
+                   'It also lands by itself if the height reading goes wrong, the window freezes or the pad goes '
+                   'away. STOP coasts the motors where the blimp is, and it falls: a last resort.')
+    LAND_MANUAL = ('Land needs an assisted flight: the blimp\'s landing runs on its hold, and a hold can only start '
+                   'on the floor (the estimator needs 60 s of stillness, which flying resets). In manual, let go and '
+                   'the blimp sinks on its trim, faster than a landing.')
 
     def __init__(self, station, settings):
         super().__init__()
@@ -190,6 +222,8 @@ class ControlPage(QWidget):
         self.raw = (0.0,) * len(AXES)           # the pad's sticks before shaping
         self.held, self.shift = set(), False
         self.roll_on = False                    # the Roll switch: the rear pair's difference, off by default
+        self.assisted = False                   # the Fly switch: core/'s loops hold height and heading
+        self.flight = {}                        # assist.py's snapshot, each telemetry tick
         self.pad = None                         # the last gamepad snapshot
         self.pad_was = {b: False for b in PAD_BUTTONS}
         self.source = 'keys'                    # what moved last: 'keys' or 'pad'
@@ -212,6 +246,12 @@ class ControlPage(QWidget):
         if lim not in (None, ''):
             self.limit_in.setValue(int(lim))
         self.set_roll(str(settings.value('control/roll')).lower() == 'true', save=False)
+        for key, box in (('control/height', self.height_in), ('control/trim', self.trim_in),
+                         ('control/surge', self.surge_in)):
+            v = settings.value(key)
+            if v not in (None, ''):
+                box.setValue(float(v))
+        self.set_assisted(str(settings.value('control/assisted')).lower() == 'true', save=False)
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.tick)
         self._timer.start(TICK_MS)
@@ -220,7 +260,7 @@ class ControlPage(QWidget):
     # ------------------------------------------------------------- panels
 
     def _build_command(self):
-        pn = Panel('Command', info_text('Who drives, and how far.', self.HINT))
+        pn = Panel('Command', info_text('Who drives, and how far.', self.HINT, self.HINT_ASSIST))
         lay = pn.lay
         self.mode_b = {}
         group = QButtonGroup(self)
@@ -252,8 +292,24 @@ class ControlPage(QWidget):
         lay.addWidget(self.pad_notice)
         lay.addSpacing(14)
 
-        lay.addWidget(h3('Arm'))
+        lay.addWidget(h3('Fly'))
         lay.addSpacing(6)
+        self.kind_b = {}
+        kinds = QButtonGroup(self)
+        kinds.setExclusive(True)
+        row = hbox(spacing=4)
+        for kind, text, tip in (('manual', 'Manual', 'the sticks are the motors: you are the height loop'),
+                                ('assisted', 'Assisted', "the blimp's loops hold height and heading: the sticks move "
+                                                         'what they hold')):
+            b = button(text, 'toggle', tip=tip)
+            b.setCheckable(True)
+            b.clicked.connect(lambda _=False, on=kind == 'assisted': self.set_assisted(on))
+            kinds.addButton(b)
+            row.addWidget(b)
+            self.kind_b[kind] = b
+        row.addStretch(1)
+        lay.addLayout(row)
+        lay.addSpacing(10)
         self.arm_sw = Switch('Manual control')
         self.arm_sw.setToolTip('arm: the sticks drive the motors · off: coast (A / B on the pad)')
         self.arm_sw.toggled.connect(self._arm_toggled)
@@ -281,6 +337,34 @@ class ControlPage(QWidget):
         controls.add(lim)
         controls.add(self.roll_sw)
         lay.addWidget(controls)
+        self.manual_box = controls
+
+        self.takeoff_b = button('Take off', 'primary', tip='bench parameters, 60 s of stillness, then the climb '
+                                                           '(A on the pad)')
+        self.takeoff_b.clicked.connect(lambda: self.arm(self.source))
+        self.land_b = button('Land', 'land', tip='down to the floor and motors off (X or Y on the pad, L on the keyboard)')
+        self.land_b.clicked.connect(self.land)
+        self.land_note = InfoIcon(self.LAND_MANUAL)
+        self.height_in = self._number(Ax.HEIGHT_MIN_M, Ax.HEIGHT_MAX_M, Ax.HEIGHT_STEP_M, Ax.HEIGHT_DEFAULT_M, 2,
+                                      'the height to hold, m; in the air it is the setpoint, and the stick and the '
+                                      'D-pad move it', self._height_changed)
+        self.surge_in = self._number(0.5, Ax.SURGE_FULL_MAX_GF, 0.5, Ax.SURGE_FULL_DEFAULT_GF, 1,
+                                     'full stick is this push, gf; test 5 flew 3 gf (about 0.15 m/s after 3 s)',
+                                     self._surge_changed)
+        self.trim_in = self._number(-Ax.TRIM_MAX_GF, Ax.TRIM_MAX_GF, Ax.TRIM_STEP_GF, Ax.TRIM_DEFAULT_GF, 1,
+                                    'the push with the stick at rest, gf: the rear motors lean forward, so without '
+                                    'it the blimp drifts. -0.6 for the new battery type, -1 for the earlier cells; '
+                                    'the D-pad nudges it in flight', self._trim_changed)
+        boxes = FlowBox(hgap=12, vgap=8)
+        for name, box, unit in (('Height', self.height_in, 'm'), ('Surge', self.surge_in, 'gf'),
+                                ('Trim', self.trim_in, 'gf')):
+            w = QWidget()
+            w.setLayout(hbox(label(name, color=T.MUTED), box, label(unit, color=T.MUTED), spacing=6))
+            boxes.add(w)
+        lay.addWidget(boxes)
+        self.assist_box = boxes
+        lay.addSpacing(8)
+        lay.addLayout(hbox(self.takeoff_b, 6, self.land_b, 6, self.land_note, None, spacing=0))
         lay.addSpacing(8)
         self.state_l = label('DISARMED', 13, 600, mono=True)
         lay.addWidget(self.state_l)
@@ -294,7 +378,8 @@ class ControlPage(QWidget):
         lay.addWidget(self.legend_l)
         lay.addSpacing(14)
 
-        lay.addWidget(h3('Hand-off'))
+        self.handoff_h = h3('Hand-off')
+        lay.addWidget(self.handoff_h)
         lay.addSpacing(6)
         self.auto_b = button('Go autonomous', 'primary',
                              tip='hand the vehicle to blimp_step() on the blimp: needs the MODE_SET packet')
@@ -307,6 +392,22 @@ class ControlPage(QWidget):
         lay.addLayout(hbox(self.auto_b, 6, self.auto_note, None, spacing=0))
         lay.addStretch(1)
         return pn
+
+    def _number(self, lo, hi, step, value, decimals, tip, changed):
+        """A number box. It gives the focus back when done: the page's keys and
+        Space as STOP are off while a box has it (app.py, Keys)."""
+        box = QDoubleSpinBox()
+        box.setRange(lo, hi)
+        box.setSingleStep(step)
+        box.setDecimals(decimals)
+        box.setLocale(QLocale.c())      # 1.00 as every other number on the page, whatever the system's locale
+        box.setValue(value)
+        box.setKeyboardTracking(False)
+        box.setFixedWidth(78)
+        box.setToolTip(tip)
+        box.valueChanged.connect(changed)
+        box.editingFinished.connect(box.clearFocus)
+        return box
 
     def _build_sticks(self):
         pn = Panel('Sticks', 'the command the page derives; papaya while armed')
@@ -322,7 +423,7 @@ class ControlPage(QWidget):
         g.setColumnMinimumWidth(0, 56)
         g.setColumnMinimumWidth(2, 64)
         g.setColumnStretch(1, 1)
-        self.axis_bars, self.axis_vals = {}, {}
+        self.axis_bars, self.axis_vals, self.axis_names = {}, {}, {}
         self.roll_row = []                      # hidden while the roll is off, so the panel reads as before
         for i, (name, words) in enumerate((('surge', 'back · forward'), ('yaw', 'left · right'),
                                            ('heave', 'down · up'), ('roll', 'RR harder · RL harder'))):
@@ -331,13 +432,27 @@ class ControlPage(QWidget):
             row = (label(name, 12, 700, T.MUTED, spacing=0.08, caps=True), bar, val, label(words, 11, color=T.FAINT))
             for col, w in enumerate(row):
                 g.addWidget(w, i, col)
-            self.axis_bars[name], self.axis_vals[name] = bar, val
+            self.axis_bars[name], self.axis_vals[name], self.axis_names[name] = bar, val, row[0]
             if name == 'roll':
                 self.roll_row = list(row)
         lay.addLayout(g)
         lay.addSpacing(12)
         self.mix_l = label('', 12, color=T.FAINT, mono=True, wrap=True)
         lay.addWidget(self.mix_l)
+        self.height_r, self.heading_r = Readout('Height', 'm'), Readout('Heading', '°')
+        self.surge_r = Readout('Surge', 'gf')
+        self.flight_box = QWidget()
+        row = hbox(self.height_r, self.heading_r, self.surge_r, spacing=10)
+        # Sized for the Deck, where the panel is about 510 px: a setpoint that
+        # elides to '1.…' is the one number the operator came to read.
+        for r, stretch in ((self.height_r, 3), (self.heading_r, 3), (self.surge_r, 2)):
+            r.value.setFont(T.font(15, 600, mono=True))
+            row.setStretchFactor(r, stretch)
+        self.flight_box.setLayout(row)
+        lay.addWidget(self.flight_box)
+        lay.addSpacing(6)
+        self.flight_l = label('', 12, color=T.MUTED, wrap=True)
+        lay.addWidget(self.flight_l)
         lay.addStretch(1)
         return pn
 
@@ -375,12 +490,13 @@ class ControlPage(QWidget):
         for m, b in self.mode_b.items():
             b.setChecked(m == mode)
         deck = mode == 'deck'
-        self.legend_h.setText('Controls' if deck else 'Keys')
+        self.legend_h.setText('Controls' if deck else 'Keys')       # assisted or not
         if save:
             self.settings.setValue('control/mode', mode)
             self.station.log('info', 'control: %s mode' % MODE_NAMES[mode])
         self._legend()
         self.render()
+        self.mode_changed.emit(mode)
 
     def set_layout(self, lid, save=True):
         self.layout_id = lid
@@ -390,15 +506,20 @@ class ControlPage(QWidget):
             self.layout_in.blockSignals(True)
             self.layout_in.setCurrentIndex(idx)
             self.layout_in.blockSignals(False)
-        (lx, ly), (rx, ry) = pad_names(lid, self.roll_on)
-        self.pad_l.set_axes(lx, ly)
-        self.pad_r.set_axes(rx, ry)
+        self._pad_axes()
         if save:
             self.settings.setValue('control/layout', lid)
         self._legend()
 
+    def _pad_axes(self):
+        (lx, ly), (rx, ry) = pad_names(self.layout_id, self.roll_on, self.assisted)
+        self.pad_l.set_axes(lx, ly)
+        self.pad_r.set_axes(rx, ry)
+
     def _legend(self):
-        if self.mode == 'deck':
+        if self.assisted:
+            self.legend_l.setText(legend(LEGEND_ASSIST_DECK if self.mode == 'deck' else LEGEND_ASSIST_PC))
+        elif self.mode == 'deck':
             rows = LEGEND_DECK[self.layout_id]
             if self.roll_on:
                 rows = tuple((k, v + ' · roll ↔' if k == 'right stick' else v) for k, v in rows)
@@ -430,10 +551,8 @@ class ControlPage(QWidget):
             self.roll_sw.setChecked(on)
             self.roll_sw.blockSignals(False)
         for w in self.roll_row:
-            w.setVisible(on)
-        (lx, ly), (rx, ry) = pad_names(self.layout_id, on)
-        self.pad_l.set_axes(lx, ly)
-        self.pad_r.set_axes(rx, ry)
+            w.setVisible(on and not self.assisted)
+        self._pad_axes()
         if save:
             self.settings.setValue('control/roll', on)
             if on:
@@ -443,6 +562,51 @@ class ControlPage(QWidget):
                 self.station.log('info', 'control: roll off: the rear pair is heave only')
         self._legend()
         self.render()
+
+    def set_assisted(self, on, save=True):
+        """Manual or assisted. Not in the air: a hold cannot start there, and a
+        running one has no open-loop way out."""
+        on = bool(on)
+        if not self.armed:
+            self.assisted = on
+            if save:
+                self.settings.setValue('control/assisted', on)
+                self.station.log('info', 'control: %s flight' % ('assisted' if on else 'manual'))
+        elif on != self.assisted:
+            self.station.log('warn', 'control: land or disarm before changing how you fly')
+        self.kind_b['assisted'].setChecked(self.assisted)
+        self.kind_b['manual'].setChecked(not self.assisted)
+        self.manual_box.setVisible(not self.assisted)
+        self.assist_box.setVisible(self.assisted)
+        self.takeoff_b.setVisible(self.assisted)
+        self.land_note.setVisible(not self.assisted)
+        self.mix_l.setVisible(not self.assisted)
+        self.flight_box.setVisible(self.assisted)
+        self.flight_l.setVisible(self.assisted)
+        self.handoff_h.setVisible(not self.assisted)
+        self.auto_b.setVisible(not self.assisted)
+        self.auto_note.setVisible(not self.assisted)
+        for w in self.roll_row:
+            w.setVisible(self.roll_on and not self.assisted)
+        self.axis_names['yaw'].setText('turn' if self.assisted else 'yaw')
+        self.axis_names['heave'].setText('height' if self.assisted else 'heave')
+        self._pad_axes()
+        self._legend()
+        self.render()
+
+    def _height_changed(self, v):
+        if self.armed and self.assisted:
+            self.station.assist_height(v)
+
+    def _surge_changed(self, v):
+        self.settings.setValue('control/surge', v)
+        if self.armed and self.assisted:
+            self.station.assist_tune(surge_full_gf=v)
+
+    def _trim_changed(self, v):
+        self.settings.setValue('control/trim', v)
+        if self.armed and self.assisted:
+            self.station.assist_tune(trim_gf=v)
 
     # -------------------------------------------------------------- arming
 
@@ -470,14 +634,24 @@ class ControlPage(QWidget):
         if any(abs(v) > 0 for v in self.target):
             self.station.log('warn', 'control: sticks at rest and keys up before arming')
             return False
+        by = 'gamepad' if source == 'pad' else 'keyboard'
+        if self.assisted:
+            why = self.station.assist_takeoff(self.height_in.value(), self.trim_in.value(), self.surge_in.value())
+            if why:
+                self.station.log('warn', 'control: not taking off: %s' % why)
+                return False
+            self.settings.setValue('control/height', self.height_in.value())
+            self.flight = {'state': 'preparing'}
+            self.station.log('info', 'assisted flight from the %s: to %.2f m, trim %+.1f gf, full stick %.1f gf'
+                             % (by, self.height_in.value(), self.trim_in.value(), self.surge_in.value()))
         self.armed = True
         self.cmd = [0.0] * len(AXES)
-        self.arm_sw.blockSignals(True)
-        self.arm_sw.setChecked(True)
-        self.arm_sw.blockSignals(False)
-        self.station.log('info', 'manual control armed from the %s, limit %d %%%s'
-                         % ('gamepad' if source == 'pad' else 'keyboard', round(self.limit * 100),
-                            ', roll on' if self.roll_on else ''))
+        if not self.assisted:
+            self.arm_sw.blockSignals(True)
+            self.arm_sw.setChecked(True)
+            self.arm_sw.blockSignals(False)
+            self.station.log('info', 'manual control armed from the %s, limit %d %%%s'
+                             % (by, round(self.limit * 100), ', roll on' if self.roll_on else ''))
         self.armed_changed.emit(True)
         self.render()
         return True
@@ -498,12 +672,24 @@ class ControlPage(QWidget):
         self.armed_changed.emit(False)
         self.render()
 
+    def land(self):
+        """The Land button, X or Y on the pad, L on the keyboard. Before the
+        motors start, it calls the take-off off."""
+        if self.assisted and self.armed:
+            self.station.assist_land()
+        elif not self.assisted:
+            self.station.log('warn', 'control: Land is part of an assisted flight; in manual, let go and it sinks')
+
     # ---------------------------------------------------------------- keys
 
     def key(self, k, pressed):
         """From the window's key filter: True when the key is one of ours."""
         if k in (Qt.Key.Key_Shift,):
             self.shift = pressed
+            return True
+        if k == Qt.Key.Key_L and self.assisted:
+            if pressed:
+                self.land()
             return True
         if k not in KEYS:
             return False
@@ -526,7 +712,10 @@ class ControlPage(QWidget):
         was = self.pad
         self.pad = pad
         if was is not None and was['connected'] and not pad['connected']:
-            if self.armed and self.source == 'pad':
+            if self.armed and self.source == 'pad' and self.assisted:
+                self.station.log('crit', 'control: the gamepad went away in the flight: landing')
+                self.station.assist_land('the gamepad went away')
+            elif self.armed and self.source == 'pad':
                 self.station.log('crit', 'control: the gamepad went away while driving: STOP')
                 self.stop_requested.emit()
             else:
@@ -543,11 +732,12 @@ class ControlPage(QWidget):
         else:
             self.raw = (0.0,) * len(AXES)
             self.pad_was = {b: False for b in PAD_BUTTONS}
-        if not self.roll_on:                    # off, the right stick's X and Q / E are nothing
+        roll = self.roll_on and not self.assisted
+        if not roll:                            # off, the right stick's X and Q / E are nothing
             self.raw = self.raw[:3] + (0.0,)
         shaped = tuple(shape_axis(v) for v in self.raw)
         keys = key_axes(self.held, self.shift)
-        if not self.roll_on:
+        if not roll:
             keys = keys[:3] + (0.0,)
         if any(shaped):
             self.source = 'pad'
@@ -556,7 +746,12 @@ class ControlPage(QWidget):
         self.target = tuple(clamp(s + k, -1.0, 1.0) for s, k in zip(shaped, keys))
         step = TICK_MS / 1000.0 / SLEW_S
         self.cmd = [slew(c, t, step) for c, t in zip(self.cmd, self.target)]
-        if self.armed:
+        if self.armed and self.assisted:
+            # The turn and the height are rates, ramped by what they move, and
+            # a let-go must be seen at once: the unramped target. The surge is
+            # a push on the motors, so it ramps as it does in manual.
+            self.station.assist_sticks(self.cmd[0], self.target[1], self.target[2])
+        elif self.armed:
             self.station.set_motors(teleop_mix(self.cmd[0], self.cmd[1], self.cmd[2], self.limit, self.cmd[3]))
         self.render()
 
@@ -565,6 +760,20 @@ class ControlPage(QWidget):
             self.arm('pad')
         elif b == 'b':
             self.stop_requested.emit()
+        elif b in ('x', 'y'):
+            # Both: nothing else uses them, and these two are the pair whose
+            # event codes drivers disagree on (the kernel's BTN_NORTH is BTN_X).
+            # A and B are checked on a Deck; X and Y are not yet, and a Land
+            # that does nothing is not a thing to find out in the air.
+            self.land()
+        elif b in ('up', 'down') and self.assisted:
+            step = Ax.HEIGHT_STEP_M if b == 'up' else -Ax.HEIGHT_STEP_M
+            if self.armed:
+                self.station.assist_step_height(step)
+            else:
+                self.height_in.setValue(self.height_in.value() + step)
+        elif b in ('left', 'right') and self.assisted:
+            self.trim_in.setValue(self.trim_in.value() + (Ax.TRIM_STEP_GF if b == 'right' else -Ax.TRIM_STEP_GF))
         elif b == 'up':
             self.limit_in.setValue(self.limit_in.value() + 5)
         elif b == 'down':
@@ -577,7 +786,12 @@ class ControlPage(QWidget):
 
     def on_tel(self, m):
         self.tel, self.alive = m.get('tel'), bool(m.get('alive'))
+        self.flight = m.get('assist') or {}
+        if self.armed and self.assisted and self.flight.get('state', 'idle') == 'idle':
+            self.disarm(send_stop=False)        # landed, called off or killed; assist.py said why
         self.render_readback()
+        if self.assisted:
+            self.render_flight()
 
     def set_stale(self):
         self.alive = False
@@ -592,6 +806,31 @@ class ControlPage(QWidget):
             self.rb_vals[m].setText(sfmt(v, 3))
             self.rb_bars[m].set(v)
         self.top.set(values)
+
+    def render_flight(self):
+        """The Sticks panel's readouts and the Command panel's buttons, from
+        assist.py's snapshot. The boxes follow the flight, unless being typed in."""
+        f = self.flight
+        state = f.get('state', 'idle')
+        up = state in ('flying', 'landing')
+        tof, yaw = f.get('tof_m'), f.get('yaw_deg')
+        self.height_r.set('%s → %.2f' % ('—' if tof is None else '%.2f' % tof, f['height_m']) if up else '—')
+        self.heading_r.set('%s → %+.0f' % ('—' if yaw is None else '%+.0f' % yaw, f['heading_deg']) if up else '—')
+        self.surge_r.set('%+.1f' % f['surge_gf'] if up else '—')
+        if f.get('link_lost'):
+            self.flight_l.setText('Link lost: the blimp stops its motors after 1 s, and the hold goes on if the link '
+                                  'returns.')
+            set_color(self.flight_l, T.AMBER)
+        else:
+            self.flight_l.setText(f.get('detail') or ('Flying: let go and it holds.' if state == 'flying' else ''))
+            set_color(self.flight_l, T.MUTED)
+        # Flying only: the landing's setpoints would leave the box at 0.30 m,
+        # and the next take-off would climb to that.
+        if state == 'flying' and not self.height_in.hasFocus():
+            self.height_in.blockSignals(True)
+            self.height_in.setValue(f['height_m'])
+            self.height_in.blockSignals(False)
+        self.land_b.setText('Call off' if state == 'preparing' else 'Land')
 
     # -------------------------------------------------------------- render
 
@@ -616,7 +855,12 @@ class ControlPage(QWidget):
         self.mix_l.setText('to the blimp  FL %+.3f  FR %+.3f  RL %+.3f  RR %+.3f%s'
                            % (fl, fr, rl, rr, '' if self.armed else '  (not armed: nothing sent)'))
         # state line
-        if self.armed:
+        if self.armed and self.assisted:
+            state = self.flight.get('state', 'preparing')
+            self.state_l.setText('%s · %s' % ({'flying': 'ASSISTED', 'landing': 'LANDING'}.get(state, 'PREPARING'),
+                                              'gamepad' if self.source == 'pad' else 'keyboard'))
+            set_color(self.state_l, T.AMBER if state == 'landing' else T.PAPAYA)
+        elif self.armed:
             self.state_l.setText('ARMED · %s · limit %d %%%s'
                                  % ('gamepad' if self.source == 'pad' else 'keyboard', round(self.limit * 100),
                                     ' · roll' if self.roll_on else ''))
@@ -625,8 +869,10 @@ class ControlPage(QWidget):
             self.state_l.setText('DISARMED · no telemetry')
             set_color(self.state_l, T.FAINT)
         else:
-            self.state_l.setText('DISARMED · ready')
+            self.state_l.setText('ON THE FLOOR · ready' if self.assisted else 'DISARMED · ready')
             set_color(self.state_l, T.UN_GREEN)
+        self.land_b.setEnabled(self.assisted and self.armed and self.flight.get('state') != 'landing')
+        self.takeoff_b.setEnabled(self.assisted and not self.armed and not self.station.race)
         # source line and the pad notice
         if pad is None or not pad['connected']:
             why = (pad or {}).get('error') or 'no gamepad'

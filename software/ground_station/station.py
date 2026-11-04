@@ -31,6 +31,11 @@ TICK_MS = 100           # telemetry/sensor refresh of the window
 WIFI_TICKS = 20         # Wi-Fi state check every 2 s: a routing lookup, no subprocess
 CAP_POLL_S = 0.5        # progress of a running capture
 CAPTURES_DIR = 'captures'   # under the working directory; gitignored
+# What the console dock may send during an assisted flight. A sensor command
+# pauses the sensor stream and resets its chip (CLAUDE.md, "Sensor stream"), so
+# 'tof' or 'imu' would take the loop's height or attitude away in the air, and
+# a long one would hold up the setpoints behind it on the blimp's one console.
+FLIGHT_CONSOLE = ('hold', 'link', 'wifi', 'ctl', 'cam', 'help')
 
 
 def save_capture(info, data, notes, source, folder=None, params=None):
@@ -137,7 +142,7 @@ class Station(QObject):
         self.tel.emit({'alive': snap['alive'], 'age_s': snap['age_s'], 'rx': snap['rx'], 'bad': snap['bad'],
                        'streaming': snap['streaming'], 'standing': snap['standing'], 'tripped': snap['tripped'],
                        'link_lost': snap['link_lost'], 'ramp': snap['ramp'], 'race': snap['race'],
-                       'gap_max_s': snap['gap_max_s'], 'tel': snap['tel']})
+                       'gap_max_s': snap['gap_max_s'], 'tel': snap['tel'], 'assist': snap['assist']})
         self._ticks += 1
         self.camera.poll()                  # status when the camera link changed, and once a second
         if self.radio is not None and self._ticks % WIFI_TICKS == 0:
@@ -176,6 +181,31 @@ class Station(QObject):
 
     def stop(self, brake=False):
         self.blimp.stop(brake)
+
+    # The assisted flight (assist.py): the blimp's own loops hold the motors,
+    # so these state what the sticks and boxes say, and its thread does the rest.
+
+    def assist_active(self):
+        return self.blimp is not None and self.blimp.assist.active
+
+    def assist_takeoff(self, height_m, trim_gf, surge_full_gf):
+        """None when the flight started, or why not."""
+        return self.blimp.takeoff(height_m, trim_gf, surge_full_gf)
+
+    def assist_sticks(self, surge, yaw, heave):
+        self.blimp.assist.set_sticks(surge, yaw, heave)
+
+    def assist_height(self, height_m):
+        self.blimp.assist.set_height(height_m)
+
+    def assist_step_height(self, delta_m):
+        self.blimp.assist.step_height(delta_m)
+
+    def assist_tune(self, trim_gf=None, surge_full_gf=None):
+        self.blimp.assist.tune(trim_gf, surge_full_gf)
+
+    def assist_land(self, why='the operator asked'):
+        self.blimp.assist.land(why)
 
     def _pad_press(self, button):
         """The gamepad reader's thread, on a press edge. B is STOP straight to
@@ -257,8 +287,24 @@ class Station(QObject):
             self.con_text.emit('> %s\n[race mode: parameter changes are refused here; reading them is not]\n' % line)
             self.con_end.emit()
             return
+        if self.assist_active() and not self._console_in_flight(words):
+            self.con_text.emit('> %s\n[assisted flight: only reads go through (%s, param <name>); a sensor command '
+                               'would take the loop\'s sensor away. Land or STOP first]\n'
+                               % (line, ', '.join(FLIGHT_CONSOLE)))
+            self.con_end.emit()
+            return
         self._console_q.append(line)
         self._console_ev.set()
+
+    @staticmethod
+    def _console_in_flight(words):
+        """A read, or a stop: 'motor -s' is the dock's own stop, and a stop is
+        never refused (assist.py sees KILLED at its next poll and ends)."""
+        if words[:2] in (['motor', '-s'], ['motor', '--stop']):
+            return True
+        if words[:1] == ['param']:
+            return len(words) == 2 and not words[1].startswith('-')
+        return len(words) == 1 and words[0] in FLIGHT_CONSOLE
 
     def _console_loop(self):
         while True:

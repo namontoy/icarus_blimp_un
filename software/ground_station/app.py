@@ -71,13 +71,13 @@ class Header(QWidget):
     def __init__(self, demo):
         super().__init__()
         self.demo = demo
-        sub = label('Universidad Nacional de Colombia <span style="color:%s">·</span> blimp ground station'
-                    % T.PAPAYA, 12, color=T.MUTED, spacing=0.12, caps=True)
+        self.sub = label('Universidad Nacional de Colombia <span style="color:%s">·</span> blimp ground station'
+                         % T.PAPAYA, 12, color=T.MUTED, spacing=0.12, caps=True)
         brand = QVBoxLayout()
         brand.setSpacing(4)
         brand.setContentsMargins(0, 0, 0, 0)
         brand.addWidget(Wordmark())
-        brand.addWidget(sub)
+        brand.addWidget(self.sub)
         self.wifi_b = button('Join blimp Wi-Fi', tip="join the blimp's access point from this computer")
         self.wifi_b.setEnabled(False)
         # What the join says (the network, this computer's address, an error)
@@ -90,8 +90,9 @@ class Header(QWidget):
         # news. Reserving those too would have widened the header by 124 px,
         # and it is already wider than the Steam Deck's 1280
         self.pills = {
-            'drive': Pill('Drive', 'what drives the motors: the Flight page, the Control page or nothing; '
-                                   'RACE: this window only watches, STOP is its one command'),
+            'drive': Pill('Drive', 'what drives the motors: the Flight page, the Control page by hand, an '
+                                   'assisted flight (ASSIST, LANDING) or nothing; RACE: this window only watches, '
+                                   'STOP is its one command', reserve='PREPARING'),
             'wifi': Pill('Wi-Fi', "this computer's connection to the blimp's access point"),
             'link': Pill('Link', 'UDP link to the blimp: the longest wait for a packet over the last second, '
                                  'shown once a second (telemetry comes 20 times a second, so about 50 ms when all '
@@ -118,6 +119,12 @@ class Header(QWidget):
         lay.addSpacing(18)
         lay.addWidget(self.stop_b)
         self.setLayout(lay)
+
+    def set_narrow(self, on):
+        """The Steam Deck's 1280 px: the subtitle was what held the window at
+        1435, and the window cannot go below its header, so the panels and
+        STOP ran off the right of the screen (2026-11-04)."""
+        self.sub.setVisible(not on)
 
     def paintEvent(self, e):
         p = QPainter(self)
@@ -204,10 +211,18 @@ class Header(QWidget):
     def set_drive(self, race, m, flight, control):
         """The Drive pill: the window's own view of who drives (flight,
         control) over the bridge's (m: link lost, resuming)."""
+        assist = m.get('assist') or {}
+        state = assist.get('state', 'idle')
         if race:
             self.pills['drive'].set('demo', 'RACE')
-        elif m.get('standing') and m.get('link_lost'):
+        elif (m.get('standing') and m.get('link_lost')) or assist.get('link_lost'):
             self.pills['drive'].set('crit', 'LINK LOST')
+        elif state == 'landing':
+            self.pills['drive'].set('warn', 'LANDING')
+        elif state == 'flying':
+            self.pills['drive'].set('live', 'ASSIST')
+        elif state == 'preparing':
+            self.pills['drive'].set('warn', 'PREPARING')
         elif m.get('standing') and m.get('ramp', 1.0) < 1.0:
             self.pills['drive'].set('warn', 'RESUMING')
         elif control:
@@ -242,7 +257,7 @@ class PageBar(QWidget):
     # Each page's one-line description is its tab's tip (it was a line of
     # faint text on the right of the bar until 2026-11-02)
     NOTES = {'flight': 'motors, camera and sensors, live',
-             'control': 'fly by hand from the keyboard or a gamepad, then hand off',
+             'control': 'fly from the keyboard or a gamepad, by hand or assisted by the height and heading loops',
              'bench': 'captures, calibration and checks of the blimp on the bench'}
 
     def __init__(self):
@@ -285,6 +300,8 @@ class MainWindow(QMainWindow):
         grid.layout().setStretchFactor(self.camera, 1)
         grid.setMinimumHeight(200)
         self.control = ControlPage(station, settings)
+        self.control.mode_changed.connect(lambda mode: self.header.set_narrow(mode == 'deck'))
+        self.header.set_narrow(self.control.mode == 'deck')
         self.bench = BenchPage(station)
         self.pages = QStackedWidget()
         self.page_index = {}
@@ -337,7 +354,8 @@ class MainWindow(QMainWindow):
         # switches the Flight page off and the other way round, else two
         # standing commands would alternate on the wire.
         self.control.armed_changed.connect(lambda on: on and self.motors.enabled and self.motors.set_enabled(False))
-        self.motors.enable.toggled.connect(lambda on: on and self.control.disarm(send_stop=False))
+        self.motors.enable.toggled.connect(
+            lambda on: on and not station.assist_active() and self.control.disarm(send_stop=False))
         self.control.stop_requested.connect(self.stop)
 
         self._frame = QTimer(self)
@@ -601,13 +619,17 @@ def main(argv=None):
     station.start()
     # Ctrl-C in the terminal closes the window (and so stops the motors). Qt's
     # loop never returns to Python on its own, so a timer lets the handler run.
+    # SIGTERM too: it is how Steam ends a game, and an assisted flight left
+    # standing would wake on the next window's first packet (assist.py).
     signal.signal(signal.SIGINT, lambda *_: win.close())
+    signal.signal(signal.SIGTERM, lambda *_: win.close())
     tick = QTimer()
     tick.timeout.connect(lambda: None)
     tick.start(200)
     rc = app.exec()
     tick.stop()
     signal.signal(signal.SIGINT, signal.SIG_DFL)
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
     teardown(station, win)
     sys.exit(rc)
 

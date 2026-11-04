@@ -20,8 +20,7 @@ What it checks, and why each matters:
               argtable would have taken for an option, is accepted.
   validator   lowering heave_budget_n below hover_thrust_n makes core/'s
               blimp_params_validate(), compiled into the S3, pull the
-              feed-forward down with it (skipped on the mock, which has
-              neither field).
+              feed-forward down with it.
   timing      the hand-over takes a spinlock once per tick: the loop's
               overruns and skipped ticks are counted over a quiet stretch and
               over a burst of sets, which should add none.

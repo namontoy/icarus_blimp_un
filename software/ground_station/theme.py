@@ -138,6 +138,8 @@ QPushButton:disabled { background: %(DIS_BG)s; border-color: %(DIS_BORDER)s; col
 QPushButton[kind="primary"] { background: %(GREEN)s; color: %(GREEN_INK)s; border-color: %(GREEN)s; }
 QPushButton[kind="primary"]:disabled { background: %(DIS_GREEN)s; border-color: %(DIS_GREEN)s; }
 QPushButton[kind="toggle"]:checked { background: %(PAPAYA)s; color: %(PAPAYA_INK)s; border-color: %(PAPAYA)s; }
+QPushButton[kind="land"] { background: %(PAPAYA)s; color: %(PAPAYA_INK)s; border-color: %(PAPAYA)s; }
+QPushButton[kind="land"]:disabled { background: %(DIS_BG)s; border-color: %(DIS_BORDER)s; color: %(DIS_FG)s; }
 QPushButton[state="up"] { border-color: %(GREEN)s; color: %(GREEN)s; }
 QPushButton[state="busy"] { border-color: %(PAPAYA)s; color: %(PAPAYA)s; }
 QPushButton[kind="full"] { padding: 3px 9px; font-size: 15px; }
@@ -154,14 +156,15 @@ QLineEdit { padding: 5px 8px; font-size: 13px; }
 QLineEdit:focus { border-color: %(PAPAYA)s; }
 QPlainTextEdit { padding: 4px 6px; font-size: 12px; }
 
-QSpinBox, QComboBox { background: %(BG)s; border: 1px solid %(BORDER)s; color: %(FG)s; padding: 3px 6px;
-                      font-family: "%(MONO)s"; font-size: 14px; }
-QSpinBox:focus, QComboBox:focus { border-color: %(PAPAYA)s; }
-QSpinBox::up-button, QSpinBox::down-button { width: 14px; background: %(RAISED)s; border: 0;
-                                             border-left: 1px solid %(BORDER)s; }
-QSpinBox::up-button:hover, QSpinBox::down-button:hover { background: %(RAISED_2)s; }
-QSpinBox::up-arrow { %(UP)s }
-QSpinBox::down-arrow { %(DOWN)s }
+QSpinBox, QDoubleSpinBox, QComboBox { background: %(BG)s; border: 1px solid %(BORDER)s; color: %(FG)s;
+                                      padding: 3px 6px; font-family: "%(MONO)s"; font-size: 14px; }
+QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus { border-color: %(PAPAYA)s; }
+QSpinBox::up-button, QSpinBox::down-button, QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {
+    width: 14px; background: %(RAISED)s; border: 0; border-left: 1px solid %(BORDER)s; }
+QSpinBox::up-button:hover, QSpinBox::down-button:hover, QDoubleSpinBox::up-button:hover,
+QDoubleSpinBox::down-button:hover { background: %(RAISED_2)s; }
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow { %(UP)s }
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow { %(DOWN)s }
 QComboBox::drop-down { border: 0; width: 16px; }
 QComboBox::down-arrow { %(DOWN)s }
 QComboBox QAbstractItemView { background: %(RAISED)s; color: %(FG)s; border: 1px solid %(BORDER)s;

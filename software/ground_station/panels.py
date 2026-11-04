@@ -271,6 +271,9 @@ class MotorsPanel(Panel):
         if on and self.station.race:
             self.station.log('warn', 'race mode: the motors stay off from this window')
             on = False
+        if on and self.station.assist_active():
+            self.station.log('warn', 'an assisted flight holds the motors: land or STOP first')
+            on = False
         self.enabled = on
         self.enable.blockSignals(True)
         self.enable.setChecked(on)

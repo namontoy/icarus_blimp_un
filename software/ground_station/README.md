@@ -202,7 +202,7 @@ throwaway settings file, so it never changes the remembered window.
   Rotate 180° (display only) is kept for the occasional calibration frame the S3 may relay later
   (`docs/inter-board-link-plan.md`); the link carries no frames, so the two buttons work in
   `--demo` only, where a painted frame stands in. Built 2026-11-01; not yet run against the blimp.
-- **Control** (the second tab under the header): fly by hand. Pick the input, *PC* (the
+- **Control** (the second tab under the header): fly by hand, or assisted (below). Pick the input, *PC* (the
   keyboard, plus a gamepad if one is plugged in) or *Steam Deck* (the Deck's own controls; the
   page's notes are behind its info icons, on the Deck's 1280 × 800 too), and the stick layout
   (mode 2: left stick heave and yaw, right stick surge; mode 1 swaps surge and heave). Switch *Manual control* on, or press A
@@ -229,6 +229,17 @@ throwaway settings file, so it never changes the remembered window.
   firmware has its mode switch (`MODE_SET`, `docs/control-loop-plan.md` increment 3). `--mode
   pc|deck` sets the input from the command line; the input, the layout, the limit and *Roll* are
   remembered.
+
+  *Fly: Assisted* (2026-11-04, not yet flown; `docs/assisted-control.md`) hands height and heading
+  to `core/`'s loops: nothing to flash, the station sends the firmware's `hold` setpoints. Set the
+  height, the full-stick push and the battery's trim, then *Take off* or A: it sets the bench
+  parameters, waits for 60 s of stillness, checks the ToF and climbs. The height stick and the
+  D-pad ↑/↓ move the height setpoint, the turn stick swings the nose and it stops when let go, the
+  surge stick pushes on top of the trim (D-pad ←/→), and *Land*, X, Y or L brings the blimp down
+  and stops the motors. Every end but two is a landing: Land, the ToF high or silent, a frozen
+  window, a lost pad, a link back after more than 3 s. STOP and the spin and tilt kills coast the
+  motors in the air. It starts from the floor only, and Land is greyed out in manual, because a
+  hold cannot start in the air.
 - **Bench** (the third tab under the header): the blimp's capture. Set a length (the box is
   bounded by the blimp's own buffer, 400 s by default, once the page has asked it) and press
   *Start*; the blimp records one 72-byte record per 20 ms of its control loop into PSRAM (IMU,
@@ -265,6 +276,7 @@ throwaway settings file, so it never changes the remembered window.
 | `station.py` | the back end in the GUI process: bridges, camera, Wi-Fi and console as Qt signals |
 | `panels.py` | the Motors, Camera and Sensors panels and the Console/Events dock |
 | `control.py` | the Control page: input modes, arming, the stick-to-motor mix, the keys, the pad's buttons |
+| `assist.py` | the assisted flight: the sticks as `hold` setpoints over the console, the take-off checks, the guards and the landing, on a thread of its own (`docs/assisted-control.md`) |
 | `gamepad.py` | the gamepad reader: XInput on Windows, the kernel's event devices on Linux and the Steam Deck; `python gamepad.py` prints what it sees |
 | `bench.py` | the Bench page: the capture panel and the trace viewer |
 | `screens.py` | renders every page to PNG offscreen, PC and Steam Deck sets, for a look without hardware |
@@ -273,7 +285,7 @@ throwaway settings file, so it never changes the remembered window.
 | `theme.py` | the palette's tokens, fonts and the Qt style sheet; new UI keeps to these |
 | `fonts/` | Titillium Web and IBM Plex Mono with their OFL licences |
 | `blimp_bridge.py` | `blimp_link.BlimpLink` and `BlimpConsole`; owns the standing motor command: a change at once, the 20 Hz repeat, the 3 s watchdog on the GUI thread, the Wi-Fi drop and reboot rules, race mode (`docs/link-robustness-review.md`); `DemoBlimp` runs `mock_blimp.py` in-process |
-| `tests/` | offscreen tests against the in-process mock: the bridge's rules, the window with its GUI thread blocked, the Control page; `python tools/verify.py --gui` runs them (about 1 min) |
+| `tests/` | offscreen tests against the in-process mock: the bridge's rules, the window with its GUI thread blocked, the Control page, the assisted flight; `python tools/verify.py --gui` runs them (about 5 min) |
 | `camera.py` | `LinkCamera`, fed by the station with each decoded `CAMERA` packet (rows and the S3's counters; in `--demo` it also paints a frame); `paint_demo_frame` |
 | `wifi.py` | joins the blimp's access point: `netsh wlan` on Windows, `nmcli` on Linux; `python wifi.py status` from the command line |
 

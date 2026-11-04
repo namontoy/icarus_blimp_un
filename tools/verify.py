@@ -4,7 +4,7 @@
     python tools/verify.py              fast suite   (~15 s)  run this often
     python tools/verify.py --full       full suite   (~2 min) run before flying
     python tools/verify.py --firmware   also build the ESP32-S3 firmware
-    python tools/verify.py --gui        also the ground station's offscreen tests (~1 min)
+    python tools/verify.py --gui        also the ground station's offscreen tests (~5 min)
     python tools/verify.py --all        everything
 
 Exit code 0 means every check passed. Non-zero means at least one failed, and
@@ -188,6 +188,7 @@ def main(argv: list[str] | None = None) -> int:
         for label, script in (("the bridge's motor rules", "test_bridge.py"),
                               ("the window, GUI thread blocked", "test_window.py"),
                               ("the Control page", "test_control.py"),
+                              ("the assisted flight", "test_assist.py"),
                               ("the camera link and panel", "test_camera.py")):
             if not gate():
                 break

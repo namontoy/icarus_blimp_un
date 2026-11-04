@@ -38,6 +38,10 @@ motors. What goes to the blimp follows the rules the team settled on
 - stop() may be called from any thread, and is: the window, the Ctrl-C
   handler, and the gamepad reader's thread for B, which latches so a window
   that missed the press cannot drive again before it has disarmed.
+- An assisted flight (assist.py, since 2026-11-04) is the other way to drive:
+  core/'s loops on the blimp hold the motors, so no MOTOR_SET stands, and
+  set_motors is refused while it lasts. stop() ends it first, so nothing it
+  would have sent can follow the STOP.
 
 The thread also measures its own send gaps: a gap of STALL_WARN_S or more
 while a command stands means something held the interpreter (the GIL) and is
@@ -45,10 +49,14 @@ reported, since the blimp coasts at 500 ms. Everything is thread-based, like
 blimp_link itself; the station's Qt signals carry results onto the GUI
 thread. on_event(level, text) may be called from any thread.
 """
+import os
+import tempfile
 import threading
 import time
 
 import blimp_link as bl
+
+from .assist import Assist
 
 WATCHDOG_S = 3.0        # the GUI thread must ping within this while a command stands
 STREAM_HZ = 20.0        # MOTOR_SET rate while a command stands: the repeat is the keep-alive
@@ -82,6 +90,10 @@ class BlimpBridge:
         self.link.on_packet = self._packet
         self.capture = bl.CaptureClient(self.link)     # used from the station's capture thread only
         self.console = bl.BlimpConsole(host, console_port)
+        # Its own socket: the blimp's console runs one line at a time for
+        # whoever sent it, and the window's console must not hold a setpoint up.
+        self.assist = Assist(self.link, bl.BlimpConsole(host, console_port), on_event,
+                             marker=os.path.join(tempfile.gettempdir(), 'icarus-flight-%s-%d' % (host, console_port)))
         self._console_lock = threading.Lock()   # one command at a time on the wire
         self._lock = threading.Lock()           # the command's state, and every motor packet sent
         self._cmd = None                        # the standing command, or None
@@ -108,6 +120,7 @@ class BlimpBridge:
         return self
 
     def close(self):
+        self.assist.close()             # before the link: its last word is 'hold off'
         self._stop.set()
         self._wake.set()
         self._thread.join(timeout=1.0)
@@ -116,12 +129,15 @@ class BlimpBridge:
 
     @property
     def standing(self):
-        return self._cmd is not None
+        """Something on this side is driving the motors."""
+        return self._cmd is not None or self.assist.active
 
     # ----------------------------------------------------------- packets in
 
     def _packet(self, kind, d):
         """The link's receive thread."""
+        if kind == 'sensors':
+            self.assist.on_sensors()
         if kind == 'telemetry':
             fs = d['failsafe']
             if fs != self._last_failsafe and fs == 'TRIPPED':
@@ -131,7 +147,10 @@ class BlimpBridge:
             # from any station, so it only goes back when the blimp restarts. Its
             # t_us cannot tell: a u32 of microseconds wraps every 71.6 minutes.
             rx_ok = d['rx_ok']
+            if self._last_rx_ok is None and not self.race:
+                self.assist.check_leftover()
             if self._last_rx_ok is not None and rx_ok < self._last_rx_ok:
+                self.assist.blimp_restarted()
                 with self._lock:
                     standing = self._cmd is not None
                     if standing:
@@ -163,23 +182,24 @@ class BlimpBridge:
                 'sensors_rx': self.link.sensors_count, 'streaming': self._streaming, 'standing': standing,
                 'tripped': tripped, 'link_lost': lost, 'ramp': ramp, 'race': self.race,
                 'gap_max_s': self.gap_max_s, 'host': self.host, 'tel': self.link.telemetry,
-                'sen': self.link.sensors}
+                'sen': self.link.sensors, 'assist': self.assist.snapshot()}
 
     # ---------------------------------------------------------- setpoints out
 
     def ping(self):
         """The GUI thread is alive: called from the station's tick, every 100 ms."""
         self._ping_at = time.monotonic()
+        self.assist.ping()
 
     def set_motors(self, cmd):
         """cmd: four signed commands in FL, RL, FR, RR order. It stands, and is
         repeated to the blimp, until the next set_motors, stop(), the watchdog
         or a long outage; a change goes out at once. The GUI clamps to its
         limit, this to the driver's range. False, and nothing sent, while
-        latched or in race mode."""
+        latched, in race mode or in an assisted flight."""
         vals = clean_command(cmd)
         with self._lock:
-            if self.race or self._tripped:
+            if self.race or self._tripped or self.assist.active:
                 return False
             changed = vals != self._cmd
             self._cmd = vals
@@ -193,6 +213,7 @@ class BlimpBridge:
         three times (UDP), the first under the lock so nothing the stream had
         read goes out after it. Clears the latch, unless latch: then
         set_motors stays refused until the next plain stop()."""
+        self.assist.abort('info', 'assisted flight stopped: the motors coast where the blimp is')
         # Raised before the lock is asked for: a lock is not a queue, and a
         # stream thread looping on it could take it again first.
         self._stop_pending = True
@@ -208,6 +229,17 @@ class BlimpBridge:
             time.sleep(0.02)
             self._send_stop(brake)
         self.on_event('ok', 'STOP sent: all motors %s' % ('braked' if brake else 'coasting'))
+
+    def takeoff(self, height_m, trim_gf, surge_full_gf):
+        """An assisted flight (assist.py): None when it started, or why not."""
+        with self._lock:
+            if self.race:
+                return 'race mode: no manual control'
+            if self._tripped:
+                return 'a stop is latched: STOP first'
+            if self._cmd is not None:
+                return 'a motor command stands: one source at a time'
+        return self.assist.takeoff(height_m, trim_gf, surge_full_gf)
 
     def _send_stop(self, brake):
         try:

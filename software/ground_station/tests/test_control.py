@@ -1,7 +1,10 @@
 """The Control page offscreen: the pure parts (mix, shaping, keys, the evdev
 parser), the platform's pad reader, then the demo window: keys, arming, a fake
 gamepad, mutual exclusion with the Flight page's motors, STOP, the Steam Deck
-mode and the saved settings."""
+mode and the saved settings, then an assisted flight from the page (test_assist.py
+has the flight's own rules)."""
+import os
+import tempfile
 import time
 
 import harness as H
@@ -12,6 +15,7 @@ from PyQt6.QtGui import QKeyEvent
 from PyQt6.QtWidgets import QApplication
 
 from software.ground_station import app as A
+from software.ground_station import assist as Ax
 from software.ground_station import control as Cm
 from software.ground_station import gamepad as G
 
@@ -277,6 +281,192 @@ settings = QSettings(ini, QSettings.Format.IniFormat)
 settings.sync()
 check(settings.value('control/mode') == 'deck' and settings.value('control/layout') == 'mode1'
       and str(settings.value('control/roll')).lower() == 'true', 'settings: mode, layout and roll saved')
+
+# ------------------------------------------------------- an assisted flight
+check(win.minimumSizeHint().width() - win.header.pills['demo'].sizeHint().width() <= 1280,
+      "deck: the window fits the Deck's 1280 px, the demo's pill aside: %d" % win.minimumSizeHint().width())
+check(not win.header.sub.isVisible(), 'deck: the subtitle gives way')
+c.set_mode('pc')
+spin(0.1)
+check(win.header.sub.isVisible(), 'pc: the subtitle is back')
+c.set_mode('deck')
+c.set_layout('mode2')
+c.set_roll(False)
+fake[0] = pad_on
+spin(0.2)
+ax = station.blimp.assist
+mock = station.blimp.mock
+ax.tuning = Ax.Tuning(climb_rate_mps=0.4, land_rate_mps=0.25, final_rate_mps=0.2)
+ax.marker = os.path.join(tempfile.mkdtemp(prefix='assist-test-'), 'marker')
+
+
+def press(name):
+    fake[0] = dict(pad_on, buttons=dict(pad_on['buttons'], **{name: True}), axes=dict(pad_on['axes']))
+    spin(0.12)
+    fake[0] = pad_on
+    spin(0.1)
+
+
+def stick(**axes):
+    fake[0] = dict(pad_on, axes=dict(pad_on['axes'], **axes), buttons=dict(pad_on['buttons']))
+
+
+def state():
+    return station.blimp.assist.snapshot()['state']
+
+
+def wait_state(want, t):
+    end = time.monotonic() + t
+    while time.monotonic() < end and state() != want:
+        spin(0.02)
+    return state() == want
+
+
+def said(text, level=None):
+    return any(text in e['text'] and (level is None or e['level'] == level) for e in win.dock.events)
+
+
+def on_floor():
+    mock.height_m, mock.vz, mock.still_s = 0.07, 0.0, 60.0
+    spin(0.15)
+
+
+check(not c.assisted and c.kind_b['manual'].isChecked() and c.arm_sw.isVisible() and not c.flight_box.isVisible(),
+      'assisted: manual by default, the page as it was')
+check(not c.land_b.isEnabled() and c.land_note.isVisible(), 'manual: Land greyed out, its note says why')
+press('y')
+check(said('Land is part of an assisted flight', 'warn') and not c.armed, 'manual: Y only says why')
+c.kind_b['assisted'].click()
+spin(0.1)
+check(c.assisted and c.flight_box.isVisible() and c.assist_box.isVisible() and not c.manual_box.isVisible()
+      and not c.land_note.isVisible() and c.takeoff_b.isVisible(), 'assisted: its controls replace the manual ones')
+check(c.pad_l.yn == 'height' and c.pad_l.xn == 'turn' and c.pad_r.yn == 'surge', 'assisted: the pads say what they move')
+check('land' in c.legend_l.text() and 'take off' in c.legend_l.text(), 'assisted: the legend says what the buttons do')
+check(near(c.height_in.value(), 1.0) and near(c.trim_in.value(), -0.6) and near(c.surge_in.value(), 3.0),
+      'assisted: the defaults: 1 m, the trim of the new battery type, the 3 gf push')
+
+# take off from the pad; the height box, the D-pad and the stick move the setpoint
+on_floor()
+stick(ly=0.5)
+spin(0.2)
+press('a')
+check(not c.armed, 'take off: refused with a stick off centre')
+stick()
+spin(0.2)
+press('down')
+check(near(c.height_in.value(), 0.9), 'on the floor: the D-pad steps the height to fly to')
+press('up')
+press('a')
+check(c.armed and state() != 'idle', 'take off: A starts it')
+check(win.header.pills['drive'].value == 'PREPARING', 'drive pill: PREPARING')
+check(wait_state('flying', 6.0), 'take off: flying')
+spin(0.2)
+check(c.state_l.text().startswith('ASSISTED') and win.header.pills['drive'].value == 'ASSIST', 'flying: the state line and the pill')
+end = time.monotonic() + 6.0
+while time.monotonic() < end and abs(mock.height_m - 1.0) > 0.08:
+    spin(0.05)
+check(abs(mock.height_m - 1.0) <= 0.08, 'flying: at the box\'s height: %.2f m' % mock.height_m)
+check('\u2192' in c.height_r.value.text(), 'flying: the readout shows height and setpoint: %s' % ascii(c.height_r.value.text()))
+win.resize(1280, 800)
+spin(0.3)
+c.height_r.set('2.30 \u2192 2.30')
+c.heading_r.set('+179 \u2192 -179')
+spin(0.02)
+for r in (c.height_r, c.heading_r):
+    fits = r.value.fontMetrics().horizontalAdvance(r.value.text()) <= r.value.width()
+    check(fits, "deck: the widest %s fits, or the setpoint would elide: %d px" % (ascii(r.value.text()), r.value.width()))
+c.height_in.setValue(1.3)
+spin(0.3)
+check(near(mock.hold['altitude'], 1.3, 0.001), 'flying: the box moves the setpoint')
+press('up')
+spin(0.3)
+check(near(mock.hold['altitude'], 1.4, 0.001) and near(c.height_in.value(), 1.4, 0.011),
+      'flying: the D-pad steps it, and the box follows: %.2f' % c.height_in.value())
+press('right')
+spin(0.3)
+check(near(mock.hold['surge'], -0.5, 0.001) and near(c.trim_in.value(), -0.5), 'flying: the D-pad nudges the trim')
+press('left')
+stick(ry=1.0)
+spin(0.9)
+check(near(mock.hold['surge'], -0.6 + 3.0, 0.11), 'flying: the right stick pushes: %.2f gf' % mock.hold['surge'])
+stick()
+spin(0.9)
+check(near(mock.hold['surge'], -0.6, 0.06), 'flying: let go, the trim: %.2f gf' % mock.hold['surge'])
+stick(lx=-1.0)
+spin(1.0)
+check(mock.hold['heading'] > 3.0, 'flying: the left stick left turns counter-clockwise: %.1f' % mock.hold['heading'])
+stick()
+spin(0.3)
+
+# while it flies: the Flight page, the console, the Wi-Fi and the kind of flight stay out
+win.motors.enable.click()
+spin(0.1)
+check(not win.motors.enabled and c.armed and state() == 'flying', 'flying: Motors enabled is refused and the flight goes on')
+c.kind_b['manual'].click()
+spin(0.1)
+check(c.assisted and c.kind_b['assisted'].isChecked(), 'flying: no change to manual in the air')
+con = []
+station.con_text.connect(con.append)
+station.console('tof -n 3')
+spin(0.1)
+check(any('only reads go through' in t for t in con), 'flying: a sensor command is refused in the console')
+station.console('hold')
+spin(0.3)
+check(any('mode HOLD' in t for t in con), 'flying: reading the hold goes through')
+station.console('param alt.kp 2')
+spin(0.1)
+check(mock.params['alt.kp'] != 2.0, 'flying: a parameter change is refused')
+station.wifi_action('disconnect')
+spin(0.1)
+check(said('not while a motor command stands'), 'flying: the Wi-Fi button is locked')
+
+# Y lands, and the page comes back by itself
+press('x')
+check(wait_state('landing', 2.0), 'land: X starts the landing, as Y does')
+spin(0.2)
+check(c.state_l.text().startswith('LANDING') and win.header.pills['drive'].value == 'LANDING'
+      and not c.land_b.isEnabled(), 'land: the state line, the pill, the button')
+check(wait_state('idle', 25.0), 'land: down')
+spin(0.3)
+check(said('landed', 'ok') and not c.armed and mock.hold_mode == 'MANUAL', 'land: disarmed, hold off')
+check('ready' in c.state_l.text() and win.header.pills['drive'].value == 'OFF', 'land: ready: %s' % c.state_l.text())
+check(c.height_in.value() > 1.0, 'land: the box keeps the height flown, not the landing: %.2f' % c.height_in.value())
+
+# B coasts in the air, from the pad's own path and the window's
+on_floor()
+press('a')
+check(wait_state('flying', 6.0), 'stop: flying again')
+spin(1.0)
+press('b')
+check(wait_state('idle', 3.0), 'stop: B ends the flight')
+spin(0.2)
+check(not c.armed and mock.hold_mode == 'MANUAL' and not any(mock.motor), 'stop: disarmed, the motors coast')
+
+# a pad that goes away lands, where in manual it stops
+on_floor()
+press('a')
+check(wait_state('flying', 6.0), 'pad gone: flying')
+stick(ly=0.3)
+spin(0.3)
+fake[0] = G.empty_state('xinput', 'no gamepad connected')
+check(wait_state('landing', 2.0) and said('went away in the flight', 'crit'), 'pad gone: it lands')
+check(wait_state('idle', 25.0), 'pad gone: down')
+spin(0.2)
+check(not c.armed and said('landed', 'ok'), 'pad gone: landed')
+
+# the settings, and back to manual
+fake[0] = pad_on
+spin(0.2)
+c.surge_in.setValue(2.0)
+c.trim_in.setValue(-1.0)
+settings = QSettings(ini, QSettings.Format.IniFormat)
+settings.sync()
+check(str(settings.value('control/assisted')).lower() == 'true' and float(settings.value('control/trim')) == -1.0
+      and float(settings.value('control/surge')) == 2.0 and settings.value('control/height') is not None,
+      'settings: the kind of flight, the trim, the surge and the height saved')
+c.kind_b['manual'].click()
+spin(0.1)
+check(not c.assisted and c.manual_box.isVisible() and c.pad_l.yn == 'heave', 'manual again: the page as it was')
 
 win.close()
 spin(0.2)

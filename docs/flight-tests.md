@@ -32,6 +32,12 @@ track over the floor: the first measurement of where the blimp went, against the
 F0 (motors off, with C0) calibrates the camera in this room first. The two cameras have not yet
 run on the S3 together, and the new board's current on the 5 V rail is not measured.
 
+**2026-11-04: assisted flight from the ground station** (branch `assisted-control`,
+`docs/assisted-control.md`). The Control page's Fly switch: core/'s loops hold the height and the
+heading, the sticks move the setpoints, and Land brings the blimp down. Same `hold`, no flash, not
+yet flown; its runs are A0–A5 there. It sets the bench parameters, the bias workaround and the
+trim itself. Close any script first: one source drives the motors at a time.
+
 This is a living page: after each run, update the status above and the run's line in the
 order below. What each run measured, with captures and numbers, goes in the session record:
 `docs/history/flights-2026-11-01.md` covers 2026-11-01 and 02; start a new dated file for a new
@@ -182,6 +188,7 @@ team's report of where the blimp went (photos against the tape) is the only reco
 | C3 | the course room: balloon 1 alone, `course_test.py --course 2,0` | after C2 |
 | C4 | the course room: both balloons, `course_test.py` | after C3 |
 | C5 | the course room: C4 three times, as the race's three loops | after C4 |
+| A0–A5 | assisted flight from the Steam Deck (`docs/assisted-control.md`) | not flown; needs no flash |
 
 **The walk-in check (motors off).** The background: the darkest plain one available, no window
 or lamp behind the balloon, nothing red, orange or brown in view, light falling on the balloon

@@ -15,7 +15,10 @@ built on it can be exercised on a laptop alone:
 
 It is a model of the link, not of the sensors: the console knows 'help',
 'motor --status', 'motor -s', 'wifi', 'link', 'param' (a subset of the
-table, in the firmware's format) and 'ctl' (an ideal loop's figures), and
+table, in the firmware's format), 'ctl' (an ideal loop's figures) and 'hold'
+(its replies, refusals and KILLED latch as ctl_task.c has them, over a toy
+loop that flies the toy airframe; no 'hold follow', and no measure of how the
+real one flies), and
 answers anything else the way the firmware does ("Unrecognized command"). The capture (LOG_CMD,
 LOG_INFO, LOG_CHUNK) is modelled too: records at 50 Hz from the same toy
 airframe, so 'blimp_link.py capture' and the ground station's Bench page can
@@ -55,6 +58,14 @@ ACC_LSB, GYRO_LSB, MAG_LSB = 16384.0, 131.0, 12000.0
 CAM_W, CAM_H, CAM_FOV_DEG = 160, 120, 54.0
 CAM_PERIOD_S = 0.08
 CAM_IDLE_S = 1.0            # LINK_CAM_IDLE_MS: a health-only packet when no new row went out for this long
+FLOOR_M = 0.07              # the ToF with the gondola standing on the floor (2026-10-31)
+CONVERGE_S = 60.0           # core/'s BLIMP_EST_CONVERGE_S; a boot here starts past it, so a demo flies at once
+CORE_LINK_TIMEOUT_S = 1.0   # params.c's link_timeout_s: core/ zeroes the hold after this much silence
+HOLD_LINK_FRESH_S = 0.5     # ctl_task.c's HOLD_LINK_FRESH_MS
+HOLD_ALT_MIN_M, HOLD_ALT_MAX_M, HOLD_ALT_RATE_MAX = 0.05, 3.0, 0.5
+HOLD_SURGE_MAX_GF = 30.0
+SURGE_FULL_GF = 6.8         # the toy loop: both front motors at the ceiling
+HEAVY_MPS2 = 1.2            # the toy airframe's weight less its buoyancy
 # A subset of the 'param' table (firmware main/param_table.c) with params.c's
 # values of 2026-10-30: the PID gains and the hover feed-forward, enough for
 # the ground station's capture record and its tests. The mock keeps them and
@@ -72,7 +83,27 @@ PARAMS = (      # name, default, accepted min, max, unit
     ('surge.kp', 0.3, 0.0, 10.0, 'N/m'),
     ('surge.ki', 0.0, 0.0, 10.0, 'N/(m s)'),
     ('surge.kd', 0.0, 0.0, 10.0, 'N s/m'),
+    # What software/bench_params.txt sets on top of those, so a flight can start here.
+    ('front_half_span_m', 0.10, 0.01, 0.50, 'm'),
+    ('motor_max_thrust_n', 0.343, 0.002, 0.980665, 'N'),
+    ('heave_budget_n', 0.294, 0.0, 0.588399, 'N'),
+    ('alt.d_lpf_hz', 2.0, 0.0, 25.0, 'Hz'),
+    ('yaw.out_min', -0.0343, -0.5, 0.5, 'N m'),
+    ('yaw.out_max', 0.0343, -0.5, 0.5, 'N m'),
+    ('yaw.d_lpf_hz', 8.0, 0.0, 25.0, 'Hz'),
+    ('gyro_bias_tau_s', 20.0, 0.5, 600.0, 's'),
+    ('front_deadband_n', 0.0049, 0.0, 0.0098, 'N'),
+    ('front_reverse_ratio', 0.0, 0.0, 1.0, '1'),
 )
+
+
+def wrap180(deg):
+    return (deg + 180.0) % 360.0 - 180.0
+
+
+def new_hold():
+    """blimp_hold_t, as the ground commands it."""
+    return {'heading': None, 'altitude': None, 'rate': 0.0, 'surge': 0.0}
 
 
 class MockBlimp:
@@ -115,9 +146,18 @@ class MockBlimp:
         # have a time constant to fit against the mock.
         self.heading = 42.0
         self.yaw_rate = 0.0
-        self.height_m = 1.50
+        self.height_m = FLOOR_M         # on the floor, as a blimp is at power-up
         self.vz = 0.0
         self.last_step = time.monotonic()
+        # The bench hold (ctl_task.c): MANUAL, HOLD or KILLED, the setpoints in
+        # force and core/'s height setpoint as it moves toward them.
+        self.hold_mode = 'MANUAL'
+        self.hold = new_hold()
+        self.alt_sp = None
+        self.heading0 = 0.0
+        self.still_s = CONVERGE_S
+        self.motor_refused = 0          # MOTOR_SET while the loop holds the motors
+        self.tof_blind = False          # tests: the VL53L1X reads nothing
         self.cap = {'state': 0, 'id': 0, 'wanted': 0, 'records': bytearray(), 't_start': 0, 'next_us': None}
         self.lock = threading.Lock()
         self.link = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -157,6 +197,7 @@ class MockBlimp:
         self.last_motor_rx = 0.0
         self.params = {name: default for name, default, *_ in PARAMS}     # RAM only, as on the blimp
         self.param_changes = 0
+        self.hold_mode, self.hold, self.alt_sp, self.still_s = 'MANUAL', new_hold(), None, 0.0
         self.cam_reset(self.t0)
 
     def cam_reset(self, now):
@@ -220,7 +261,9 @@ class MockBlimp:
             pass
         elif ptype == bl.PKT_MOTOR_SET and len(body) == bl._MOTOR_SET.size:
             cmds = bl._MOTOR_SET.unpack(body)
-            if self.motor_stale(seq, addr, now):
+            if self.hold_mode != 'MANUAL':
+                self.motor_refused += 1     # the loop holds the motors: refused, and counted in 'link'
+            elif self.motor_stale(seq, addr, now):
                 self.rx_stale += 1
             elif self.set_all(cmds):
                 self.link_motors = any(cmds)
@@ -228,6 +271,7 @@ class MockBlimp:
             else:
                 self.log('W MOTOR_SET rejected: ESP_ERR_INVALID_ARG')
         elif ptype == bl.PKT_MOTOR_STOP and len(body) == bl._MOTOR_STOP.size:
+            self.stop_hook()
             self.coast()
             self.link_motors = False
             if not self.motor_stale(seq, addr, now):
@@ -274,14 +318,66 @@ class MockBlimp:
         """Advance the toy airframe to now."""
         dt = min(0.2, now - self.last_step)
         self.last_step = now
+        if self.hold_mode == 'HOLD':
+            self.hold_tick(now, dt)
+        self.still_s = 0.0 if any(self.motor) else self.still_s + dt
         fl, rl, fr, rr = self.motor
         # 25 deg/s per unit of asymmetry at steady state, reached with a 0.3 s lag
         self.yaw_rate += (25.0 * (fl - fr) - self.yaw_rate) * (1.0 - math.exp(-dt / 0.3))
         self.heading = (self.heading + self.yaw_rate * dt) % 360.0
-        lift = 0.8 * (rl + rr) - 0.05                            # m/s^2, slightly heavy at rest
+        # m/s^2. Heavy enough to come down when the rear pair lets go, about
+        # 0.3 m/s (the rear pair pushes up only, so a landing is the weight's):
+        # hover is 0.375 of the command, and full is about 0.5 m/s of climb.
+        lift = 1.6 * (rl + rr) - HEAVY_MPS2
         self.vz += lift * dt
-        self.vz *= 0.96                                          # drag
-        self.height_m = max(0.05, min(3.0, self.height_m + self.vz * dt))
+        self.vz *= math.exp(-dt / 0.25)                          # drag
+        self.height_m = max(FLOOR_M, min(3.0, self.height_m + self.vz * dt))
+        if self.height_m <= FLOOR_M:
+            self.vz = max(0.0, self.vz)     # the floor holds it up
+
+    def stop_hook(self):
+        """cmd_motor.h's stop hook: any stop while the loop holds the motors
+        latches KILLED until 'hold off'."""
+        if self.hold_mode == 'HOLD':
+            self.hold_mode = 'KILLED'
+
+    def yaw_est(self):
+        """core/'s heading: counter-clockwise positive from the nose at arming;
+        the toy's is a compass."""
+        return wrap180(self.heading0 - self.heading)
+
+    def hold_tick(self, now, dt):
+        """A toy of blimp_step() in the hold, to give the toy airframe something
+        to fly: a height ramp as core/ makes it (blimp.c, hold_wrench()), a PD on
+        each axis, and core/'s link watchdog. Tuned to the toy, so it says
+        nothing of how the real loops fly."""
+        if now - self.last_rx > CORE_LINK_TIMEOUT_S:
+            self.alt_sp = None              # reset_control_loops(): a ramp starts again from where it is
+            self.set_all([0.0] * 4)
+            return
+        h = self.hold
+        rear = 0.0
+        if h['altitude'] is not None and not self.tof_blind:
+            sp_rate = 0.0
+            if h['rate'] <= 0.0:
+                self.alt_sp = h['altitude']
+            else:
+                if self.alt_sp is None:
+                    self.alt_sp = self.height_m
+                gap, step = h['altitude'] - self.alt_sp, h['rate'] * dt
+                if abs(gap) <= step:
+                    self.alt_sp = h['altitude']
+                else:
+                    sp_rate = math.copysign(h['rate'], gap)
+                    self.alt_sp += math.copysign(step, gap)
+            hover = HEAVY_MPS2 / 3.2
+            rear = max(0.0, min(1.0, hover + 1.5 * (self.alt_sp - self.height_m) + 0.8 * (sp_rate - self.vz)))
+        turn = 0.0
+        if h['heading'] is not None:
+            # + is counter-clockwise, so the right-hand motor harder: FR, in the toy's names
+            turn = max(-1.0, min(1.0, 0.1 * wrap180(h['heading'] - self.yaw_est())))
+        surge = max(-1.0, min(1.0, h['surge'] / SURGE_FULL_GF))
+        self.set_all([surge - turn / 2, rear, surge + turn / 2, rear])
 
     def model(self, now):
         """What the sensors see, in units."""
@@ -297,7 +393,7 @@ class MockBlimp:
                 'mag': (0.24 * math.cos(h), -0.24 * math.sin(h), 0.31),
                 'pressure': 75000.0 - 12.0 * self.height_m + 2.0 * rnd(7), 'temp': 22.4,
                 'imu_temp': 31.5 + rnd(9), 'tof_mm': max(0, tof_mm),
-                'tof_status': 0 if self.height_m < 2.4 else 2,      # "signal fail" out of reach
+                'tof_status': 0 if self.height_m < 2.4 and not self.tof_blind else 2,   # "signal fail" out of reach
                 'bat_v': 3.95 + 0.02 * rnd(10)}
 
     def sensors(self, now):
@@ -526,6 +622,8 @@ class MockBlimp:
                     'param [name|prefix [value]] | --reset [name]\n  The controller\'s parameters, live in RAM\n')
         if line.split()[:1] == ['param']:
             return self.param_command(line.split()[1:])
+        if line.split()[:1] == ['hold']:
+            return self.hold_command(line.split()[1:], time.monotonic())
         if line == 'ctl':
             # ctl_task.c's answer, for an ideal loop: the mock has no task to time.
             return ('control task on core 1, priority 20, period 20000 us, task dispatch, %d ticks since boot\n'
@@ -562,6 +660,7 @@ class MockBlimp:
         if line in ('motor', 'motor --status'):
             return self.motor_table(fs)
         if line in ('motor -s', 'motor --stop'):
+            self.stop_hook()
             self.coast()
             self.link_motors = False
             return 'all motors coasting\n'
@@ -578,6 +677,90 @@ class MockBlimp:
                 time.sleep(0.3)
             return ''.join(out)
         return 'Unrecognized command\n'
+
+    def hold_status(self, now):
+        """print_hold() in ctl_task.c, the lines a ground tool reads."""
+        h = self.hold
+        mode = {'MANUAL': 'mode MANUAL', 'HOLD': 'mode HOLD, armed',
+                'KILLED': "mode KILLED: a stop arrived; 'hold off' gives the motors back"}[self.hold_mode]
+        heading = ('; held at %+.1f deg, error %+.1f deg' % (h['heading'], wrap180(h['heading'] - self.yaw_est()))
+                   if h['heading'] is not None else '; not held')
+        altitude = '; not held'
+        if h['altitude'] is not None:
+            altitude = '; held at %.2f m' % h['altitude']
+            if h['rate'] > 0.0 and self.alt_sp is not None:
+                altitude += ', moving at %.2f m/s, now at %.2f m' % (h['rate'], self.alt_sp)
+        fl, rl, fr, rr = self.motor
+        return ('%s\nestimator: %s (still %.0f of 60 s)\n'
+                'heading: estimate %+.1f deg (0 = the nose at arming), rate %+.1f deg/s%s\n'
+                "camera: no target ('cam' for the link)\n"
+                'altitude: estimate %.2f m (%s)%s\nsurge: %.1f gf\n'
+                'output: fx 0.00 gf  fz 0.00 gf  tz 0.000 mN m;  throttle FL %.3f RL %.3f FR %.3f RR %.3f\n'
+                "ground link: last packet %d ms ago; core/ zeroes the hold after %.1f s of silence\n"
+                % (mode, 'converged' if self.still_s >= CONVERGE_S else 'converging', self.still_s,
+                   self.yaw_est(), -self.yaw_rate, heading, self.height_m, 'no source' if self.tof_blind else 'ToF',
+                   altitude, h['surge'], fl, rl, fr, rr, int((now - self.last_rx) * 1000), CORE_LINK_TIMEOUT_S))
+
+    def hold_command(self, args, now):
+        """do_hold_cmd() in ctl_task.c, without 'hold follow'."""
+        if not args:
+            return self.hold_status(now)
+        what = args[0]
+        if what == 'off' and len(args) == 1:
+            self.hold_mode, self.hold, self.alt_sp = 'MANUAL', new_hold(), None
+            self.coast()
+            return 'hold off: the motors coast and go back to the link and the console\n'
+        if what == 'kill' and len(args) == 1:
+            self.stop_hook()
+            self.coast()
+            return "all motors coasting; the hold is KILLED until 'hold off'\n"
+        if what not in ('heading', 'altitude', 'surge') or len(args) not in ((2, 3) if what == 'altitude' else (2,)):
+            return "hold: the mock knows 'hold', 'hold off', 'hold kill', and heading, altitude and surge\n"
+        rate = 0.0
+        if len(args) == 3:
+            try:
+                rate = float(args[2])
+            except ValueError:
+                return "'%s' is not a number\n" % args[2]
+            if not 0.0 <= rate <= HOLD_ALT_RATE_MAX:
+                return 'refused: a height rate of %.2f m/s is outside 0..%.1f m/s\n' % (rate, HOLD_ALT_RATE_MAX)
+        off = args[1] == 'off'
+        v = 0.0
+        if not off:
+            try:
+                v = float(args[1])
+            except ValueError:
+                return "'%s' is not a number\n" % args[1]
+        if self.hold_mode == 'KILLED':
+            return "refused: KILLED by a stop; 'hold off' first, then start again\n"
+        req = dict(self.hold)
+        if what == 'heading':
+            req['heading'] = None if off else v
+        elif what == 'altitude':
+            if not off and not HOLD_ALT_MIN_M <= v <= HOLD_ALT_MAX_M:
+                return 'refused: altitude %.2f m is outside %.2f..%.1f m\n' % (v, HOLD_ALT_MIN_M, HOLD_ALT_MAX_M)
+            req['altitude'], req['rate'] = (None, 0.0) if off else (v, rate)
+        else:
+            if not off and abs(v) > HOLD_SURGE_MAX_GF:
+                return 'refused: surge %.1f gf is outside -%.0f..%.0f gf\n' % (v, HOLD_SURGE_MAX_GF, HOLD_SURGE_MAX_GF)
+            req['surge'] = 0.0 if off else v
+        start = self.hold_mode == 'MANUAL' and not off
+        out = ''
+        if start:
+            if self.still_s < CONVERGE_S:
+                return 'refused: the estimator needs the gondola still for 60 s before it arms (%.0f s so far)\n' \
+                       % self.still_s
+            if any(self.motor):
+                return 'refused: motor FL is driven (%+.3f); stop it first\n' % self.motor[0]
+            if now - self.last_rx > HOLD_LINK_FRESH_S:
+                return 'refused: no packet from the ground in the last 500 ms; the hold runs only while a ground ' \
+                       'tool keeps the link alive\n'
+            self.heading0 = self.heading    # blimp_estimator_zero() at arming
+            self.hold_mode, self.alt_sp = 'HOLD', None
+            out = 'hold starting: armed at the next tick, heading 0 = where the nose points now\n'
+        self.hold = req
+        return out + 'held: heading %s, altitude %s, surge %.1f gf, follow off\n' % (
+            'off' if req['heading'] is None else 'on', 'off' if req['altitude'] is None else 'on', req['surge'])
 
     def param_command(self, args):
         """'param' as main/cmd_param.c answers it, over PARAMS only."""
@@ -611,7 +794,14 @@ class MockBlimp:
                 return '%s is already %g %s; nothing changed\n' % (name, value, unit)
             self.params[name] = value
             self.param_changes += 1
-            return '%s = %g %s (was %g); %d changes since boot\n' % (name, value, unit, was, self.param_changes)
+            out = '%s = %g %s (was %g); %d changes since boot\n' % (name, value, unit, was, self.param_changes)
+            # The one rule of blimp_params_validate() that two of these fields
+            # share: the hover feed-forward never exceeds the heave budget.
+            hover, budget = self.params['hover_thrust_n'], self.params['heave_budget_n']
+            if hover > budget:
+                self.params['hover_thrust_n'] = budget
+                out += '  also clamped by blimp_params_validate(): hover_thrust_n %g -> %g N\n' % (hover, budget)
+            return out
 
         if not args:
             return listing('')
@@ -639,7 +829,7 @@ class MockBlimp:
             except ConnectionResetError:
                 continue            # Windows, see link_loop
             line = data.decode('utf-8', 'replace').strip()
-            if not line:
+            if not line or not self.radio_on:
                 continue
             self.con_peer = addr
             self.log('console: %s' % line)
