@@ -1,10 +1,10 @@
 {
- "name": "race 2026-11-05: four balloons on a 2 m x 3 m rectangle, centres 1.2 m up (the start and the order to confirm)",
+ "name": "race 2026-11-05: four balloons on a 2 m x 3 m rectangle, centres 1.2 m up, 1 -> 2 along a 3 m side, left turns",
  "field": {
   "ahead_m": 6.0,
   "behind_m": 1.0,
-  "left_m": 2.0,
-  "right_m": 4.0
+  "left_m": 4.0,
+  "right_m": 2.0
  },
  "balloons": [
   {
@@ -19,12 +19,12 @@
   },
   {
    "x_m": 4.5,
-   "y_m": -2.0,
+   "y_m": 2.0,
    "height_m": 1.2
   },
   {
    "x_m": 1.5,
-   "y_m": -2.0,
+   "y_m": 2.0,
    "height_m": 1.2
   }
  ],
@@ -32,5 +32,5 @@
  "close_px": 1500,
  "loops": 1,
  "time_limit_s": 300,
- "notes": "x ahead of the start along the nose, y to its left, in metres; the start is where the gondola stands, nose toward balloon 1. The rectangle's 3 m sides run along x, the 2 m sides across; balloon 1 is 1.5 m ahead of the start, the order goes along the long side first and comes back on the right. Measure the start's place against balloon 1, each balloon's centre height, and swap the order if the race says otherwise."
+ "notes": "The team's drawing of 2026-11-05: 1 at a corner, 2 at the end of its 3 m side, 3 across the 2 m side to the left, 4 back along the other 3 m side. The start is 1.5 m behind balloon 1 on the line from 2 through 1, nose toward 1 and 2 (change balloon 1's ahead if the blimp starts elsewhere; the other three follow at +3.0, +2.0 left). x ahead of the start along the nose, y to its left, in metres."
 }
