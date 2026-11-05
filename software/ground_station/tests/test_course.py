@@ -196,7 +196,8 @@ def landed():
     return idle() and said('landed', 'ok') and mock.height_m < 0.12 and not any(mock.motor)
 
 
-one = rc.normalise(dict(sheet, balloons=[{'x_m': 2.0, 'y_m': 0.0, 'height_m': 1.2}]))
+# no time limit: a landing is the end (a relaunch needs the race's clock)
+one = rc.normalise(dict(sheet, balloons=[{'x_m': 2.0, 'y_m': 0.0, 'height_m': 1.2}], time_limit_s=0))
 
 # found, followed, never close (the blimp does not move): the pulses run out and it lands
 fly(one)
@@ -240,6 +241,17 @@ check(wait_for(lambda: said('pulse 1 toward balloon 1'), 8.0), 'stop: in the fir
 b.stop(False)
 check(idle(5.0) and said('the flight stopped', 'info'), 'stop: the flight ends at once')
 check(mock.hold_mode == 'MANUAL' and not any(mock.motor), 'stop: hold off sent, motors coasting')
+
+# landed with time left (the pulses ran out): the course launches again for the
+# same balloon, from the floor, until the race's time limit lands it for good
+short = rc.normalise(dict(one, time_limit_s=45))
+fly(short)
+check(wait_for(lambda: said('launching again for balloon 1', 'warn'), 40.0), 'relaunch: after the landing, again')
+check(wait_for(lambda: state() == 'flying', 15.0), 'relaunch: flying again')
+check(wait_for(lambda: said('the time limit'), 50.0), 'relaunch: the time limit ends it')
+check(landed(), 'relaunch: landed at the end')
+check(not said('launching again for balloon 1', None) or sum(1 for _, t in events if 'launching again' in t) <= 2,
+      'relaunch: a bounded number of launches (%d)' % sum(1 for _, t in events if 'launching again' in t))
 
 # no camera rows: refused before the minute of stillness
 mock.camera = 'silent'

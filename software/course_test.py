@@ -297,6 +297,7 @@ class Flight:
         self.s3_follow = False                    # 'hold follow' is on
         self.touched = None                       # (last bearing deg, close px) of the balloon just touched
         self.blind = 0                            # blind pulses left for this balloon
+        self.k = 0                                # the balloon being flown to (0-based)
         self.close_px = 0
         self.ran = 0.0          # s the last phase ran
         self.phases = []        # (t0, t1, label, kind, heading, surge) as flown, for square_test's metrics
@@ -419,16 +420,20 @@ class Flight:
                             surge + self.args.trim))
         return stop
 
-    def find(self, k, expect, again=False):
+    def find(self, k, expect, again=False, fresh=False):
         """Look for balloon k+1 around `expect` deg until it is seen and the
         nose follows it: None, or a stop. The first during the climb; the
-        others (and a second look, `again`) after turning to `expect`."""
+        others (and a second look, `again`) after turning to `expect`. fresh:
+        from the floor again after a landing (restart()), the nose pointing
+        wherever it landed: the look is the climb's, all around (a window and
+        a scan of 90 deg)."""
         a = self.args
         n = k + 1
-        self.track = Track(self.link, a.seen[1], self.heading, expect, a.window, touched=self.touched)
+        self.track = Track(self.link, a.seen[1], self.heading, expect, max(a.window, 90.0) if fresh else a.window,
+                           touched=self.touched)
         self.following = False
         t0 = self.clock()
-        climbing = k == 0 and not again
+        climbing = (k == 0 or fresh) and not again
         moving = self.alt_prev is not None      # the hold is on its way to this balloon's height
         if climbing:
             self.log('%6.1f s  -- the climb to %.2f m, looking for balloon 1 at %+.0f deg' % (t0, self.alt, expect))
@@ -441,7 +446,7 @@ class Flight:
             give_up = t0 + a.turn_time
             if moving:      # the height move too, before the look: the camera's view is 22.5 deg tall
                 give_up += abs(self.alt - self.alt_prev) / a.climb_rate
-        scan = [expect + o for o in tt.scan_headings(a.scan, a.scan_step)]
+        scan = [expect + o for o in tt.scan_headings(max(a.scan, 90.0) if fresh else a.scan, a.scan_step)]
         t_ready, scan_k, t_next = None, -1, None
         while True:
             stop = self.tick()
@@ -628,15 +633,23 @@ class Flight:
         self.send('hold surge %g' % a.trim)
         self.send('hold altitude %.2f %.3f' % (self.alt, a.climb_rate))
 
-    def run_legs(self):
-        """The balloons in order, from the climb to the last move away: None
-        when the course is done, or the stop that ended it (('land', why),
-        ('kill', why)). The hold is on and the climb commanded (start(), or
-        the ground station's own preparation, assist.py)."""
+    def run_legs(self, start=0, fresh=False):
+        """The balloons in order from balloon start+1, from the climb to the
+        last move away: None when the course is done, or the stop that ended
+        it (('land', why), ('kill', why)). The hold is on and the climb
+        commanded (start(), or the ground station's own preparation,
+        assist.py). fresh: after a landing, from the floor again
+        (restart()): the first balloon is looked for all around during the
+        climb, since nothing says where the nose points now."""
         a = self.args
         stop = None
         for k, (expect, _, _) in enumerate(self.legs):
-            if k > 0:
+            if k < start:
+                continue
+            self.k = k
+            if k == start and fresh:
+                expect = 0.0
+            elif k > 0:
                 self.touched = (self.track.expect, self.close_px)     # balloon k's own close size
                 planned, expect = expect, bearing_after(a.course, k, self.track.expect, a.standoff)
                 self.log('%6.1f s  balloon %d was last seen at %+.0f deg: balloon %d should be at %+.0f deg '
@@ -646,7 +659,7 @@ class Flight:
                     break
             self.close_px = close_px(a, k)
             self.blind = blind_pulses(a, self.legs[k][1])
-            stop = self.find(k, expect)
+            stop = self.find(k, expect, fresh=k == start and fresh)
             if not stop:
                 stop = self.phase('balloon %d: settle, following' % (k + 1), 'follow', a.settle, 0.0)
             if not stop:
@@ -656,6 +669,23 @@ class Flight:
             if stop:
                 break
         return stop
+
+    def restart(self, k):
+        """From the floor again, for balloon k+1 (0-based k): what a landing
+        and a new hold leave unknown (the nose's direction, the last
+        balloon's bearing) is forgotten, the rest kept. The caller has the
+        hold on and the climb to self.alt commanded; run_legs(k, fresh=True)
+        then flies on. The clock is not touched: it is the race's."""
+        a = self.args
+        self.k = k
+        self.track = None
+        self.following = self.at_height = self.s3_follow = False
+        self.touched = None
+        self.alt, self.alt_prev = self.alts[k], None
+        self.climb_s = max(0.0, self.alt - ht.LAND_FLOOR_M) / a.climb_rate
+        self.blind = 0
+        self.heading.reset()
+        self.tof_t = time.monotonic()
 
     def fly(self):
         try:
@@ -1218,6 +1248,26 @@ def selftest():
         f, w, lines = fly([(2.0, 0.0), (2.0, -3.0)], ['--course', '2,0', '2,-3', '--blind', '0'])
         check('the same without blind pulses: balloon 1, then a landing',
               [n for n, _ in f.closes] == [1] and f.landed and 'balloon 2 was not seen' in f.end, lines)
+
+        # From the floor again after a landing: balloon 2 alone, found in the
+        # climb's look all around, the touch, the landing.
+        args = parser().parse_args(['--close-px', '5000', '--trim', '-0.6', '--course', '2,0', '1.5,-1.5'])
+        resolve(args)
+        # The stand-in's 'hold heading 0' is an absolute 0, so the landing is
+        # modelled by where the balloons stand: 1 behind on the left, out of
+        # the camera's view, 2 ahead.
+        clock.w = w = _World([(-1.0, 1.5), (2.0, 0.0)])
+        lines = []
+        f = Flight(w, _Console(w), args, legs(args.course, args.standoff), lines.append)
+        f.start()
+        f.restart(1)
+        stop = f.run_legs(start=1, fresh=True)
+        f.end = stop[1] if stop else 'the course is done'
+        f.killed = f.landing(f.end)
+        f.landed = not f.killed
+        check('a restart at balloon 2 from the floor: found all around, touched, landed',
+              [n for n, _ in f.closes] == [2] and order(w) == [1] and f.landed and f.end == 'the course is done',
+              lines)
 
         f, w, lines = fly(COURSE_ROOM, ['--time-limit', '60'])
         check('a 60 s time limit: the landing starts in time, said why',

@@ -320,7 +320,13 @@ class MockBlimp:
         self.last_step = now
         if self.hold_mode == 'HOLD':
             self.hold_tick(now, dt)
-        self.still_s = 0.0 if any(self.motor) else self.still_s + dt
+        # core/'s dwell, with its latch of 2026-11-05: motion (here, any motor
+        # running) restarts the count unless it had reached CONVERGE_S, which
+        # stays reached, so a hold can start again right after a landing.
+        if any(self.motor):
+            self.still_s = CONVERGE_S if self.still_s >= CONVERGE_S else 0.0
+        else:
+            self.still_s += dt
         fl, rl, fr, rr = self.motor
         # 25 deg/s per unit of asymmetry at steady state, reached with a 0.3 s lag
         self.yaw_rate += (25.0 * (fl - fr) - self.yaw_rate) * (1.0 - math.exp(-dt / 0.3))

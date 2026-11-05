@@ -81,6 +81,7 @@ import time
 import course_test as ct
 import hold_test as ht
 import race_course as rc
+import target_test as tt
 
 HEIGHT_MIN_M = ht.LAND_SLOW_M   # below this the way down is Land, which knows about the floor
 HEIGHT_MAX_M = 2.30             # flight-tests.md: the VL53L1X loses the floor beyond about 2.5 m
@@ -495,8 +496,10 @@ class Assist:
         level, text = 'crit', self._name + ' ended'
         try:
             self._prepare()
-            why = self._fly_course() if self._course is not None else self._fly()
-            level, text = self._land(why)
+            if self._course is not None:
+                level, text = self._run_course()
+            else:
+                level, text = self._land(self._fly())
         except _End as e:
             level, text = e.level, e.text
         except Exception as e:          # a bug here must not leave a hold running with nobody on it
@@ -750,18 +753,65 @@ class Assist:
 
     # ------------------------------------------------------------ the course
 
-    def _fly_course(self):
-        """The race sheet's balloons in order, course_test.py's sequence on
-        this flight's checks (CourseFlight), from the climb to the last move
-        away: why to land. A line the blimp refused or never answered lands
-        it too; a STOP or a kill ends it through _check(), as in _fly()."""
+    RELAUNCH_NOT = ('the operator asked', 'the time limit', 'the window stopped responding', 'the link was gone',
+                    'the course is done')
+    RELAUNCH_PREP_S = 10.0          # the preparation between launches, with room
+
+    def _run_course(self):
+        """The course, and after a landing that was nobody's choice (a balloon
+        not found, a guard) the course again from the floor for the balloon
+        it was on, while the race's time allows another climb, look and
+        landing: the race lets the blimp land and launch again inside its
+        5 min (the team, 2026-11-05). The race clock runs from the first
+        hold's start, and the preparation between launches is the first one
+        again, which takes seconds now that core/'s convergence latches."""
         plan = self._course
         f = CourseFlight(self, plan)
-        self._set('flying', 'the climb to %.2f m, looking for balloon 1' % plan.alts[0])
         f.t_hold = time.monotonic()
-        self._tof_at = f.t_hold
+        start, fresh = 0, False
+        while True:
+            why = self._fly_course(f, start, fresh)
+            level, text = self._land(why)
+            start = len(f.closes)       # the balloons gone in to; the next is the one to fly to
+            left = plan.args.time_limit - f.clock() if plan.args.time_limit else float('inf')
+            if not self._relaunch_ok(f, why, level, start, left):
+                return level, text
+            self.on_event('warn', 'landed (%s) with %.0f s of the race left: launching again for balloon %d'
+                                  % (why, left, start + 1))
+            self._set('preparing', 'launching again for balloon %d' % (start + 1))
+            self._off()                 # the landing's hold still holds the floor: the motors off first
+            self._nap(0.5)
+            with self._lock:
+                self._height = clamp(plan.alts[start], HEIGHT_MIN_M, HEIGHT_MAX_M)
+            self._prepare()
+            f.restart(start)
+            fresh = True
+
+    def _relaunch_ok(self, f, why, level, start, left):
+        """Another launch: balloons left, the landing reached the floor, the
+        end was not the operator's, the time's or the ground's, and the race
+        has time for a climb, a look and a landing."""
+        if start >= len(f.legs) or level != 'ok' or any(s in why for s in self.RELAUNCH_NOT):
+            return False
+        t, a = self.tuning, f.args
+        if not a.time_limit:            # no clock, no end: a landing is the end
+            return False
+        alt = f.alts[start]
+        need = (ht.landing_time(alt + tt.HIGH_M, t.land_rate_mps, t.final_rate_mps)
+                + max(0.0, alt - ht.LAND_FLOOR_M) / t.climb_rate_mps + a.look + self.RELAUNCH_PREP_S)
+        return left >= need
+
+    def _fly_course(self, f, start=0, fresh=False):
+        """The race sheet's balloons in order from balloon start+1,
+        course_test.py's sequence on this flight's checks (CourseFlight),
+        from the climb to the last move away: why to land. A line the blimp
+        refused or never answered lands it too; a STOP or a kill ends it
+        through _check(), as in _fly(). fresh: from the floor again."""
+        self._set('flying', 'the climb to %.2f m, looking for balloon %d%s'
+                  % (f.alt, start + 1, ' all around' if fresh else ''))
+        self._tof_at = time.monotonic()
         try:
-            stop = f.run_legs()
+            stop = f.run_legs(start, fresh)
         except RuntimeError as e:
             self._check()
             stop = ('land', str(e))
