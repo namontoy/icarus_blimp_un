@@ -1,30 +1,30 @@
 {
- "name": "race 2026-11-05: four balloons on a 2 m x 3 m rectangle, centres 1.2 m up, 1 -> 2 along a 3 m side, left turns",
+ "name": "race 2026-11-05: four balloons on a 2 m x 3 m rectangle, centres 1.2 m up, the start at the centre, nose toward 1",
  "field": {
-  "ahead_m": 6.0,
-  "behind_m": 1.0,
-  "left_m": 4.0,
-  "right_m": 2.0
+  "ahead_m": 3.0,
+  "behind_m": 3.0,
+  "left_m": 3.0,
+  "right_m": 3.0
  },
  "balloons": [
   {
-   "x_m": 1.5,
+   "x_m": 1.8,
    "y_m": 0.0,
    "height_m": 1.2
   },
   {
-   "x_m": 4.5,
+   "x_m": -0.69,
+   "y_m": 1.66,
+   "height_m": 1.2
+  },
+  {
+   "x_m": -1.8,
    "y_m": 0.0,
    "height_m": 1.2
   },
   {
-   "x_m": 4.5,
-   "y_m": 2.0,
-   "height_m": 1.2
-  },
-  {
-   "x_m": 1.5,
-   "y_m": 2.0,
+   "x_m": 0.69,
+   "y_m": -1.66,
    "height_m": 1.2
   }
  ],
@@ -32,5 +32,5 @@
  "close_px": 1500,
  "loops": 1,
  "time_limit_s": 300,
- "notes": "The team's drawing of 2026-11-05: 1 at a corner, 2 at the end of its 3 m side, 3 across the 2 m side to the left, 4 back along the other 3 m side. The start is 1.5 m behind balloon 1 on the line from 2 through 1, nose toward 1 and 2 (change balloon 1's ahead if the blimp starts elsewhere; the other three follow at +3.0, +2.0 left). x ahead of the start along the nose, y to its left, in metres."
+ "notes": "The team's drawing of 2026-11-05: the blimp starts at the centre of the 3 m x 2 m rectangle with its nose toward balloon 1 (a corner, 1.80 m away); 2 is at the end of 1's 3 m side, 3 across the 2 m side, 4 back along the other 3 m side. From the centre each corner is 1.80 m away: 1 ahead, 2 behind-left, 3 straight behind, 4 behind-right. x ahead of the start along the nose, y to its left, in metres."
 }
