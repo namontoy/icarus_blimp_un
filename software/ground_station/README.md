@@ -202,7 +202,7 @@ throwaway settings file, so it never changes the remembered window.
   Rotate 180° (display only) is kept for the occasional calibration frame the S3 may relay later
   (`docs/inter-board-link-plan.md`); the link carries no frames, so the two buttons work in
   `--demo` only, where a painted frame stands in. Built 2026-11-01; not yet run against the blimp.
-- **Control** (the second tab under the header): fly by hand, or assisted (below). Pick the input, *PC* (the
+- **Control** (the second tab under the header): fly by hand, assisted, or the course (both below). Pick the input, *PC* (the
   keyboard, plus a gamepad if one is plugged in) or *Steam Deck* (the Deck's own controls; the
   page's notes are behind its info icons, on the Deck's 1280 × 800 too), and the stick layout
   (mode 2: left stick heave and yaw, right stick surge; mode 1 swaps surge and heave). Switch *Manual control* on, or press A
@@ -224,11 +224,9 @@ throwaway settings file, so it never changes the remembered window.
   disappears while driving, and the bridge's 3 s watchdog runs underneath. B latches the bridge
   from the pad's thread, so a frozen window cannot drive again when it thaws. Leaving the page
   does not disarm: the pad keeps driving while another page is in view, and the Drive pill says
-  so on every page. *Go
-  autonomous* is the hand-off to `blimp_step()` on the blimp; it stays disabled until the
-  firmware has its mode switch (`MODE_SET`, `docs/control-loop-plan.md` increment 3). `--mode
-  pc|deck` sets the input from the command line; the input, the layout, the limit and *Roll* are
-  remembered.
+  so on every page. `--mode
+  pc|deck` sets the input from the command line; the input, the layout, the limit, *Roll* and
+  the way to fly are remembered.
 
   *Fly: Assisted* (2026-11-04, not yet flown; `docs/assisted-control.md`) hands height and heading
   to `core/`'s loops: nothing to flash, the station sends the firmware's `hold` setpoints. Set the
@@ -240,6 +238,18 @@ throwaway settings file, so it never changes the remembered window.
   window, a lost pad, a link back after more than 3 s. STOP and the spin and tilt kills coast the
   motors in the air. It starts from the floor only, and Land is greyed out in manual, because a
   hold cannot start in the air.
+
+  *Fly: Autonomous* (2026-11-05, race day, not yet flown; `docs/race-day.md`) flies the course on
+  the race sheet: the Course panel takes the sticks' place and draws the sheet
+  (`software/race_course.json`: the balloons' floor points and heights, the field from the start,
+  the close patch, the loops) to scale, with the boxes to edit it, saved as you type. *Fly the
+  course* or A prepares as Take off does (plus a row from the forward camera), climbs to the first
+  balloon's height and runs `course_test.py`'s sequence from the station's flight thread: find,
+  follow, pulses, touch, move away, turn to the next, each balloon's own height, the landing; a
+  capture of the plan's length starts by itself. The sticks do nothing; Land, X, Y, L, STOP and B
+  work as in Assisted, the Drive pill reads AUTO, and the panel's line and sketch follow the phase.
+  The *Go autonomous* placeholder that waited for the firmware's `MODE_SET` was replaced by this
+  mode: what is autonomous is the sequencing, on the ground, as in every flight test so far.
 - **Bench** (the third tab under the header): the blimp's capture. Set a length (the box is
   bounded by the blimp's own buffer, 400 s by default, once the page has asked it) and press
   *Start*; the blimp records one 72-byte record per 20 ms of its control loop into PSRAM (IMU,

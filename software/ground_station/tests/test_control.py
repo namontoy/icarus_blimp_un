@@ -257,14 +257,14 @@ fake[0] = dict(pad_on, buttons=dict(pad_on['buttons'], start=True), axes=dict(pa
 spin(0.15)
 fake[0] = pad_on
 spin(0.1)
-check(any('not in the firmware yet' in e['text'] for e in win.dock.events), 'pad: Start logs the hand-off note')
+check(any('Start does nothing' in e['text'] for e in win.dock.events), 'pad: Start says it is not bound')
 
 # Steam Deck mode on a 1280 x 800 screen
 c.set_mode('deck')
 win.resize(1280, 800)
 spin(0.4)
-check(c.mode == 'deck' and c.mode_b['deck'].isChecked() and 'MODE_SET' in c.auto_note.text(),
-      "deck: mode set, the hand-off's note behind its info icon")
+check(c.mode == 'deck' and c.mode_b['deck'].isChecked() and set(c.kind_b) == {'manual', 'assisted', 'auto'},
+      'deck: mode set, the three ways to fly on the page')
 check('left stick' in c.legend_l.text(), 'deck: legend in the pad\'s names')
 c.set_roll(True)
 spin(0.1)
@@ -467,6 +467,27 @@ check(str(settings.value('control/assisted')).lower() == 'true' and float(settin
 c.kind_b['manual'].click()
 spin(0.1)
 check(not c.assisted and c.manual_box.isVisible() and c.pad_l.yn == 'heave', 'manual again: the page as it was')
+
+# ------------------------------------------------------- the course (test_course.py has the flight)
+c.kind_b['auto'].click()
+spin(0.2)
+check(c.kind == 'auto' and c.assisted and c.course_panel.isVisible() and not c.sticks.isVisible(),
+      'autonomous: the Course panel takes the sticks\' place')
+check(c.takeoff_b.isVisible() and c.takeoff_b.text() == 'Fly the course' and c.takeoff_b.isEnabled()
+      and c.box_w['trim'].isVisible() and not c.box_w['height'].isVisible() and not c.box_w['surge'].isVisible(),
+      'autonomous: Fly the course, Land and the trim; no height or surge box')
+check('fly the course' in c.legend_l.text() and 'land' in c.legend_l.text(), 'autonomous: the legend')
+check(win.minimumSizeHint().width() - win.header.pills['demo'].sizeHint().width() <= 1280,
+      "autonomous: the page still fits the Deck's 1280 px: %d" % win.minimumSizeHint().width())
+check(c.course_panel.check_l.text().startswith('2 balloons'), 'autonomous: the sheet checks: %s'
+      % c.course_panel.check_l.text())
+settings = QSettings(ini, QSettings.Format.IniFormat)
+settings.sync()
+check(settings.value('control/fly') == 'auto' and str(settings.value('control/assisted')).lower() == 'false',
+      'autonomous: remembered as the way to fly')
+c.kind_b['manual'].click()
+spin(0.1)
+check(c.kind == 'manual' and c.sticks.isVisible() and not c.course_panel.isVisible(), 'manual again: the sticks are back')
 
 win.close()
 spin(0.2)

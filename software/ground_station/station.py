@@ -22,6 +22,7 @@ from PyQt6.QtGui import QImage
 import blimp_link as bl
 import blimp_log
 
+from .assist import plan_course
 from .blimp_bridge import STREAM_HZ, WATCHDOG_S, BlimpBridge, DemoBlimp
 from .camera import make_camera
 from .gamepad import Gamepad, empty_state
@@ -191,6 +192,24 @@ class Station(QObject):
     def assist_takeoff(self, height_m, trim_gf, surge_full_gf):
         """None when the flight started, or why not."""
         return self.blimp.takeoff(height_m, trim_gf, surge_full_gf)
+
+    def course_takeoff(self, sheet, trim_gf, extra=()):
+        """The course on the race sheet (race_course.py), flown by assist.py:
+        None when it started, or why not. The plan's lines go to the log, and
+        a capture of the plan's length starts unless one is running, so the
+        run is recorded as the scripts record theirs (the Bench page downloads
+        it). extra: course_test.py arguments, for the tests."""
+        plan, why = plan_course(sheet, trim_gf, extra)
+        if why:
+            return why
+        why = self.blimp.takeoff(plan.alts[0], trim_gf, 0.0, course=plan)
+        if why:
+            return why
+        for line in plan.lines:
+            self.log('info', 'plan: ' + line)
+        if not self._cap_watch:
+            self.capture('start', plan.cap_s)
+        return None
 
     def assist_sticks(self, surge, yaw, heave):
         self.blimp.assist.set_sticks(surge, yaw, heave)

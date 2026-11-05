@@ -176,6 +176,14 @@ def main(argv: list[str] | None = None) -> int:
                      [sim, "sim/run_course.py", "--course", "1", "--loops", "1",
                       "--max-time", "120", "--quiet"])
 
+    print(f"{DIM}ground tools{OFF}")
+    if gate():
+        ok &= r.step("the race sheet (race_course.py)",
+                     [host, "software/race_course.py", "--selftest"])
+    if gate():
+        ok &= r.step("the course sequence against its stand-in (course_test.py)",
+                     [host, "software/course_test.py", "--selftest"])
+
     print(f"{DIM}agent files{OFF}")
     if gate():
         ok &= r.step("skills in sync (.agents from .claude)",
@@ -189,6 +197,7 @@ def main(argv: list[str] | None = None) -> int:
                               ("the window, GUI thread blocked", "test_window.py"),
                               ("the Control page", "test_control.py"),
                               ("the assisted flight", "test_assist.py"),
+                              ("the race sheet and the autonomous flight", "test_course.py"),
                               ("the camera link and panel", "test_camera.py")):
             if not gate():
                 break

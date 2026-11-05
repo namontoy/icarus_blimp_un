@@ -54,11 +54,26 @@ sticks and boxes say: the arming below is the take-off, STOP and the watchdog
 work as above, a pad that disappears lands instead of stopping, and the
 Flight page's motors stay off until the flight ends. Assisted starts from the
 floor and Land works only there: a hold cannot start in the air (assist.py).
+
+The third way, Autonomous (2026-11-05, race day), is the course: the race
+sheet (race_course.py, the Course panel beside this one: the balloons, their
+heights, the field) flown by the same flight thread with course_test.py's
+sequence in place of the sticks (assist.py, CourseFlight). "Fly the course",
+or A, prepares as Take off does and climbs to the first balloon's height; the
+sticks do nothing; Land, X, Y, STOP, B and every automatic end work as in
+Assisted. The firmware's own mode switch (MODE_SET, docs/control-loop-plan.md
+increment 3) does not exist, and core/'s guidance does not run on the blimp:
+what is autonomous is the sequencing, on the ground, as every flight test
+has been. The "Go autonomous" placeholder this page carried until then is
+this mode.
 """
 from PyQt6.QtCore import QLocale, Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QButtonGroup, QComboBox, QDoubleSpinBox, QGridLayout, QSizePolicy, QSpinBox, QWidget
 
+import race_course as rc
+
 from . import assist as Ax
+from .course import CoursePanel
 from . import theme as T
 from .panels import MOTORS, Panel, button, code, h3, info_text, notice
 from .widgets import (CentreBar, FlowBox, InfoIcon, Readout, SegBar, StickPad, Switch, TopView, clamp, hbox, label,
@@ -170,7 +185,7 @@ LEGEND_PC = (('W / S', 'surge: forward / back'), ('A / D, ← / →', 'yaw: left
 LEGEND_DECK = {'mode2': (('left stick', 'heave ↕ · yaw ↔'), ('right stick', 'surge ↕')),
                'mode1': (('left stick', 'surge ↕ · yaw ↔'), ('right stick', 'heave ↕'))}
 LEGEND_DECK_BUTTONS = (('A', 'arm manual control (sticks at rest)'), ('B', 'STOP'),
-                       ('D-pad ↑ / ↓', 'limit +5 / −5 %'), ('Start (menu)', 'autonomous: not in the firmware yet'))
+                       ('D-pad ↑ / ↓', 'limit +5 / −5 %'))
 LEGEND_ASSIST_PC = (('W / S', 'surge: a push forward / back'), ('A / D, ← / →', 'turn; let go and it holds the heading'),
                     ('↑ / ↓', 'move the height; let go and it holds'), ('Shift', 'full stick; a key alone gives half'),
                     ('L', 'land'), ('Space, Esc', 'STOP: the motors coast in the air'),
@@ -179,6 +194,13 @@ LEGEND_ASSIST_PC = (('W / S', 'surge: a push forward / back'), ('A / D, ← / �
 LEGEND_ASSIST_DECK = (('A', 'take off (sticks at rest)'), ('X or Y', 'land'), ('B', 'STOP: coast in the air'),
                          ('D-pad ↑ / ↓', 'height ±%.1f m' % Ax.HEIGHT_STEP_M),
                          ('D-pad ← / →', 'trim −%.1f / +%.1f gf' % (Ax.TRIM_STEP_GF, Ax.TRIM_STEP_GF)))
+LEGEND_AUTO_PC = (('L', 'land'), ('Space, Esc', 'STOP: the motors coast in the air'),
+                  ('sticks and keys', 'nothing: the course flies itself'))
+LEGEND_AUTO_DECK = (('A', 'fly the course (sticks at rest)'), ('X or Y', 'land'), ('B', 'STOP: coast in the air'),
+                    ('D-pad ← / →', 'trim −%.1f / +%.1f gf' % (Ax.TRIM_STEP_GF, Ax.TRIM_STEP_GF)),
+                    ('sticks', 'nothing: the course flies itself'))
+KINDS = ('manual', 'assisted', 'auto')
+KIND_NAMES = {'manual': 'manual', 'assisted': 'assisted', 'auto': 'autonomous'}
 
 
 def legend(rows):
@@ -196,7 +218,14 @@ class ControlPage(QWidget):
             'to zero; STOP or a lost pad coast the motors at once, a window frozen for 3 s releases them. Arming '
             'needs telemetry and the sticks at rest. Roll (off by default) adds the rear pair\'s difference from '
             'the right stick\'s free axis or Q / E, an experiment: on paper a tilt, not a turn, paid for in lift at '
-            'hover. "Go autonomous" waits for the firmware\'s mode switch.')
+            'hover.')
+    HINT_AUTO = ('Autonomous: the course on the race sheet (the Course panel), flown from here on the blimp\'s loops '
+                 'the way the flight tests were: the climb to the first balloon\'s height, the look, the nose on '
+                 'the balloon, straight pulses toward it, the touch, the move away, the turn to the next, each '
+                 'balloon\'s own height, and the landing. Fly the course prepares as Take off does (bench '
+                 'parameters, 60 s of stillness, the ToF, a row from the forward camera) and needs the trim. The '
+                 'sticks do nothing; Land brings it down at any point, STOP coasts the motors where it is. The '
+                 'camera is what finds each balloon: nothing on board measures position.')
     HINT_ASSIST = ('Assisted: the blimp\'s own loops keep the height and the heading, and the sticks move what they '
                    'keep. Take off sets the bench parameters, waits for 60 s of stillness on the floor and climbs to '
                    'the height in the box. The height stick and the D-pad move the setpoint, the turn stick swings '
@@ -222,7 +251,8 @@ class ControlPage(QWidget):
         self.raw = (0.0,) * len(AXES)           # the pad's sticks before shaping
         self.held, self.shift = set(), False
         self.roll_on = False                    # the Roll switch: the rear pair's difference, off by default
-        self.assisted = False                   # the Fly switch: core/'s loops hold height and heading
+        self.kind = 'manual'                    # the Fly switch: manual, assisted or auto (the course)
+        self.assisted = False                   # a flight on core/'s loops: assisted or auto
         self.flight = {}                        # assist.py's snapshot, each telemetry tick
         self.pad = None                         # the last gamepad snapshot
         self.pad_was = {b: False for b in PAD_BUTTONS}
@@ -231,11 +261,14 @@ class ControlPage(QWidget):
 
         self.command = self._build_command()
         self.sticks = self._build_sticks()
+        self.course_panel = CoursePanel(station)       # in the sticks' place while the course is the way to fly
         self.motors = self._build_motors()
         self.command.setFixedWidth(340)
         self.motors.setFixedWidth(340)
-        self.setLayout(hbox(self.command, self.sticks, self.motors, spacing=12, margins=(0, 12, 0, 0)))
+        self.setLayout(hbox(self.command, self.sticks, self.course_panel, self.motors, spacing=12,
+                            margins=(0, 12, 0, 0)))
         self.layout().setStretchFactor(self.sticks, 1)
+        self.layout().setStretchFactor(self.course_panel, 1)
         self.setMinimumHeight(200)
 
         mode = settings.value('control/mode')
@@ -251,7 +284,10 @@ class ControlPage(QWidget):
             v = settings.value(key)
             if v not in (None, ''):
                 box.setValue(float(v))
-        self.set_assisted(str(settings.value('control/assisted')).lower() == 'true', save=False)
+        fly = settings.value('control/fly')
+        if fly not in KINDS:        # the key before the course: a window of 2026-11-04 remembered Assisted
+            fly = 'assisted' if str(settings.value('control/assisted')).lower() == 'true' else 'manual'
+        self.set_kind(fly, save=False)
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.tick)
         self._timer.start(TICK_MS)
@@ -260,7 +296,7 @@ class ControlPage(QWidget):
     # ------------------------------------------------------------- panels
 
     def _build_command(self):
-        pn = Panel('Command', info_text('Who drives, and how far.', self.HINT, self.HINT_ASSIST))
+        pn = Panel('Command', info_text('Who drives, and how far.', self.HINT, self.HINT_ASSIST, self.HINT_AUTO))
         lay = pn.lay
         self.mode_b = {}
         group = QButtonGroup(self)
@@ -300,10 +336,12 @@ class ControlPage(QWidget):
         row = hbox(spacing=4)
         for kind, text, tip in (('manual', 'Manual', 'the sticks are the motors: you are the height loop'),
                                 ('assisted', 'Assisted', "the blimp's loops hold height and heading: the sticks move "
-                                                         'what they hold')):
+                                                         'what they hold'),
+                                ('auto', 'Autonomous', 'the course on the race sheet, flown from here on the '
+                                                       "blimp's loops: the sticks do nothing")):
             b = button(text, 'toggle', tip=tip)
             b.setCheckable(True)
-            b.clicked.connect(lambda _=False, on=kind == 'assisted': self.set_assisted(on))
+            b.clicked.connect(lambda _=False, kind=kind: self.set_kind(kind))
             kinds.addButton(b)
             row.addWidget(b)
             self.kind_b[kind] = b
@@ -356,11 +394,13 @@ class ControlPage(QWidget):
                                     'it the blimp drifts. -0.6 for the new battery type, -1 for the earlier cells; '
                                     'the D-pad nudges it in flight', self._trim_changed)
         boxes = FlowBox(hgap=12, vgap=8)
+        self.box_w = {}
         for name, box, unit in (('Height', self.height_in, 'm'), ('Surge', self.surge_in, 'gf'),
                                 ('Trim', self.trim_in, 'gf')):
             w = QWidget()
             w.setLayout(hbox(label(name, color=T.MUTED), box, label(unit, color=T.MUTED), spacing=6))
             boxes.add(w)
+            self.box_w[name.lower()] = w
         lay.addWidget(boxes)
         self.assist_box = boxes
         lay.addSpacing(8)
@@ -376,20 +416,6 @@ class ControlPage(QWidget):
         self.legend_l = label('', 12, wrap=True)
         self.legend_l.setTextFormat(Qt.TextFormat.RichText)
         lay.addWidget(self.legend_l)
-        lay.addSpacing(14)
-
-        self.handoff_h = h3('Hand-off')
-        lay.addWidget(self.handoff_h)
-        lay.addSpacing(6)
-        self.auto_b = button('Go autonomous', 'primary',
-                             tip='hand the vehicle to blimp_step() on the blimp: needs the MODE_SET packet')
-        self.auto_b.setEnabled(False)
-        # Why it is greyed out, and the how-to of the page (the panel's i),
-        # sit behind info icons since 2026-11-02, so the Deck's small screen
-        # keeps them too instead of hiding them for room
-        self.auto_note = InfoIcon('Not in the firmware yet: the mode switch comes with increment 3 of '
-                                  'docs/control-loop-plan.md (MODE_SET).')
-        lay.addLayout(hbox(self.auto_b, 6, self.auto_note, None, spacing=0))
         lay.addStretch(1)
         return pn
 
@@ -517,7 +543,9 @@ class ControlPage(QWidget):
         self.pad_r.set_axes(rx, ry)
 
     def _legend(self):
-        if self.assisted:
+        if self.kind == 'auto':
+            self.legend_l.setText(legend(LEGEND_AUTO_DECK if self.mode == 'deck' else LEGEND_AUTO_PC))
+        elif self.assisted:
             self.legend_l.setText(legend(LEGEND_ASSIST_DECK if self.mode == 'deck' else LEGEND_ASSIST_PC))
         elif self.mode == 'deck':
             rows = LEGEND_DECK[self.layout_id]
@@ -563,29 +591,39 @@ class ControlPage(QWidget):
         self._legend()
         self.render()
 
-    def set_assisted(self, on, save=True):
-        """Manual or assisted. Not in the air: a hold cannot start there, and a
-        running one has no open-loop way out."""
-        on = bool(on)
+    def set_kind(self, kind, save=True):
+        """Manual, assisted or auto (the course). Not in the air: a hold
+        cannot start there, and a running one has no open-loop way out."""
+        if kind not in KINDS:
+            kind = 'manual'
         if not self.armed:
-            self.assisted = on
+            self.kind = kind
             if save:
-                self.settings.setValue('control/assisted', on)
-                self.station.log('info', 'control: %s flight' % ('assisted' if on else 'manual'))
-        elif on != self.assisted:
+                self.settings.setValue('control/fly', kind)
+                self.settings.setValue('control/assisted', kind == 'assisted')
+                self.station.log('info', 'control: %s flight' % KIND_NAMES[kind])
+        elif kind != self.kind:
             self.station.log('warn', 'control: land or disarm before changing how you fly')
-        self.kind_b['assisted'].setChecked(self.assisted)
-        self.kind_b['manual'].setChecked(not self.assisted)
+        kind = self.kind
+        self.assisted = kind != 'manual'
+        auto = kind == 'auto'
+        for k, b in self.kind_b.items():
+            b.setChecked(k == kind)
         self.manual_box.setVisible(not self.assisted)
         self.assist_box.setVisible(self.assisted)
+        self.box_w['height'].setVisible(kind == 'assisted')
+        self.box_w['surge'].setVisible(kind == 'assisted')
         self.takeoff_b.setVisible(self.assisted)
+        self.takeoff_b.setText('Fly the course' if auto else 'Take off')
+        self.takeoff_b.setToolTip('bench parameters, 60 s of stillness, a camera row, then the climb to balloon 1 '
+                                  '(A on the pad)' if auto else
+                                  'bench parameters, 60 s of stillness, then the climb (A on the pad)')
         self.land_note.setVisible(not self.assisted)
         self.mix_l.setVisible(not self.assisted)
-        self.flight_box.setVisible(self.assisted)
-        self.flight_l.setVisible(self.assisted)
-        self.handoff_h.setVisible(not self.assisted)
-        self.auto_b.setVisible(not self.assisted)
-        self.auto_note.setVisible(not self.assisted)
+        self.flight_box.setVisible(kind == 'assisted')
+        self.flight_l.setVisible(kind == 'assisted')
+        self.sticks.setVisible(not auto)
+        self.course_panel.setVisible(auto)
         for w in self.roll_row:
             w.setVisible(self.roll_on and not self.assisted)
         self.axis_names['yaw'].setText('turn' if self.assisted else 'yaw')
@@ -593,6 +631,10 @@ class ControlPage(QWidget):
         self._pad_axes()
         self._legend()
         self.render()
+
+    def set_assisted(self, on, save=True):
+        """Manual or assisted, the switch before the course (2026-11-04)."""
+        self.set_kind('assisted' if on else 'manual', save)
 
     def _height_changed(self, v):
         if self.armed and self.assisted:
@@ -635,7 +677,16 @@ class ControlPage(QWidget):
             self.station.log('warn', 'control: sticks at rest and keys up before arming')
             return False
         by = 'gamepad' if source == 'pad' else 'keyboard'
-        if self.assisted:
+        if self.kind == 'auto':
+            sheet = self.course_panel.sheet_now()
+            why = self.station.course_takeoff(sheet, self.trim_in.value())
+            if why:
+                self.station.log('warn', 'control: not flying the course: %s' % why)
+                return False
+            self.flight = {'state': 'preparing'}
+            self.station.log('info', 'the course from the %s: %s; trim %+.1f gf'
+                             % (by, rc.summary(sheet), self.trim_in.value()))
+        elif self.assisted:
             why = self.station.assist_takeoff(self.height_in.value(), self.trim_in.value(), self.surge_in.value())
             if why:
                 self.station.log('warn', 'control: not taking off: %s' % why)
@@ -746,12 +797,12 @@ class ControlPage(QWidget):
         self.target = tuple(clamp(s + k, -1.0, 1.0) for s, k in zip(shaped, keys))
         step = TICK_MS / 1000.0 / SLEW_S
         self.cmd = [slew(c, t, step) for c, t in zip(self.cmd, self.target)]
-        if self.armed and self.assisted:
+        if self.armed and self.kind == 'assisted':
             # The turn and the height are rates, ramped by what they move, and
             # a let-go must be seen at once: the unramped target. The surge is
             # a push on the motors, so it ramps as it does in manual.
             self.station.assist_sticks(self.cmd[0], self.target[1], self.target[2])
-        elif self.armed:
+        elif self.armed and not self.assisted:
             self.station.set_motors(teleop_mix(self.cmd[0], self.cmd[1], self.cmd[2], self.limit, self.cmd[3]))
         self.render()
 
@@ -766,7 +817,7 @@ class ControlPage(QWidget):
             # A and B are checked on a Deck; X and Y are not yet, and a Land
             # that does nothing is not a thing to find out in the air.
             self.land()
-        elif b in ('up', 'down') and self.assisted:
+        elif b in ('up', 'down') and self.kind == 'assisted':
             step = Ax.HEIGHT_STEP_M if b == 'up' else -Ax.HEIGHT_STEP_M
             if self.armed:
                 self.station.assist_step_height(step)
@@ -774,13 +825,13 @@ class ControlPage(QWidget):
                 self.height_in.setValue(self.height_in.value() + step)
         elif b in ('left', 'right') and self.assisted:
             self.trim_in.setValue(self.trim_in.value() + (Ax.TRIM_STEP_GF if b == 'right' else -Ax.TRIM_STEP_GF))
-        elif b == 'up':
+        elif b == 'up' and not self.assisted:
             self.limit_in.setValue(self.limit_in.value() + 5)
-        elif b == 'down':
+        elif b == 'down' and not self.assisted:
             self.limit_in.setValue(self.limit_in.value() - 5)
         elif b == 'start':
-            self.station.log('warn', 'control: autonomous mode is not in the firmware yet (MODE_SET, '
-                                     'control-loop-plan increment 3)')
+            self.station.log('info', 'control: Start does nothing; A arms, takes off or flies the course, by the '
+                                     'Fly switch')
 
     # ----------------------------------------------------------- readback
 
@@ -792,6 +843,8 @@ class ControlPage(QWidget):
         self.render_readback()
         if self.assisted:
             self.render_flight()
+        if self.kind == 'auto':
+            self.course_panel.set_flight(self.flight)
 
     def set_stale(self):
         self.alive = False
@@ -825,8 +878,9 @@ class ControlPage(QWidget):
             self.flight_l.setText(f.get('detail') or ('Flying: let go and it holds.' if state == 'flying' else ''))
             set_color(self.flight_l, T.MUTED)
         # Flying only: the landing's setpoints would leave the box at 0.30 m,
-        # and the next take-off would climb to that.
-        if state == 'flying' and not self.height_in.hasFocus():
+        # and the next take-off would climb to that. Assisted only: the
+        # course's heights are the sheet's, not the box's.
+        if state == 'flying' and self.kind == 'assisted' and not self.height_in.hasFocus():
             self.height_in.blockSignals(True)
             self.height_in.setValue(f['height_m'])
             self.height_in.blockSignals(False)
@@ -857,7 +911,8 @@ class ControlPage(QWidget):
         # state line
         if self.armed and self.assisted:
             state = self.flight.get('state', 'preparing')
-            self.state_l.setText('%s · %s' % ({'flying': 'ASSISTED', 'landing': 'LANDING'}.get(state, 'PREPARING'),
+            flying = 'AUTONOMOUS' if self.kind == 'auto' else 'ASSISTED'
+            self.state_l.setText('%s · %s' % ({'flying': flying, 'landing': 'LANDING'}.get(state, 'PREPARING'),
                                               'gamepad' if self.source == 'pad' else 'keyboard'))
             set_color(self.state_l, T.AMBER if state == 'landing' else T.PAPAYA)
         elif self.armed:

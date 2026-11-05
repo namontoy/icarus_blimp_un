@@ -7,13 +7,20 @@ as in target_test.py.
 
     python software/course_test.py --close-px 1500 --trim -0.6 --param $(cat software/bench_params.txt)        # the plan
     python software/course_test.py --close-px 1500 --trim -0.6 --param $(cat software/bench_params.txt) --go   # PROPS ON
+    python software/course_test.py --course-file software/race_course.json --trim -0.6 --param $(cat software/bench_params.txt) --go
     python software/course_test.py --selftest      # the sequence against a stand-in, no hardware
 
 The course (--course X,Y ...): each balloon's floor point in metres from
 where the gondola stands at the start, x along its nose, y to its left (+
 counter-clockwise, as 'hold heading'). The default is the room of 2026-11-03:
 balloon 1 2 m straight ahead, balloon 2 2 m to the right of it, both centred
-about 1.2 m up (docs/flight-tests.md, "The course room"). Nothing on board
+about 1.2 m up (docs/flight-tests.md, "The course room"). --alt is the
+gondola's height, one for the whole course or one per balloon: balloons that
+hang at different heights get a 'hold altitude' move after each touch, during
+the turn to the next. --course-file reads all of it from the race sheet
+(race_course.py, the file the ground station's Course panel edits: the
+balloons, their heights, the field, the close patch) where the command line
+gives nothing. Nothing on board
 measures position, so the course only says where to look, and each touch is
 a position fix: after a balloon the blimp should be --standoff m short of it
 on the bearing it last saw it on, and the next balloon's bearing from there
@@ -87,6 +94,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import blimp_link as bl  # noqa: E402
 import blimp_log  # noqa: E402
 import hold_test as ht  # noqa: E402
+import race_course as rc  # noqa: E402
 import square_test as sq  # noqa: E402
 import target_test as tt  # noqa: E402
 
@@ -94,6 +102,9 @@ import target_test as tt  # noqa: E402
 # then 2 m to balloon 2 on the blimp's right, at about a right angle; both
 # balloons centred about 1.2 m up.
 COURSE_ROOM = ((2.0, 0.0), (2.0, -2.0))
+ALT_DEFAULT_M = 1.3   # the gondola at the room's balloons: their centres 1.2 m up
+TIME_LIMIT_S = 300.0  # the race's flight time, 5 min (the team, 2026-11-05): the course lands inside it
+MAX_BALLOONS = 24     # the sheet's 8 balloons by its loops; one 400 s capture holds about this many legs
 TURNED_DEG = 10.0     # the turn to the next balloon is done within this
 TRACK_DEG = 25.0      # once seen, a detection farther than this from the last is another red thing
 NEAR_TOUCHED = 0.5    # until the next balloon is seen, a patch this fraction of --close-px is the one just touched
@@ -139,6 +150,12 @@ def bearing_after(course, k, seen_deg, standoff):
 
 def close_px(args, k):
     return args.close_px[k] if len(args.close_px) > 1 else args.close_px[0]
+
+
+def blind_pulses(args, leg_m):
+    """Blind pulses for a leg of leg_m m: one per metre beyond what the
+    camera's reach (CAM_REACH_M, 2.2 m on 2026-11-02), with room for a short pulse, at most --blind: a 2 m leg gets none, a 3 m leg two."""
+    return max(0, min(args.blind, int(math.ceil(max(0.0, leg_m - rc.CAM_REACH_M) / 0.6))))
 
 
 class Heading:
@@ -262,7 +279,14 @@ class Flight:
 
     def __init__(self, link, con, args, course_legs, log):
         self.link, self.con, self.args, self.legs, self.log = link, con, args, course_legs, log
-        self.climb_s = max(0.0, args.alt - ht.LAND_FLOOR_M) / args.climb_rate
+        # The gondola's height at each balloon, and the one held now. After a
+        # move down, the ToF still reads the old height for a while: alt_prev
+        # keeps the landing guard at the higher of the two until the ToF has
+        # come within reach of the new one.
+        self.alts = list(args.alt)
+        self.alt = self.alts[0]
+        self.alt_prev = None
+        self.climb_s = max(0.0, self.alt - ht.LAND_FLOOR_M) / args.climb_rate
         self.heading = Heading(link)
         self.track = None
         self.tripped = lambda: None
@@ -272,6 +296,7 @@ class Flight:
         self.following = self.at_height = False   # following: this balloon is seen, the close cue armed
         self.s3_follow = False                    # 'hold follow' is on
         self.touched = None                       # (last bearing deg, close px) of the balloon just touched
+        self.blind = 0                            # blind pulses left for this balloon
         self.close_px = 0
         self.ran = 0.0          # s the last phase ran
         self.phases = []        # (t0, t1, label, kind, heading, surge) as flown, for square_test's metrics
@@ -315,6 +340,9 @@ class Flight:
         why = self.tripped()
         if why:
             return ('kill', why)
+        stop = self.over_time()
+        if stop:
+            return stop
         if guard and self.following and self.at_height:
             why = self.track.near(self.close_px, self.args.close_el)
             if why:
@@ -323,8 +351,9 @@ class Flight:
         now = time.monotonic()
         if h is not None:
             self.tof_t = now
-            if h > self.args.alt + tt.HIGH_M:
-                return ('land', 'the ToF reads %.2f m, over %.2f m' % (h, self.args.alt + tt.HIGH_M))
+            top = self.alt_top(h)
+            if h > top + tt.HIGH_M:
+                return ('land', 'the ToF reads %.2f m, over %.2f m' % (h, top + tt.HIGH_M))
         elif now - self.tof_t > tt.TOF_LOST_S:
             return ('land', 'the ToF has not read for %.0f s' % tt.TOF_LOST_S)
         if now >= self.next_poll:
@@ -336,6 +365,40 @@ class Flight:
             except TimeoutError:
                 self.log('%6.1f s  no answer to the status poll (a Wi-Fi drop?)' % self.clock())
             self.next_poll = now + self.args.poll
+        return None
+
+    def over_time(self):
+        """('land', why) when the race's time limit leaves only the landing's
+        time, else None: a balloon not reached by then is not reached."""
+        limit = self.args.time_limit
+        if not limit:
+            return None
+        top = max(self.alt, self.alt_prev) if self.alt_prev is not None else self.alt
+        land_s = ht.landing_time(top + tt.HIGH_M, self.args.land_rate, self.args.final_rate)
+        if self.clock() >= limit - land_s:
+            return ('land', 'the time limit: %.0f s flown of %.0f, %.0f s left for the landing'
+                    % (self.clock(), limit, land_s))
+        return None
+
+    def alt_top(self, h):
+        """The height the landing guard measures against: the balloon's, or
+        the last balloon's until the ToF (h) has come down near this one's."""
+        if self.alt_prev is not None and h <= self.alt + 0.1:
+            self.alt_prev = None
+        return max(self.alt, self.alt_prev) if self.alt_prev is not None else self.alt
+
+    def set_alt(self, k):
+        """Balloon k+1's height for the hold, when it differs from the one
+        held: the move runs during the turn to it. None, or a stop."""
+        alt = self.alts[k]
+        if abs(alt - self.alt) < 0.01:
+            return None
+        self.log('%6.1f s  balloon %d hangs %s: the hold goes from %.2f to %.2f m' % (
+            self.clock(), k + 1, 'higher' if alt > self.alt else 'lower', self.alt, alt))
+        self.alt_prev = max(self.alt, self.alt_prev) if self.alt_prev is not None else self.alt
+        self.alt = alt
+        self.at_height = False
+        self.send('hold altitude %.2f %.3f' % (alt, self.args.climb_rate))
         return None
 
     def phase(self, label, kind, seconds, surge, guard=True, until=None):
@@ -366,14 +429,18 @@ class Flight:
         self.following = False
         t0 = self.clock()
         climbing = k == 0 and not again
+        moving = self.alt_prev is not None      # the hold is on its way to this balloon's height
         if climbing:
-            self.log('%6.1f s  -- the climb to %.2f m, looking for balloon 1 at %+.0f deg' % (t0, a.alt, expect))
+            self.log('%6.1f s  -- the climb to %.2f m, looking for balloon 1 at %+.0f deg' % (t0, self.alt, expect))
             give_up = t0 + self.climb_s + 10.0     # the height counts as reached by then, whatever the ToF says
         else:
-            self.log('%6.1f s  -- %s balloon %d at %+.0f deg' % (t0, 'looking again for' if again else 'the turn to',
-                                                                 n, expect))
+            self.log('%6.1f s  -- %s balloon %d at %+.0f deg%s' % (
+                t0, 'looking again for' if again else 'the turn to', n, expect,
+                ' and %.2f m' % self.alt if moving else ''))
             self.aim(expect)
             give_up = t0 + a.turn_time
+            if moving:      # the height move too, before the look: the camera's view is 22.5 deg tall
+                give_up += abs(self.alt - self.alt_prev) / a.climb_rate
         scan = [expect + o for o in tt.scan_headings(a.scan, a.scan_step)]
         t_ready, scan_k, t_next = None, -1, None
         while True:
@@ -393,10 +460,12 @@ class Flight:
             if t_ready is None:
                 h = tt.tof_m(self.link)
                 if climbing:
-                    done = (h is not None and h >= a.alt - 0.05) or self.clock() > give_up
+                    done = (h is not None and h >= self.alt - 0.05) or self.clock() > give_up
                 else:
-                    done = self.following or self.clock() > give_up or (
-                        self.heading.deg is not None and abs(sq.wrap180(self.heading.deg - expect)) <= TURNED_DEG)
+                    turned = (self.heading.deg is not None
+                              and abs(sq.wrap180(self.heading.deg - expect)) <= TURNED_DEG)
+                    there = not moving or (h is not None and abs(h - self.alt) <= 0.1)
+                    done = self.following or self.clock() > give_up or (turned and there)
                 if done:
                     t_ready = self.clock()
                     self.at_height = True
@@ -409,6 +478,27 @@ class Flight:
             if t_ready is not None and self.clock() > t_ready + a.look and (t_next is None or self.clock() >= t_next):
                 scan_k += 1
                 if scan_k >= len(scan):
+                    if self.blind > 0 and not again:
+                        # Beyond the camera's reach: a straight pulse toward
+                        # where the balloon should be, then the look again from
+                        # there. The pulse's own ticks keep the track updated,
+                        # so a balloon that comes into view during it is seen
+                        # as soon as the loop comes back here.
+                        self.blind -= 1
+                        self.log('%6.1f s  balloon %d not seen: a blind pulse toward %+.0f deg (%d more after this)'
+                                 % (self.clock(), n, expect, self.blind))
+                        (pg, ps), (bg, bs) = a.push, a.brake
+                        self.aim(expect)
+                        stop = (self.phase('blind pulse toward balloon %d at %+.0f deg: %+.1f gf' % (n, expect, pg),
+                                           'push', ps, pg, guard=False)
+                                or self.phase('blind pulse: coast', 'coast', a.coast, 0.0, guard=False)
+                                or self.phase('blind pulse: brake %+.1f gf' % -bg, 'brake', bs, -bg, guard=False))
+                        if stop:
+                            return stop
+                        t_ready, scan_k, t_next = self.clock(), -1, None
+                        self.log('%6.1f s  -- looking for balloon %d at %+.0f deg after the blind pulse'
+                                 % (self.clock(), n, expect))
+                        continue
                     return ('land', 'balloon %d was not seen in %.0f s %s%s' % (
                         n, a.look, 'at the height' if climbing else 'after the turn',
                         ' nor in the scan' if scan else ''))
@@ -516,42 +606,61 @@ class Flight:
         except (RuntimeError, TimeoutError) as e:
             self.log('%6.1f s  the trim was not set for the landing (%s); landing anyway' % (self.clock(), e))
         t0 = self.clock()
-        k = ht.land(self.con, self.link, self.args.alt, self.args.land_rate, self.args.final_rate, self.tripped,
+        sp0 = max(self.alt, self.alt_prev) if self.alt_prev is not None else self.alt
+        k = ht.land(self.con, self.link, sp0, self.args.land_rate, self.args.final_rate, self.tripped,
                     self.log, self.clock, self.args.poll)
         self.phases.append((t0, self.clock(), 'landing', 'land', 0.0, self.args.trim))
         return k
 
-    def fly(self):
+    def start(self):
+        """The hold's start: 'hold heading 0' (the firmware's refusal is a
+        SystemExit), the trim and the climb to the first balloon's height."""
         a = self.args
-        try:
-            self.tripped, self.peak = ht.make_kills(self.link, a.max_rate, a.max_tilt_rate, None)
-            reply = ht.console(self.con, 'hold heading 0')
-            self.t_hold = time.monotonic()
-            self.log('%6.1f s  hold heading 0: %s' % (0.0, reply.strip().splitlines()[-1] if reply.strip() else '?'))
-            if 'refused' in reply:
-                raise SystemExit('the firmware refused the hold:\n' + reply)
-            self.started = True
-            self.heading.reset()
-            self.tof_t = time.monotonic()
-            self.send('hold surge %g' % a.trim)
-            self.send('hold altitude %.2f %.3f' % (a.alt, a.climb_rate))
-            stop = None
-            for k, (expect, _, _) in enumerate(self.legs):
-                if k > 0:
-                    self.touched = (self.track.expect, self.close_px)     # balloon k's own close size
-                    planned, expect = expect, bearing_after(a.course, k, self.track.expect, a.standoff)
-                    self.log('%6.1f s  balloon %d was last seen at %+.0f deg: balloon %d should be at %+.0f deg '
-                             '(%+.0f on the plan)' % (self.clock(), k, self.track.expect, k + 1, expect, planned))
-                self.close_px = close_px(a, k)
-                stop = self.find(k, expect)
-                if not stop:
-                    stop = self.phase('balloon %d: settle, following' % (k + 1), 'follow', a.settle, 0.0)
-                if not stop:
-                    stop = self.approach(k)
-                if stop and stop[0] == 'close':
-                    stop = self.touch(k, stop[1], stop[2] if len(stop) > 2 else 0.0)
+        self.tripped, self.peak = ht.make_kills(self.link, a.max_rate, a.max_tilt_rate, None)
+        reply = ht.console(self.con, 'hold heading 0')
+        self.t_hold = time.monotonic()
+        self.log('%6.1f s  hold heading 0: %s' % (0.0, reply.strip().splitlines()[-1] if reply.strip() else '?'))
+        if 'refused' in reply:
+            raise SystemExit('the firmware refused the hold:\n' + reply)
+        self.started = True
+        self.heading.reset()
+        self.tof_t = time.monotonic()
+        self.send('hold surge %g' % a.trim)
+        self.send('hold altitude %.2f %.3f' % (self.alt, a.climb_rate))
+
+    def run_legs(self):
+        """The balloons in order, from the climb to the last move away: None
+        when the course is done, or the stop that ended it (('land', why),
+        ('kill', why)). The hold is on and the climb commanded (start(), or
+        the ground station's own preparation, assist.py)."""
+        a = self.args
+        stop = None
+        for k, (expect, _, _) in enumerate(self.legs):
+            if k > 0:
+                self.touched = (self.track.expect, self.close_px)     # balloon k's own close size
+                planned, expect = expect, bearing_after(a.course, k, self.track.expect, a.standoff)
+                self.log('%6.1f s  balloon %d was last seen at %+.0f deg: balloon %d should be at %+.0f deg '
+                         '(%+.0f on the plan)' % (self.clock(), k, self.track.expect, k + 1, expect, planned))
+                stop = self.set_alt(k)
                 if stop:
                     break
+            self.close_px = close_px(a, k)
+            self.blind = blind_pulses(a, self.legs[k][1])
+            stop = self.find(k, expect)
+            if not stop:
+                stop = self.phase('balloon %d: settle, following' % (k + 1), 'follow', a.settle, 0.0)
+            if not stop:
+                stop = self.approach(k)
+            if stop and stop[0] == 'close':
+                stop = self.touch(k, stop[1], stop[2] if len(stop) > 2 else 0.0)
+            if stop:
+                break
+        return stop
+
+    def fly(self):
+        try:
+            self.start()
+            stop = self.run_legs()
             if stop and stop[0] == 'kill':
                 self.killed = True
                 self.end = 'killed: %s' % stop[1]
@@ -597,27 +706,37 @@ def plan(args, course_legs):
     a = args
     scan = tt.scan_headings(a.scan, a.scan_step)
     scan_s = len(scan) * a.scan_dwell
-    climb_s = max(0.0, a.alt - ht.LAND_FLOOR_M) / a.climb_rate
+    climb_s = max(0.0, a.alt[0] - ht.LAND_FLOOR_M) / a.climb_rate
     pulse_s = a.push[1] + a.coast + a.brake[1] + a.hold
     touch_s = 2.0 * (a.push[1] + a.brake[1]) + a.touch + a.hold     # a push, on into it, the brake, away, still
     find_s = a.look + scan_s
-    land_s = ht.landing_time(a.alt + tt.HIGH_M, a.land_rate, a.final_rate)
+    land_s = ht.landing_time(max(a.alt) + tt.HIGH_M, a.land_rate, a.final_rate)
     worst = ht.LEAD_S + land_s + 5.0
     for k in range(len(course_legs)):
         worst += ((climb_s + 10.0) if k == 0 else a.turn_time) + find_s + a.settle + a.max_pulses * pulse_s
         worst += a.look + a.turn_time + find_s + touch_s     # one more look after a loss
+        worst += blind_pulses(a, course_legs[k][1]) * (a.push[1] + a.coast + a.brake[1] + find_s)
+        if k > 0:
+            worst += abs(a.alt[k] - a.alt[k - 1]) / a.climb_rate
+    if a.time_limit:
+        worst = min(worst, ht.LEAD_S + a.time_limit + 10.0)
     cap_s = min(int(math.ceil(worst)), sq.CAPTURE_MAX_S)
-    out = ['the course (x along the start\'s nose, y to its left, m; the balloons about 1.2 m up):']
+    out = ['the course (x along the start\'s nose, y to its left, m; the hold\'s height at each balloon):']
     for k, ((bx, by), (b, d, (px, py))) in enumerate(zip(a.course, course_legs)):
-        out.append('  balloon %d at (%.2f, %+.2f): looked for at %+.0f deg +-%.0f, %.2f m from %s; close at %d px'
-                   % (k + 1, bx, by, b, a.window, d, 'the start' if k == 0 else
+        out.append('  balloon %d at (%.2f, %+.2f), the hold at %.2f m: looked for at %+.0f deg +-%.0f, %.2f m from '
+                   '%s; close at %d px'
+                   % (k + 1, bx, by, a.alt[k], b, a.window, d, 'the start' if k == 0 else
                       '(%.2f, %+.2f), %.1f m short of balloon %d (then from where balloon %d was last seen)'
                       % (px, py, a.standoff, k, k), close_px(a, k)))
     out.append('climb at %.2f m/s to %.2f m; seen when %d of the last %d frames detect it there, and the nose turns to '
                'it; not seen %.0f s after the height or the turn (done within %.0f deg, or %.0f s): the scan, '
                '%s deg around it, %.0f s each, then land' % (
-                   a.climb_rate, a.alt, a.seen[0], a.seen[1], a.look, TURNED_DEG, a.turn_time,
+                   a.climb_rate, a.alt[0], a.seen[0], a.seen[1], a.look, TURNED_DEG, a.turn_time,
                    ' '.join('%+.0f' % s for s in scan) or 'none', a.scan_dwell))
+    blind = [blind_pulses(a, d) for _, d, _ in course_legs]
+    if any(blind):
+        out.append('not seen after the scan: up to %s blind pulse(s) toward where it should be, a look after each'
+                   % ', '.join(str(b) for b in blind))
     out.append('each balloon: %.0f s following, then pulses of %+.1f gf %.1f s, a coast of up to %.0f s, %+.1f gf '
                '%.1f s and %.0f s still (surges with the trim), at most %d; a pulse needs the balloon seen in the last '
                '%.0f s' % (a.settle, a.push[0] + a.trim, a.push[1], a.coast, -a.brake[0] + a.trim, a.brake[1],
@@ -625,9 +744,11 @@ def plan(args, course_legs):
     out.append('close (the patch at --close-px, %.0f deg above the camera\'s level, or lost right after big patches): '
                'on into it for %.1f s, the brake, the mirror away, %.0f s still; then the next balloon, or the '
                'landing (at most %.0f s)' % (a.close_el, a.touch, a.hold, land_s))
-    out.append('trim %+.1f gf on every surge; lands early on the ToF over %.2f m or silent %.0f s, Ctrl-C, an error '
-               'here; kills (motors off): yaw over %.0f deg/s, roll or pitch over %.0f deg/s' % (
-                   a.trim, a.alt + tt.HIGH_M, tt.TOF_LOST_S, a.max_rate, a.max_tilt_rate))
+    out.append('trim %+.1f gf on every surge; lands early on the ToF over the balloon\'s height by %.1f m or silent '
+               '%.0f s, Ctrl-C, an error here; kills (motors off): yaw over %.0f deg/s, roll or pitch over %.0f '
+               'deg/s' % (a.trim, tt.HIGH_M, tt.TOF_LOST_S, a.max_rate, a.max_tilt_rate))
+    if a.time_limit:
+        out.append("the time limit: %.0f s from the hold's start, the landing inside it" % a.time_limit)
     out.append('capture of %d s%s' % (cap_s, '' if worst <= sq.CAPTURE_MAX_S else
                                       ' (the most the blimp keeps; the slowest course would take %.0f s)' % worst))
     return out, cap_s
@@ -790,13 +911,15 @@ def run(args):
     meta = {'file': os.path.basename(path), 'saved': time.strftime('%Y-%m-%d %H:%M:%S'), 'source': 'course_test',
             'notes': args.notes, 'header': h, 'records': len(records), 'params': params,
             'test': {'course_m': args.course, 'legs': course_legs, 'standoff_m': args.standoff,
-                     'alt_m': args.alt, 'climb_rate_mps': args.climb_rate, 'look_s': args.look, 'seen': args.seen,
+                     'alt_m': args.alt, 'course_file': args.course_file,
+                     'climb_rate_mps': args.climb_rate, 'look_s': args.look, 'seen': args.seen,
                      'window_deg': args.window, 'scan_deg': args.scan, 'scan_step_deg': args.scan_step,
                      'scan_dwell_s': args.scan_dwell, 'turn_time_s': args.turn_time, 'close_px': args.close_px,
                      'close_el_deg': args.close_el, 'settle_s': args.settle, 'push': args.push, 'brake': args.brake,
                      'coast_s': args.coast, 'touch_s': args.touch, 'hold_s': args.hold,
                      'max_pulses': args.max_pulses, 'lost_s': args.lost,
                      'trim_gf': args.trim, 'flight_bias_tau_s': args.flight_bias_tau,
+                     'time_limit_s': args.time_limit, 'blind': args.blind,
                      'land_rate_mps': args.land_rate, 'final_rate_mps': args.final_rate,
                      'phases': [list(p) for p in flight.phases], 'events': flight.events,
                      'closes': flight.closes, 'end': flight.end, 'hold_start_in_capture_s': offset,
@@ -819,7 +942,8 @@ class _World:
     toward the held heading (or the follow's), the height follows its
     setpoint, the surge pushes 0.33 kg (with the air it carries along), with
     no drag and reverse at three quarters, the rear pair leans forward by the trim's
-    0.6 gf, and the camera sees 45 cm balloons centred 1.2 m up, within
+    0.6 gf, and the camera sees 45 cm balloons centred 1.2 m up (or at the
+    balloon's own z, given as (x, y, z)), within
     29 deg of the nose, 22.5 deg of its level and 0.3..2.6 m, the biggest
     patch first, 12.5 frames a second. It has the S3's console replies that
     this tool reads. Not a model of the blimp to tune against: it exercises
@@ -829,7 +953,7 @@ class _World:
 
     def __init__(self, balloons, drift=(0.0, 0.0)):
         self.t = 1000.0
-        self.balloons = list(balloons)
+        self.balloons = [(b[0], b[1], b[2] if len(b) > 2 else 1.2) for b in balloons]
         self.drift = drift           # m/s, the room's air
         self.x = self.y = self.yaw = self.rate = self.vx = self.vy = 0.0
         self.z = 0.07
@@ -881,8 +1005,8 @@ class _World:
         if airborne:
             self.x += (self.vx + self.drift[0]) * dt
             self.y += (self.vy + self.drift[1]) * dt
-        for i, (bx, by) in enumerate(self.balloons):
-            if math.hypot(bx - self.x, by - self.y) < 0.5 and abs(self.z - 1.2) < 0.5:
+        for i, (bx, by, bz) in enumerate(self.balloons):
+            if math.hypot(bx - self.x, by - self.y) < 0.5 and abs(self.z - bz) < 0.5:
                 if i not in self.touching:
                     self.contacts.append((i, self.t))
                 self.touching.add(i)
@@ -897,11 +1021,11 @@ class _World:
         self.seq += 1
         best = None
         zc = self.z - 0.1            # the camera, about 0.1 m under what the ToF reads (2026-11-02)
-        for bx, by in self.balloons:
+        for bx, by, bz in self.balloons:
             dx, dy = bx - self.x, by - self.y
             d = math.hypot(dx, dy)
             b = sq.wrap180(math.degrees(math.atan2(dy, dx)) - self.yaw)
-            el = math.degrees(math.atan2(1.2 - zc, d))
+            el = math.degrees(math.atan2(bz - zc, d))
             if 0.3 < d < 2.6 and abs(b) <= 29.0 and abs(el) <= 22.5:
                 area = min(19200.0, math.pi / 4.0 * (144.0 * 0.45 / d) ** 2)
                 if best is None or area > best[2]:
@@ -999,9 +1123,14 @@ def selftest():
     clock = _Clock()
     time = ht.time = clock
     failed = []
+    valid = globals()['check']          # the module's check(args); check() below is the test's
 
     def fly(balloons, extra=(), setup=None, drift=(0.0, 0.0)):
         args = parser().parse_args(['--close-px', '5000', '--trim', '-0.6'] + list(extra))
+        resolve(args)
+        why = valid(args)
+        if why:
+            raise SystemExit('the selftest\'s arguments: ' + why)
         clock.w = w = _World(balloons, drift)
         lines = []
         f = Flight(w, _Console(w), args, legs(args.course, args.standoff), lines.append)
@@ -1061,6 +1190,40 @@ def selftest():
         check('3 cm/s to the left: balloon 1, then a landing, no false balloon 2',
               [n for n, _ in f.closes] == [1] and attributed(f, w) and f.landed, lines)
 
+        # Balloon 2 hangs 0.5 m higher: the hold climbs during the turn, the
+        # guard waits for the ToF, and the landing starts from the higher one.
+        f, w, lines = fly([(2.0, 0.0, 1.2), (2.0, -2.0, 1.7)], ['--alt', '1.3', '1.8'])
+        check('balloon 2 at 1.7 m: the hold climbs to 1.8 m between them, both touched',
+              [n for n, _ in f.closes] == [1, 2] and order(w) == [0, 1] and attributed(f, w) and f.landed
+              and any('the hold goes from 1.30 to 1.80 m' in s for s in lines) and f.alt == 1.8, lines)
+        f, w, lines = fly([(2.0, 0.0, 1.7), (2.0, -2.0, 1.2)], ['--alt', '1.8', '1.3'])
+        check('balloon 2 lower: the move down does not trip the ToF guard',
+              [n for n, _ in f.closes] == [1, 2] and order(w) == [0, 1] and f.landed and 'ToF' not in f.end, lines)
+
+        # The sheet: the room as race_course.json says it, with the loops
+        import tempfile
+        path = os.path.join(tempfile.mkdtemp(prefix='course-test-'), 'race_course.json')
+        rc.save(dict(rc.DEFAULT, loops=2, close_px=5000), path)
+        f, w, lines = fly(COURSE_ROOM, ['--course-file', path, '--max-pulses', '6'])
+        check('the race sheet with 2 loops: 1, 2, 1, 2',
+              [n for n, _ in f.closes] == [1, 2, 3, 4] and order(w) == [0, 1] and len(w.contacts) >= 4
+              and f.args.alt == [1.3] * 4 and f.args.close_px == [5000] and f.landed, lines)
+
+        # The race's rectangle (2026-11-05): a 3 m side is beyond the stand-in's
+        # 2.6 m view, so balloon 2 needs a blind pulse before it is seen.
+        f, w, lines = fly([(2.0, 0.0), (2.0, -3.0)], ['--course', '2,0', '2,-3'])
+        check('a 3 m leg: a blind pulse, then balloon 2 seen and touched',
+              [n for n, _ in f.closes] == [1, 2] and order(w) == [0, 1] and f.landed
+              and any('a blind pulse toward' in s for s in lines), lines)
+        f, w, lines = fly([(2.0, 0.0), (2.0, -3.0)], ['--course', '2,0', '2,-3', '--blind', '0'])
+        check('the same without blind pulses: balloon 1, then a landing',
+              [n for n, _ in f.closes] == [1] and f.landed and 'balloon 2 was not seen' in f.end, lines)
+
+        f, w, lines = fly(COURSE_ROOM, ['--time-limit', '60'])
+        check('a 60 s time limit: the landing starts in time, said why',
+              f.landed and 'the time limit' in f.end and f.t_hold is not None
+              and any('the time limit: ' in s for s in lines) and w.z <= 0.1, lines)
+
         f, w, lines = fly(COURSE_ROOM[:1], ['--scan', '60'])
         check('balloon 2 missing: balloon 1 kept out of its scan, then land',
               [n for n, _ in f.closes] == [1] and order(w) == [0] and f.track.rejected > 0 and f.landed
@@ -1090,7 +1253,10 @@ def parser():
     ap.add_argument('--host', default=bl.BLIMP_IP)
     ap.add_argument('--port', type=int, default=bl.LINK_PORT)
     ap.add_argument('--console-port', type=int, default=bl.CONSOLE_PORT)
-    ap.add_argument('--course', type=point, nargs='+', default=list(COURSE_ROOM), metavar='X,Y',
+    ap.add_argument('--course-file', metavar='PATH',
+                    help='the race sheet (race_course.py): the course, the heights and --close-px from it, where '
+                         'the command line gives none')
+    ap.add_argument('--course', type=point, nargs='+', default=None, metavar='X,Y',
                     help="the balloons in order, m from the start, x along the start's nose, y to its left "
                          '(default the room of 2026-11-03: 2,0 2,-2)')
     ap.add_argument('--close-px', type=int, nargs='+', metavar='PX',
@@ -1099,9 +1265,9 @@ def parser():
     ap.add_argument('--close-el', type=float, default=15.0,
                     help='close: the balloon this far above the camera\'s level, deg (default %(default)s; the '
                          'view ends at +22.5)')
-    ap.add_argument('--alt', type=float, default=1.3,
-                    help='the height, m (default %%(default)s: the camera about level with balloons centred '
-                         '1.2 m up; at most %.1f)' % tt.ALT_MAX_M)
+    ap.add_argument('--alt', type=float, nargs='+', default=None, metavar='M',
+                    help='the gondola\'s height, m, one for the course or one per balloon (default %g: the camera '
+                         'about level with balloons centred 1.2 m up; at most %.1f)' % (ALT_DEFAULT_M, tt.ALT_MAX_M))
     ap.add_argument('--climb-rate', type=float, default=0.12, help='the climb, m/s (default %(default)s)')
     ap.add_argument('--standoff', type=float, default=0.5,
                     help='m short of a balloon where the blimp should be after touching it and moving away, for the '
@@ -1136,6 +1302,13 @@ def parser():
                     help='pulses toward a balloon before the landing (default %(default)s, about 5 m)')
     ap.add_argument('--lost', type=float, default=3.0,
                     help='a pulse starts only on a balloon seen in the last this many s (default %(default)s)')
+    ap.add_argument('--blind', type=int, default=2, metavar='N',
+                    help='at most this many blind pulses per balloon: a balloon not seen after the look and the '
+                         'scan gets a straight pulse toward where it should be, then another look (default '
+                         '%(default)s; 0 for none). A leg of 3 m is beyond the camera\'s 2.2 m reach')
+    ap.add_argument('--time-limit', type=float, default=None, metavar='S',
+                    help="the race's flight time, s: the course lands with just the landing's time left (default "
+                         "300, the rules' 5 min, or the race sheet's; 0 for none)")
     ap.add_argument('--trim', type=float, default=0.0,
                     help='gf added to every surge, as square_test.py\'s (-0.6 for the new battery type, -1 for the '
                          'earlier cells: docs/flight-tests.md)')
@@ -1164,11 +1337,36 @@ def parser():
     return ap
 
 
+def resolve(args):
+    """The course, the heights and the close patch from --course-file where
+    the command line gave none, then the defaults; one --alt per balloon.
+    Returns the sheet, or None without one; SystemExit on a bad sheet."""
+    sheet = None
+    if args.course_file:
+        try:
+            sheet = rc.load(args.course_file)
+        except (OSError, ValueError) as e:
+            sys.exit(str(e))
+        why = rc.check(sheet, args.standoff)
+        if why:
+            sys.exit('%s: %s' % (args.course_file, why))
+        rc.apply(args, sheet)
+    if args.course is None:
+        args.course = list(COURSE_ROOM)
+    if args.alt is None:
+        args.alt = [ALT_DEFAULT_M]
+    if args.time_limit is None:
+        args.time_limit = TIME_LIMIT_S
+    if len(args.alt) == 1:
+        args.alt = list(args.alt) * len(args.course)
+    return sheet
+
+
 def check(args):
-    """Why the arguments cannot fly, or None."""
+    """Why the arguments cannot fly, or None (after resolve())."""
     a = args
-    if not 1 <= len(a.course) <= 8:
-        return '--course takes 1 to 8 balloons'
+    if not 1 <= len(a.course) <= MAX_BALLOONS:
+        return '--course takes 1 to %d balloons' % MAX_BALLOONS
     for k, (_, d, _) in enumerate(legs(a.course, a.standoff)):
         if not LEG_MIN_M <= d <= 6.0:
             return ('balloon %d is %.2f m from where the blimp looks for it: %.1f .. 6 m (the camera found the '
@@ -1180,7 +1378,9 @@ def check(args):
         return '--close-px takes one value, or one per balloon (%d)' % len(a.course)
     if not all(20 <= p <= 19200 for p in a.close_px):
         return '--close-px is 20 .. 19200 px (the image is 160 x 120)'
-    if not (math.isfinite(a.alt) and 0.5 <= a.alt <= tt.ALT_MAX_M):
+    if len(a.alt) != len(a.course):
+        return '--alt takes one value, or one per balloon (%d)' % len(a.course)
+    if not all(math.isfinite(h) and 0.5 <= h <= tt.ALT_MAX_M for h in a.alt):
         return '--alt is 0.5 .. %.1f m: the ToF lost the floor by 2.7 m (2026-11-02)' % tt.ALT_MAX_M
     if not (math.isfinite(a.climb_rate) and 0.02 <= a.climb_rate <= 0.5):
         return "--climb-rate is 0.02 .. 0.5 m/s (the firmware's 'hold altitude' rate)"
@@ -1207,11 +1407,15 @@ def check(args):
             return '%s is %g .. %g s' % (name, lo, hi)
     if not 1 <= a.max_pulses <= 10:
         return '--max-pulses is 1 .. 10'
+    if not 0 <= a.blind <= 5:
+        return '--blind is 0 .. 5'
     for name, (gf, s) in (('--push', a.push), ('--brake', a.brake)):
         if not (math.isfinite(gf) and 0.0 < gf <= 10.0 and math.isfinite(s) and 0.0 < s <= 10.0):
             return '%s is GF S with 0 < GF <= 10 gf and 0 < S <= 10 s' % name
     if not (math.isfinite(a.trim) and -10.0 <= a.trim <= 10.0):
         return '--trim is -10 .. 10 gf'
+    if a.time_limit != 0 and not (math.isfinite(a.time_limit) and 30.0 <= a.time_limit <= 900.0):
+        return '--time-limit is 30 .. 900 s, or 0 for none'
     if a.flight_bias_tau and not (math.isfinite(a.flight_bias_tau) and 0.5 <= a.flight_bias_tau <= 600.0):
         return "--flight-bias-tau is 0.5 .. 600 s (the S3's 'param' range for gyro_bias_tau_s), or 0"
     if not (0.02 <= a.land_rate <= 0.5 and 0.01 <= a.final_rate <= 0.2):
@@ -1225,6 +1429,9 @@ def main(argv=None):
     args = parser().parse_args(argv)
     if args.selftest:
         return selftest()
+    sheet = resolve(args)
+    if sheet is not None:
+        print('the race sheet %s: %s' % (args.course_file, rc.summary(sheet)))
     why = check(args)
     if why:
         sys.exit(why)

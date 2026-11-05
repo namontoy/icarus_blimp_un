@@ -103,7 +103,7 @@ def wrap180(deg):
 
 def new_hold():
     """blimp_hold_t, as the ground commands it."""
-    return {'heading': None, 'altitude': None, 'rate': 0.0, 'surge': 0.0}
+    return {'heading': None, 'altitude': None, 'rate': 0.0, 'surge': 0.0, 'follow': False}
 
 
 class MockBlimp:
@@ -373,9 +373,16 @@ class MockBlimp:
             hover = HEAVY_MPS2 / 3.2
             rear = max(0.0, min(1.0, hover + 1.5 * (self.alt_sp - self.height_m) + 0.8 * (sp_rate - self.vz)))
         turn = 0.0
-        if h['heading'] is not None:
+        target = h['heading']
+        if h.get('follow') and self.cam_row is not None and self.cam_row['ok']:
+            # 'hold follow': the nose to the camera's balloon. target_cam's az
+            # is + to the right, core/'s bearing + to the left (the S3's
+            # CONFIG_CAM_FWD_BEARING_SIGN -1), so the latest row's az, negated,
+            # is where the nose goes from where it is now.
+            target = self.yaw_est() - self.cam_row['az']
+        if target is not None:
             # + is counter-clockwise, so the right-hand motor harder: FR, in the toy's names
-            turn = max(-1.0, min(1.0, 0.1 * wrap180(h['heading'] - self.yaw_est())))
+            turn = max(-1.0, min(1.0, 0.1 * wrap180(target - self.yaw_est())))
         surge = max(-1.0, min(1.0, h['surge'] / SURGE_FULL_GF))
         self.set_all([surge - turn / 2, rear, surge + turn / 2, rear])
 
@@ -702,7 +709,10 @@ class MockBlimp:
                    altitude, h['surge'], fl, rl, fr, rr, int((now - self.last_rx) * 1000), CORE_LINK_TIMEOUT_S))
 
     def hold_command(self, args, now):
-        """do_hold_cmd() in ctl_task.c, without 'hold follow'."""
+        """do_hold_cmd() in ctl_task.c. 'hold follow' (since 2026-11-05, for
+        the course flown from the ground station) turns the toy's nose to the
+        camera's latest detection while it lasts; 'hold follow off' leaves the
+        nose where it is, held there."""
         if not args:
             return self.hold_status(now)
         what = args[0]
@@ -714,8 +724,21 @@ class MockBlimp:
             self.stop_hook()
             self.coast()
             return "all motors coasting; the hold is KILLED until 'hold off'\n"
+        if what == 'follow' and len(args) in (1, 2) and (len(args) == 1 or args[1] == 'off'):
+            if self.hold_mode == 'KILLED':
+                return "refused: KILLED by a stop; 'hold off' first, then start again\n"
+            if self.hold_mode != 'HOLD':
+                return 'refused: follow needs a running hold (hold heading, altitude or surge first)\n'
+            on = len(args) == 1
+            if not on and self.hold.get('follow'):
+                self.hold['heading'] = self.yaw_est()       # held where the follow left it
+            self.hold['follow'] = on
+            return 'held: heading %s, altitude %s, surge %.1f gf, follow %s\n' % (
+                'off' if self.hold['heading'] is None else 'on', 'off' if self.hold['altitude'] is None else 'on',
+                self.hold['surge'], 'on' if on else 'off')
         if what not in ('heading', 'altitude', 'surge') or len(args) not in ((2, 3) if what == 'altitude' else (2,)):
-            return "hold: the mock knows 'hold', 'hold off', 'hold kill', and heading, altitude and surge\n"
+            return "hold: the mock knows 'hold', 'hold off', 'hold kill', 'hold follow [off]', and heading, " \
+                   "altitude and surge\n"
         rate = 0.0
         if len(args) == 3:
             try:
@@ -759,8 +782,9 @@ class MockBlimp:
             self.hold_mode, self.alt_sp = 'HOLD', None
             out = 'hold starting: armed at the next tick, heading 0 = where the nose points now\n'
         self.hold = req
-        return out + 'held: heading %s, altitude %s, surge %.1f gf, follow off\n' % (
-            'off' if req['heading'] is None else 'on', 'off' if req['altitude'] is None else 'on', req['surge'])
+        return out + 'held: heading %s, altitude %s, surge %.1f gf, follow %s\n' % (
+            'off' if req['heading'] is None else 'on', 'off' if req['altitude'] is None else 'on', req['surge'],
+            'on' if req.get('follow') else 'off')
 
     def param_command(self, args):
         """'param' as main/cmd_param.c answers it, over PARAMS only."""

@@ -220,7 +220,7 @@ class Header(QWidget):
         elif state == 'landing':
             self.pills['drive'].set('warn', 'LANDING')
         elif state == 'flying':
-            self.pills['drive'].set('live', 'ASSIST')
+            self.pills['drive'].set('live', 'AUTO' if assist.get('course') else 'ASSIST')
         elif state == 'preparing':
             self.pills['drive'].set('warn', 'PREPARING')
         elif m.get('standing') and m.get('ramp', 1.0) < 1.0:
@@ -257,7 +257,8 @@ class PageBar(QWidget):
     # Each page's one-line description is its tab's tip (it was a line of
     # faint text on the right of the bar until 2026-11-02)
     NOTES = {'flight': 'motors, camera and sensors, live',
-             'control': 'fly from the keyboard or a gamepad, by hand or assisted by the height and heading loops',
+             'control': 'fly from the keyboard or a gamepad, by hand or assisted by the height and heading loops, '
+                        'or fly the course on the race sheet',
              'bench': 'captures, calibration and checks of the blimp on the bench'}
 
     def __init__(self):

@@ -38,6 +38,15 @@ heading, the sticks move the setpoints, and Land brings the blimp down. Same `ho
 yet flown; its runs are A0–A5 there. It sets the bench parameters, the bias workaround and the
 trim itself. Close any script first: one source drives the motors at a time.
 
+**2026-11-05, race day: the course from the ground station** (`docs/race-day.md`). The practice
+court is a smaller room than planned, probably with two balloons at heights and places not yet
+known, so the course moved onto one sheet, `software/race_course.json` (the balloons' floor points
+and heights, the field's extent from the start, the close patch, the loops), drawn and edited on
+the Control page's Course panel and flown from its *Fly: Autonomous* (the assisted flight's thread
+with `course_test.py`'s sequence; A starts it, X or Y lands it) or with `course_test.py
+--course-file`. `course_test.py` takes one `--alt` per balloon since the same day. Built and
+tested against the mock only; the first flight is C3 (one balloon) from the page.
+
 This is a living page: after each run, update the status above and the run's line in the
 order below. What each run measured, with captures and numbers, goes in the session record:
 `docs/history/flights-2026-11-01.md` covers 2026-11-01 and 02; start a new dated file for a new
@@ -133,6 +142,11 @@ python -u software/target_test.py --trim -0.6 --param $BP --notes "balloon fligh
 # the course room (2026-11-03): balloon 1 alone, then the course; the patches from C0
 python -u software/course_test.py --course 2,0 --close-px <b1> --trim -0.6 --param $BP --notes "C3 ..." --go
 python -u software/course_test.py --close-px <b1> <b2> --trim -0.6 --param $BP --notes "C4 ..." --go
+
+# race day (2026-11-05): the course on the race sheet (software/race_course.json: the balloons, their
+# heights, the field, the close patch), the same sheet the ground station's Autonomous mode flies
+python software/race_course.py                                   # print and check the sheet
+python -u software/course_test.py --course-file software/race_course.json --trim -0.6 --param $BP --notes "race ..." --go
 
 # the downward camera here (F0, motors off; the blimp carried at about 1.3 m; 480 px: the S3-WROOM CAM)
 python software/flow_test.py room-floor still --seconds 30 --width 480 --window

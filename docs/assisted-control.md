@@ -154,6 +154,14 @@ floor. Start a capture on the Bench page before each. After `A0`, each run has a
 If A3's overshoot is wrong, change `stop_lead_s` and `heading_lead_deg`. If the height is sluggish
 or chases, that is the loop's gains, in `software/bench_params.txt` as for every flight.
 
+## The course on the same thread (2026-11-05)
+
+Race day brought a third way to fly on the page, *Autonomous*: `Assist.takeoff()` with a
+`CoursePlan` (`plan_course()`, from the race sheet of `race_course.py`) prepares as above, climbs
+to the first balloon's height, and runs `course_test.py`'s sequence through `CourseFlight` (its
+`Flight` with the send, the tick and the start replaced by this flight's), so every end in the
+table above is the course's too. `docs/race-day.md` has the operator's side.
+
 ## Next, if it flies well
 
 - Steering during an operator's landing: it takes 15–25 s, and the air moves the blimp meanwhile.

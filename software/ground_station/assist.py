@@ -58,6 +58,18 @@ Limits worth knowing: a hold can only start while core/'s estimator has counted
 second flight waits out the minute, and manual flight cannot be handed over in
 the air. The estimated yaw reaches the ground only through 'hold', polled
 every POLL_S, so the lead limit runs a poll behind.
+
+The autonomous flight (2026-11-05, race day) is the same thread with the
+course in place of the sticks: takeoff() with a CoursePlan (plan_course(), from
+the race sheet of race_course.py) prepares as above, climbs to the first
+balloon's height, and then runs course_test.py's sequence (find, follow, the
+pulses, the touch, the move away, the turn to the next, each balloon's own
+height) through CourseFlight, whose console, checks and ends are this
+flight's: Land, STOP, the kills, the ToF, the window and the link end it the
+same way, and the landing is the same. The script's guidance is not copied:
+CourseFlight is course_test.Flight with its send(), tick() and the start
+replaced. The firmware runs core/'s loops as before; what is autonomous is the
+sequencing, on the ground, as docs/flight-tests.md's runs were.
 """
 import dataclasses
 import os
@@ -66,7 +78,9 @@ import tempfile
 import threading
 import time
 
+import course_test as ct
 import hold_test as ht
+import race_course as rc
 
 HEIGHT_MIN_M = ht.LAND_SLOW_M   # below this the way down is Land, which knows about the floor
 HEIGHT_MAX_M = 2.30             # flight-tests.md: the VL53L1X loses the floor beyond about 2.5 m
@@ -198,6 +212,37 @@ def read_bench_params(path=BENCH_PARAMS):
     return out
 
 
+class CoursePlan:
+    """A race sheet made ready to fly: course_test.py's arguments, its legs,
+    the plan's lines and the capture's length, s. plan_course() builds it."""
+
+    def __init__(self, args, legs, lines, cap_s, sheet):
+        self.args, self.legs, self.lines, self.cap_s, self.sheet = args, legs, lines, cap_s, sheet
+        self.alts = list(args.alt)
+
+
+def plan_course(sheet, trim_gf, extra=()):
+    """(CoursePlan, None), or (None, why) when the sheet cannot be flown.
+    extra: more of course_test.py's arguments, as its command line takes
+    them (the tests shorten the phases with it)."""
+    why = rc.check(sheet)
+    if why:
+        return None, why
+    try:
+        args = ct.parser().parse_args(list(extra))
+    except SystemExit:
+        return None, 'course_test.py did not take %r' % (list(extra),)
+    rc.apply(args, sheet)
+    ct.resolve(args)
+    args.trim = clamp(trim_gf, -TRIM_MAX_GF, TRIM_MAX_GF)
+    why = ct.check(args)
+    if why:
+        return None, why
+    legs = ct.legs(args.course, args.standoff)
+    lines, cap_s = ct.plan(args, legs)
+    return CoursePlan(args, legs, lines, cap_s, rc.normalise(sheet)), None
+
+
 class _End(Exception):
     """Ends the flight, with this event for the operator."""
 
@@ -246,6 +291,8 @@ class Assist:
         self._sample = None
         self._lost_at = None
         self._hold_on = self._tau_set = False
+        self._course = None             # a CoursePlan while an autonomous flight is up
+        self._course_lines = []         # its log, course_test.py's lines
 
     # ----------------------------------------------------------- from outside
 
@@ -253,21 +300,29 @@ class Assist:
     def active(self):
         return self._state != 'idle'
 
-    def takeoff(self, height_m, trim_gf, surge_full_gf):
+    @property
+    def _name(self):
+        return 'autonomous flight' if self._course is not None else 'assisted flight'
+
+    def takeoff(self, height_m, trim_gf, surge_full_gf, course=None):
         """Starts the flight: None, or why not. It may still end before the
-        motors start: the reason then comes as an event."""
+        motors start: the reason then comes as an event. With a CoursePlan
+        the flight is the course: the height is its first balloon's and the
+        sticks do nothing."""
         with self._lock:
             if self._state != 'idle':
                 return 'a flight is already under way'
             self._state, self._detail = 'preparing', 'checking the blimp'
             self._stop_why = self._land_why = self._height_req = None
             self._sticks = (0.0, 0.0, 0.0)
-            self._height = clamp(height_m, HEIGHT_MIN_M, HEIGHT_MAX_M)
+            self._course, self._course_lines = course, []
+            self._height = clamp(course.alts[0] if course is not None else height_m, HEIGHT_MIN_M, HEIGHT_MAX_M)
             self._trim = clamp(trim_gf, -TRIM_MAX_GF, TRIM_MAX_GF)
             self._surge_full = clamp(surge_full_gf, 0.0, SURGE_FULL_MAX_GF)
             self._ping_at = time.monotonic()
         self._wake.clear()
-        self._thread = threading.Thread(target=self._run, daemon=True, name='assisted-flight')
+        self._thread = threading.Thread(target=self._run, daemon=True,
+                                        name='course-flight' if course is not None else 'assisted-flight')
         self._thread.start()
         return None
 
@@ -323,7 +378,7 @@ class Assist:
             return {'state': self._state, 'detail': self._detail, 'height_m': self._height,
                     'heading_deg': self._heading, 'surge_gf': self._surge, 'trim_gf': self._trim,
                     'yaw_deg': self._yaw, 'rate_dps': self._rate, 'alt_sp_m': self._alt_sp, 'tof_m': self._tof,
-                    'link_lost': self._lost_at is not None}
+                    'link_lost': self._lost_at is not None, 'course': self._course is not None}
 
     def check_leftover(self):
         """After the link comes up: if this computer's last window died in a
@@ -343,7 +398,7 @@ class Assist:
                     self.link.stop_motors(False)
                 except OSError:
                     pass
-            self.abort('crit', 'assisted flight KILLED: %s; the motors coast' % why)
+            self.abort('crit', self._name + ' KILLED: %s; the motors coast' % why)
 
     def close(self):
         self.abort('info', 'the window closed: the motors coast')
@@ -375,7 +430,7 @@ class Assist:
             reply = self._cmd(line)
             if reply and any(t in reply for t in texts):
                 return reply
-        raise _End('warn', "assisted flight not started: no answer to '%s' (is a long command running in the "
+        raise _End('warn', self._name + " not started: no answer to '%s' (is a long command running in the "
                            "console, or is the link down?)" % line)
 
     def _off(self):
@@ -431,15 +486,15 @@ class Assist:
         self._wake.clear()
 
     def _run(self):
-        level, text = 'crit', 'assisted flight ended'
+        level, text = 'crit', self._name + ' ended'
         try:
             self._prepare()
-            why = self._fly()
+            why = self._fly_course() if self._course is not None else self._fly()
             level, text = self._land(why)
         except _End as e:
             level, text = e.level, e.text
         except Exception as e:          # a bug here must not leave a hold running with nobody on it
-            level, text = 'crit', 'assisted flight: %r: motors off' % e
+            level, text = 'crit', self._name + ': %r: motors off' % e
         try:
             self._finish()
             self.on_event(level, text)
@@ -449,6 +504,7 @@ class Assist:
                 self._sticks = (0.0, 0.0, 0.0)
                 self._yaw = self._rate = self._alt_sp = None
                 self._lost_at = None
+                self._course = None
 
     def _prepare(self):
         self._sent, self._hold_on, self._tau_set = {}, False, False
@@ -461,16 +517,16 @@ class Assist:
         try:
             params = read_bench_params(self.params_path)
         except (OSError, ValueError) as e:
-            raise _End('warn', 'assisted flight not started: the bench parameters: %s' % e)
+            raise _End('warn', self._name + ' not started: the bench parameters: %s' % e)
         tel = self.link.telemetry
         if not self.link.alive or not tel:
-            raise _End('warn', 'assisted flight not started: no telemetry from the blimp')
+            raise _End('warn', self._name + ' not started: no telemetry from the blimp')
         if any(abs(v) > 0.005 for v in tel['motor'].values()):
-            raise _End('warn', 'assisted flight not started: the motors are driven (%s); one source at a time'
+            raise _End('warn', self._name + ' not started: the motors are driven (%s); one source at a time'
                        % ' '.join('%s %+.2f' % kv for kv in tel['motor'].items()))
         st = parse_hold(self._expect('hold', 'estimator:'))
         if st is None:
-            raise _End('warn', "assisted flight not started: this firmware's 'hold' reply is not understood")
+            raise _End('warn', self._name + " not started: this firmware's 'hold' reply is not understood")
         if st['mode'] != 'MANUAL':      # KILLED by the last STOP, or a hold left behind on the floor
             self._expect('hold off', 'hold off:')
         self._set(detail='setting the bench parameters')
@@ -478,21 +534,34 @@ class Assist:
             self._check_prep()
             reply = self._expect('param %s %s' % (name, value), name)
             if '(was ' not in reply and 'is already' not in reply:
-                raise _End('warn', 'assisted flight not started: param %s %s: %s'
+                raise _End('warn', self._name + ' not started: param %s %s: %s'
                            % (name, value, reply.strip().splitlines()[0] if reply.strip() else 'no reply'))
         reply = self._expect('motor --max-duty %g --deadband %g' % (DRIVER_MAX_DUTY, DRIVER_DEADBAND),
                              'duty ceiling', 'takes')
         if 'takes' in reply:
-            raise _End('warn', 'assisted flight not started: the driver refused its limits: %s' % reply.strip())
+            raise _End('warn', self._name + ' not started: the driver refused its limits: %s' % reply.strip())
         # The floor's minute learns the bias at the ground rate, whatever a
         # flight cut short left behind.
         self._expect('param gyro_bias_tau_s %g' % BIAS_TAU_GROUND_S, 'gyro_bias_tau_s')
+        if self._course is not None:
+            # The course is flown on the forward camera's rows: without them
+            # the climb would end in the scan and a landing, a wasted minute
+            # of stillness. The row comes as the S3 relays it (LINK_PKT_CAMERA).
+            self._set(detail='waiting for a row from the forward camera')
+            t_end = time.monotonic() + 3.0
+            while not (self.link.camera and self.link.camera['row']) and time.monotonic() < t_end:
+                self._check_prep()
+                time.sleep(0.05)
+            if not (self.link.camera and self.link.camera['row']):
+                raise _End('warn', self._name + " not started: no row from the forward camera over the link in 3 s "
+                                                "(is it running target_cam, not optflow_cam, and does 'cam' show its "
+                                                "rows?)")
         self._wait_still()
         self._check_prep()
         self._set(detail='checking that the ToF sees the floor')
         why = ht.floor_check(self.link)
         if why:
-            raise _End('warn', 'assisted flight not started: %s' % why)
+            raise _End('warn', self._name + ' not started: %s' % why)
         self._check_prep()
         self._tau_set = True
         self._expect('param gyro_bias_tau_s %g' % BIAS_TAU_FLIGHT_S, 'gyro_bias_tau_s')
@@ -513,7 +582,7 @@ class Assist:
             reply = self._expect(line, 'held:', 'refused')
             if 'refused' in reply:
                 self._check()
-                raise _End('warn', 'assisted flight not started: %s' % reply.strip().splitlines()[-1])
+                raise _End('warn', self._name + ' not started: %s' % reply.strip().splitlines()[-1])
             self._sent[key] = value
         self._check()
 
@@ -538,7 +607,7 @@ class Assist:
             if st:
                 self._set(detail='keep the gondola still: %d of 60 s' % st['still_s'])
             if time.monotonic() > t_end:
-                raise _End('warn', 'assisted flight not started: the estimator did not settle in %.0f s (it needs '
+                raise _End('warn', self._name + ' not started: the estimator did not settle in %.0f s (it needs '
                                    'the gondola still for 60 s)' % self.tuning.still_wait_s)
             self._nap(0.5)
 
@@ -667,6 +736,89 @@ class Assist:
                 next_poll = now + POLL_S
             time.sleep(0.02)
 
+    # ------------------------------------------------------------ the course
+
+    def _fly_course(self):
+        """The race sheet's balloons in order, course_test.py's sequence on
+        this flight's checks (CourseFlight), from the climb to the last move
+        away: why to land. A line the blimp refused or never answered lands
+        it too; a STOP or a kill ends it through _check(), as in _fly()."""
+        plan = self._course
+        f = CourseFlight(self, plan)
+        self._set('flying', 'the climb to %.2f m, looking for balloon 1' % plan.alts[0])
+        f.t_hold = time.monotonic()
+        self._tof_at = f.t_hold
+        try:
+            stop = f.run_legs()
+        except RuntimeError as e:
+            self._check()
+            stop = ('land', str(e))
+        finally:
+            self._height = f.alt if f.alt_prev is None else max(f.alt, f.alt_prev)
+        if f.s3_follow:                 # the landing holds the heading; a follow left on would take it back
+            self._cmd('hold follow off', tries=2)
+        f.end = stop[1] if stop else 'the course is done'
+        self.on_event('ok' if stop is None else 'warn', 'the course: %s' % f.summary())
+        return f.end
+
+    def _course_guard(self, now, f):
+        """Why the course must land now, or None: _fly()'s ends, on the course
+        flight f. A short link loss is waited out here (STOP can still end
+        it); a longer one lands the blimp when the link returns."""
+        t = self.tuning
+        with self._lock:
+            land_why, ping_at = self._land_why, self._ping_at
+        if land_why:
+            return land_why
+        if now - ping_at > WATCHDOG_S:
+            return 'the window stopped responding for %d s' % int(WATCHDOG_S)
+        rx = self.link.last_rx
+        if now - rx > LINK_LOST_S:
+            if self._lost_at is None:
+                self._lost_at = rx
+                self.on_event('warn', 'nothing from the blimp for %.1f s: core/ stops the motors after 1 s and '
+                                      'takes the hold up again when the link returns' % (now - rx))
+            while now - self.link.last_rx > LINK_LOST_S:
+                self._check()
+                with self._lock:
+                    land_why, ping_at = self._land_why, self._ping_at
+                if land_why:
+                    return land_why
+                if now - ping_at > WATCHDOG_S:
+                    return 'the window stopped responding for %d s' % int(WATCHDOG_S)
+                time.sleep(0.02)
+                now = time.monotonic()
+            gone = now - self._lost_at
+            self._lost_at = None
+            self._tof_at = now
+            if gone > RESUME_WINDOW_S:
+                return 'the link was gone for %.1f s' % gone
+            self.on_event('ok', 'the link is back after %.1f s: the course goes on' % gone)
+        if now - self._tof_at > t.tof_lost_s:
+            return 'the ToF has been silent for %.0f s' % t.tof_lost_s
+        if self._tof is not None:
+            top = max(f.alt_top(self._tof), self._alt_sp if self._alt_sp is not None else 0.0)
+            if self._tof > top + t.over_height_m:
+                return 'the ToF reads %.2f m, over %.2f m by more than %.1f m' % (self._tof, top, t.over_height_m)
+        return None
+
+    def _course_line(self, s):
+        """course_test.py's log, line by line: a phase to the state line and
+        the window's log, an event to the log, a command's echo kept for the
+        record only."""
+        self._course_lines.append(s)
+        m = re.match(r'\s*[-\d.]+ s\s+(.*)', s)
+        text = (m.group(1) if m else s).strip()
+        if text.startswith('-- '):
+            self._set(detail=text[3:])
+            self.on_event('info', 'course: ' + text[3:])
+        elif ': held:' in text or ': hold starting' in text:
+            return
+        else:
+            level = ('ok' if (' is seen' in text or ' is close' in text) else
+                     'warn' if ('not seen' in text or 'lost' in text or 'WARNING' in text) else 'info')
+            self.on_event(level, 'course: ' + text)
+
     def _land(self, why):
         """hold_test.land(), on this flight's checks: down at the landing rate
         to LAND_SLOW_M, then at the final rate, motors off once the ToF reads
@@ -729,3 +881,59 @@ class Assist:
             if not reply or 'gyro_bias_tau_s' not in reply:
                 self.on_event('warn', 'gyro_bias_tau_s was not put back to %g s: the next take-off does it, or a '
                                       'reboot' % BIAS_TAU_GROUND_S)
+
+
+class CourseFlight(ct.Flight):
+    """course_test.py's Flight on an Assist: its sequence (find, follow, the
+    pulses, the touch, the move away, the turn to the next, each balloon's
+    height) with this flight's console, checks and ends in place of the
+    script's. The kills run on the link's thread (Assist.on_sensors) and end
+    it through _check(); the landing is Assist._land()'s, from the stop
+    run_legs() returns; 'hold' is polled as the assisted flight polls it, so
+    the page's readouts and the poll-as-acknowledgement work as there."""
+
+    def __init__(self, assist, plan):
+        super().__init__(assist.link, None, plan.args, plan.legs, assist._course_line)
+        self.ax = assist
+        self.next_poll = 0.0
+
+    def send(self, cmd):
+        reply = self.ax._cmd(cmd, tries=3)
+        if reply is None:
+            raise RuntimeError("no answer to '%s'" % cmd)
+        last = reply.strip().splitlines()[-1] if reply.strip() else '?'
+        self.log('%6.1f s  %s: %s' % (self.clock(), cmd, last))
+        if 'refused' in reply or 'not a number' in reply or 'Unrecognized' in reply:
+            self.ax._check()
+            raise RuntimeError("the blimp refused '%s': %s" % (cmd, last))
+        return reply
+
+    def set_alt(self, k):
+        stop = super().set_alt(k)
+        self.ax._height = self.alt      # the landing starts from the height held
+        return stop
+
+    def tick(self, guard=True):
+        ax = self.ax
+        ax._check()
+        now = time.monotonic()
+        ax._sense(now)
+        self.heading.update()
+        if self.track is not None:
+            self.track.update()
+        why = ax._course_guard(now, self)
+        if why:
+            return ('land', why)
+        stop = self.over_time()
+        if stop:
+            return stop
+        if guard and self.following and self.at_height:
+            why = self.track.near(self.close_px, self.args.close_el)
+            if why:
+                return ('close', why)
+        if now >= self.next_poll:
+            st = ax._poll()
+            if st is not None and st['yaw_deg'] is not None:
+                self.heading.reset(st['yaw_deg'])
+            self.next_poll = now + POLL_S
+        return None

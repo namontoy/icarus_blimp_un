@@ -213,7 +213,7 @@ class BlimpBridge:
         three times (UDP), the first under the lock so nothing the stream had
         read goes out after it. Clears the latch, unless latch: then
         set_motors stays refused until the next plain stop()."""
-        self.assist.abort('info', 'assisted flight stopped: the motors coast where the blimp is')
+        self.assist.abort('info', 'the flight stopped: the motors coast where the blimp is')
         # Raised before the lock is asked for: a lock is not a queue, and a
         # stream thread looping on it could take it again first.
         self._stop_pending = True
@@ -230,8 +230,9 @@ class BlimpBridge:
             self._send_stop(brake)
         self.on_event('ok', 'STOP sent: all motors %s' % ('braked' if brake else 'coasting'))
 
-    def takeoff(self, height_m, trim_gf, surge_full_gf):
-        """An assisted flight (assist.py): None when it started, or why not."""
+    def takeoff(self, height_m, trim_gf, surge_full_gf, course=None):
+        """An assisted flight (assist.py), or with a CoursePlan the course:
+        None when it started, or why not."""
         with self._lock:
             if self.race:
                 return 'race mode: no manual control'
@@ -239,7 +240,7 @@ class BlimpBridge:
                 return 'a stop is latched: STOP first'
             if self._cmd is not None:
                 return 'a motor command stands: one source at a time'
-        return self.assist.takeoff(height_m, trim_gf, surge_full_gf)
+        return self.assist.takeoff(height_m, trim_gf, surge_full_gf, course)
 
     def _send_stop(self, brake):
         try:

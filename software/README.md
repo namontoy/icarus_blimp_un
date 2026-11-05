@@ -114,7 +114,15 @@ the course's own balloons (`docs/flight-tests.md`, "The course room"):
 python software/course_test.py --selftest                                  # the sequence against a stand-in
 python software/course_test.py --close-px 1500 2200 --trim -0.6 --param $(cat software/bench_params.txt)
                                                                            # prints the plan; --go flies it
+python software/course_test.py --course-file software/race_course.json --trim -0.6 --param $(cat software/bench_params.txt)
+                                                                           # the race sheet: balloons, heights, close patch
 ```
+
+The race sheet (`race_course.py`, `race_course.json`, 2026-11-05) is the one file with the
+venue's numbers: the balloons' floor points and heights, the field's extent from the start, the
+close patch, the loops. The ground station's Course panel draws and edits it, its *Fly: Autonomous*
+flies it (`docs/race-day.md`), and `course_test.py --course-file` flies the same sheet from a
+terminal; `--alt` takes one height per balloon since the same day.
 
 ## The ground station: `ground_station/`
 
