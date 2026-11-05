@@ -128,8 +128,22 @@
 #define BLIMP_EST_STATIONARY_GYRO_RADS      0.2f    /* ~11.5 deg/s          */
 #define BLIMP_EST_STATIONARY_ACCEL_TOL_MPS2 1.0f    /* band around 1 g      */
 
-/* See decision 1 above. */
+/* See decision 1 above. Since 2026-11-05 (race day) the convergence LATCHES:
+ * the first BLIMP_EST_CONVERGE_S of stillness since boot are required, and
+ * after them the vehicle can move, land and be moved by hand and still arm
+ * at once. The bias it learned is kept through all of that (zero() always
+ * kept it); what used to restart was only the dwell count, and on the race's
+ * court every hit cost a minute on the floor before the next take-off. The
+ * dwell keeps counting while still, so the bias filter runs as before. */
 #define BLIMP_EST_CONVERGE_S                60.0f
+
+/* Motion ends the stationary dwell; a convergence already reached stays
+ * reached (the latch above), so the count drops to the threshold, not to
+ * zero. */
+static void dwell_broken(blimp_estimator_t *e)
+{
+    e->stationary_s = e->stationary_s >= BLIMP_EST_CONVERGE_S ? BLIMP_EST_CONVERGE_S : 0.0f;
+}
 
 /* See decision 2 above. */
 #define BLIMP_EST_MAG_NORM_MIN               1e-6f
@@ -316,11 +330,13 @@ void blimp_estimator_zero(blimp_estimator_t *e, const blimp_imu_sample_t *s)
     e->alt = (s && s->range_valid && isfinite(s->range_alt)) ? s->range_alt : 0.0f;
     e->vz  = 0.0f;
 
-    /* Fresh dwell count from this reference point; gyro_bias and
-     * mag_healthy deliberately survive a zero() - PREPARE re-runs between
-     * loop attempts (guidance.h BLIMP_GUID_LOOP_DONE) should not throw away
-     * an already-converged bias estimate. */
-    e->stationary_s = 0.0f;
+    /* The dwell count restarts from this reference point unless it had
+     * converged (the latch, BLIMP_EST_CONVERGE_S); gyro_bias and mag_healthy
+     * deliberately survive a zero() - PREPARE re-runs between loop attempts
+     * (guidance.h BLIMP_GUID_LOOP_DONE) should not throw away an
+     * already-converged bias estimate, and since 2026-11-05 neither should
+     * a landing throw away the right to arm again. */
+    dwell_broken(e);
 }
 
 void blimp_estimator_output(const blimp_estimator_t *e, const blimp_imu_sample_t *s,
@@ -415,10 +431,10 @@ void blimp_estimator_update(blimp_estimator_t *e, const blimp_params_t *p,
             e->gyro_bias[1] += alpha_bias * (gy - e->gyro_bias[1]);
             e->gyro_bias[2] += alpha_bias * (gz - e->gyro_bias[2]);
         } else {
-            e->stationary_s = 0.0f;
+            dwell_broken(e);
         }
     } else {
-        e->stationary_s = 0.0f;   /* can't confirm stillness without both */
+        dwell_broken(e);          /* can't confirm stillness without both */
     }
 
     const float bx = gyro_ok ? gx - e->gyro_bias[0] : 0.0f;

@@ -293,6 +293,7 @@ class Assist:
         self._hold_on = self._tau_set = False
         self._course = None             # a CoursePlan while an autonomous flight is up
         self._course_lines = []         # its log, course_test.py's lines
+        self._guards = True             # the kills and the ToF landings; off for the manual race
 
     # ----------------------------------------------------------- from outside
 
@@ -304,11 +305,14 @@ class Assist:
     def _name(self):
         return 'autonomous flight' if self._course is not None else 'assisted flight'
 
-    def takeoff(self, height_m, trim_gf, surge_full_gf, course=None):
+    def takeoff(self, height_m, trim_gf, surge_full_gf, course=None, guards=True):
         """Starts the flight: None, or why not. It may still end before the
         motors start: the reason then comes as an event. With a CoursePlan
         the flight is the course: the height is its first balloon's and the
-        sticks do nothing."""
+        sticks do nothing. guards False (the manual race, 2026-11-05: a hit
+        on a balloon tripped the tilt kill or the ToF landing, and the race
+        was lost on the floor) leaves out the spin and tilt kills and the ToF
+        landings: Land, STOP, the window and the link still end the flight."""
         with self._lock:
             if self._state != 'idle':
                 return 'a flight is already under way'
@@ -316,6 +320,7 @@ class Assist:
             self._stop_why = self._land_why = self._height_req = None
             self._sticks = (0.0, 0.0, 0.0)
             self._course, self._course_lines = course, []
+            self._guards = bool(guards) or course is not None     # the course keeps its guards
             self._height = clamp(course.alts[0] if course is not None else height_m, HEIGHT_MIN_M, HEIGHT_MAX_M)
             self._trim = clamp(trim_gf, -TRIM_MAX_GF, TRIM_MAX_GF)
             self._surge_full = clamp(surge_full_gf, 0.0, SURGE_FULL_MAX_GF)
@@ -378,7 +383,8 @@ class Assist:
             return {'state': self._state, 'detail': self._detail, 'height_m': self._height,
                     'heading_deg': self._heading, 'surge_gf': self._surge, 'trim_gf': self._trim,
                     'yaw_deg': self._yaw, 'rate_dps': self._rate, 'alt_sp_m': self._alt_sp, 'tof_m': self._tof,
-                    'link_lost': self._lost_at is not None, 'course': self._course is not None}
+                    'link_lost': self._lost_at is not None, 'course': self._course is not None,
+                    'guards': self._guards}
 
     def check_leftover(self):
         """After the link comes up: if this computer's last window died in a
@@ -568,7 +574,11 @@ class Assist:
 
         self._mark(True)
         self._hold_on = True            # from here on, every end sends 'hold off'
-        self._kills = ht.make_kills(self.link, self.tuning.max_yaw_dps, self.tuning.max_tilt_dps)[0]
+        self._kills = (ht.make_kills(self.link, self.tuning.max_yaw_dps, self.tuning.max_tilt_dps)[0]
+                       if self._guards else None)
+        if not self._guards:
+            self.on_event('warn', 'guards off: no spin or tilt kill, no landing on the ToF; Land, STOP, the window '
+                                  'and the link end this flight')
         with self._lock:
             self._surge = self._trim
         # A STOP that reaches the blimp before the hold's first tick finds the
@@ -707,11 +717,13 @@ class Assist:
                     return 'the link was gone for %.1f s' % gone
                 self.on_event('ok', 'the link is back after %.1f s: the hold goes on' % gone)
 
-            if now - self._tof_at > t.tof_lost_s:
-                return 'the ToF has been silent for %.0f s' % t.tof_lost_s
-            top = max(self._height, self._alt_sp if self._alt_sp is not None else 0.0)
-            if self._tof is not None and self._tof > top + t.over_height_m:
-                return 'the ToF reads %.2f m, over the setpoint by more than %.1f m' % (self._tof, t.over_height_m)
+            if self._guards:
+                if now - self._tof_at > t.tof_lost_s:
+                    return 'the ToF has been silent for %.0f s' % t.tof_lost_s
+                top = max(self._height, self._alt_sp if self._alt_sp is not None else 0.0)
+                if self._tof is not None and self._tof > top + t.over_height_m:
+                    return 'the ToF reads %.2f m, over the setpoint by more than %.1f m' % (self._tof,
+                                                                                            t.over_height_m)
 
             surge, yaw, heave = sticks
             self._surge = clamp(trim + surge * full, -HOLD_SURGE_MAX_GF, HOLD_SURGE_MAX_GF)

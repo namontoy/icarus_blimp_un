@@ -189,9 +189,10 @@ class Station(QObject):
     def assist_active(self):
         return self.blimp is not None and self.blimp.assist.active
 
-    def assist_takeoff(self, height_m, trim_gf, surge_full_gf):
-        """None when the flight started, or why not."""
-        return self.blimp.takeoff(height_m, trim_gf, surge_full_gf)
+    def assist_takeoff(self, height_m, trim_gf, surge_full_gf, guards=True):
+        """None when the flight started, or why not. guards: the kills and
+        the ToF landings (assist.py); off for the manual race."""
+        return self.blimp.takeoff(height_m, trim_gf, surge_full_gf, guards=guards)
 
     def course_takeoff(self, sheet, trim_gf, extra=()):
         """The course on the race sheet (race_course.py), flown by assist.py:

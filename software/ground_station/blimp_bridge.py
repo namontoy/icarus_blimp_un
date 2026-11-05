@@ -230,7 +230,7 @@ class BlimpBridge:
             self._send_stop(brake)
         self.on_event('ok', 'STOP sent: all motors %s' % ('braked' if brake else 'coasting'))
 
-    def takeoff(self, height_m, trim_gf, surge_full_gf, course=None):
+    def takeoff(self, height_m, trim_gf, surge_full_gf, course=None, guards=True):
         """An assisted flight (assist.py), or with a CoursePlan the course:
         None when it started, or why not."""
         with self._lock:
@@ -240,7 +240,7 @@ class BlimpBridge:
                 return 'a stop is latched: STOP first'
             if self._cmd is not None:
                 return 'a motor command stands: one source at a time'
-        return self.assist.takeoff(height_m, trim_gf, surge_full_gf, course)
+        return self.assist.takeoff(height_m, trim_gf, surge_full_gf, course, guards)
 
     def _send_stop(self, brake):
         try:

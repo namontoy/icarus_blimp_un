@@ -721,12 +721,41 @@ int main(void)
                   "still converging after 80 s of stationary dwell (stationary_s=%.2f)",
                   (double)e.stationary_s);
 
-        /* Motion resets the dwell clock and re-blocks arming. */
+        /* Motion after the convergence keeps it (the latch of 2026-11-05):
+         * a landing, a hit or a hand on the gondola must not cost another
+         * minute before the next arming. */
         blimp_imu_sample_t moving = make_sample(t + 10000);
         moving.gyro_valid = true; moving.gyro[0] = 5.0f;
         moving.accel_valid = true; moving.accel[2] = G0;
         blimp_estimator_update(&e, &P, &moving, &out);
+        CHECK_MSG(!blimp_estimator_converging(&e),
+                  "motion after the convergence re-blocked arming (stationary_s=%.2f)",
+                  (double)e.stationary_s);
+        /* ... and a zero() at the next arming keeps it too. */
+        blimp_estimator_zero(&e, &moving);
+        CHECK(!blimp_estimator_converging(&e));
+    }
+
+    TEST_GROUP("motion before the convergence still restarts the dwell");
+    {
+        blimp_estimator_t e;
+        blimp_estimator_init(&e);
+        blimp_state_t out;
+        uint32_t t = 0;
+        for (int i = 0; i < 3000; i++) { /* 30 s at 100 Hz: half way */
+            t += 10000;
+            blimp_imu_sample_t ss = make_sample(t);
+            ss.gyro_valid = true; ss.accel_valid = true; ss.accel[2] = G0;
+            blimp_estimator_update(&e, &P, &ss, &out);
+        }
         CHECK(blimp_estimator_converging(&e));
+        blimp_imu_sample_t moving = make_sample(t + 10000);
+        moving.gyro_valid = true; moving.gyro[0] = 5.0f;
+        moving.accel_valid = true; moving.accel[2] = G0;
+        blimp_estimator_update(&e, &P, &moving, &out);
+        CHECK_MSG(e.stationary_s == 0.0f && blimp_estimator_converging(&e),
+                  "motion before the convergence did not restart the dwell (stationary_s=%.2f)",
+                  (double)e.stationary_s);
     }
 
     TEST_REPORT();

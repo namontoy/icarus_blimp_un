@@ -245,9 +245,10 @@ int main(void)
         uint32_t t_us = force_arm(&b);
         CHECK(b.armed);
 
-        /* A real rotation resets e.stationary_s to 0 (estimator.c), making
-         * blimp_estimator_converging() true again - decision 3's exact
-         * documented scenario. armed must stay latched regardless. */
+        /* A real rotation ends the stationary dwell (estimator.c). Until
+         * 2026-11-05 that made blimp_estimator_converging() true again -
+         * decision 3's documented scenario; since then the convergence
+         * latches too. armed must stay latched either way. */
         for (int i = 0; i < 5; i++) {
             t_us += 5000u;
             blimp_input_t in = {0};
@@ -260,9 +261,9 @@ int main(void)
             blimp_step(&b, &in, &out);
             CHECK(b.armed);
         }
-        CHECK_MSG(blimp_estimator_converging(&b.est),
-                 "test premise failed: motion did not make the estimator "
-                 "re-report 'converging'");
+        CHECK_MSG(!blimp_estimator_converging(&b.est),
+                 "motion after a good arm re-blocked arming: the convergence "
+                 "must latch (estimator.c, 2026-11-05)");
     }
 
     TEST_GROUP("explicit disarm always works");

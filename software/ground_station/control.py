@@ -284,6 +284,9 @@ class ControlPage(QWidget):
             v = settings.value(key)
             if v not in (None, ''):
                 box.setValue(float(v))
+        self.guards_sw.blockSignals(True)
+        self.guards_sw.setChecked(str(settings.value('control/guards')).lower() == 'true')
+        self.guards_sw.blockSignals(False)
         fly = settings.value('control/fly')
         if fly not in KINDS:        # the key before the course: a window of 2026-11-04 remembered Assisted
             fly = 'assisted' if str(settings.value('control/assisted')).lower() == 'true' else 'manual'
@@ -401,6 +404,16 @@ class ControlPage(QWidget):
             w.setLayout(hbox(label(name, color=T.MUTED), box, label(unit, color=T.MUTED), spacing=6))
             boxes.add(w)
             self.box_w[name.lower()] = w
+        # The manual race of 2026-11-05: a hit on a balloon tripped a kill or
+        # the ToF landing, and the blimp lost its minute on the floor. Off by
+        # default for an assisted flight; the course keeps its own guards.
+        self.guards_sw = Switch('Guards')
+        self.guards_sw.setToolTip('on: the spin and tilt kills (motors coast) and the landings on a ToF too high or '
+                                  'silent; off: only Land, STOP, the window and the link end the flight. Remembered')
+        self.guards_sw.setChecked(False)
+        self.guards_sw.toggled.connect(self._guards_changed)
+        boxes.add(self.guards_sw)
+        self.box_w['guards'] = self.guards_sw
         lay.addWidget(boxes)
         self.assist_box = boxes
         lay.addSpacing(8)
@@ -613,6 +626,7 @@ class ControlPage(QWidget):
         self.assist_box.setVisible(self.assisted)
         self.box_w['height'].setVisible(kind == 'assisted')
         self.box_w['surge'].setVisible(kind == 'assisted')
+        self.box_w['guards'].setVisible(kind == 'assisted')
         self.takeoff_b.setVisible(self.assisted)
         self.takeoff_b.setText('Fly the course' if auto else 'Take off')
         self.takeoff_b.setToolTip('bench parameters, 60 s of stillness, a camera row, then the climb to balloon 1 '
@@ -635,6 +649,11 @@ class ControlPage(QWidget):
     def set_assisted(self, on, save=True):
         """Manual or assisted, the switch before the course (2026-11-04)."""
         self.set_kind('assisted' if on else 'manual', save)
+
+    def _guards_changed(self, on):
+        self.settings.setValue('control/guards', bool(on))
+        self.station.log('info' if on else 'warn', 'control: guards %s for assisted flight%s'
+                         % ('on' if on else 'off', '' if on else ': no kill, no landing on the ToF'))
 
     def _height_changed(self, v):
         if self.armed and self.assisted:
@@ -687,7 +706,8 @@ class ControlPage(QWidget):
             self.station.log('info', 'the course from the %s: %s; trim %+.1f gf'
                              % (by, rc.summary(sheet), self.trim_in.value()))
         elif self.assisted:
-            why = self.station.assist_takeoff(self.height_in.value(), self.trim_in.value(), self.surge_in.value())
+            why = self.station.assist_takeoff(self.height_in.value(), self.trim_in.value(), self.surge_in.value(),
+                                              guards=self.guards_sw.isChecked())
             if why:
                 self.station.log('warn', 'control: not taking off: %s' % why)
                 return False

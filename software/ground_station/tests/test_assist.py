@@ -440,6 +440,24 @@ time.sleep(0.5)
 check(mock.hold_mode == 'HOLD', "no marker: a script's hold is left alone")
 on_floor()
 
+# guards off (the manual race of 2026-11-05): a blind ToF does not land it, a
+# spin does not kill it; Land still lands it
+on_floor()
+events.clear()
+check(b.takeoff(1.0, -0.6, 3.0, guards=False) is None, 'guards off: accepted')
+check(wait_for(lambda: a.snapshot()['state'] == 'flying', 6.0) and said('guards off', 'warn')
+      and not a.snapshot()['guards'], 'guards off: flying, said so, in the snapshot')
+mock.tof_blind = True
+time.sleep(2.0)
+check(a.snapshot()['state'] == 'flying', 'guards off: a blind ToF does not land it')
+mock.tof_blind = False
+mock.yaw_rate = 200.0
+time.sleep(0.6)
+check(a.snapshot()['state'] == 'flying' and mock.hold_mode == 'HOLD', 'guards off: a spin does not kill it')
+mock.yaw_rate = 0.0
+a.land()
+check(landed(), 'guards off: Land still lands it')
+
 # the window's close ends a flight
 fly(1.0)
 pinger.on = False
