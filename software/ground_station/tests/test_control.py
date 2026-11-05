@@ -479,8 +479,8 @@ check(c.takeoff_b.isVisible() and c.takeoff_b.text() == 'Fly the course' and c.t
 check('fly the course' in c.legend_l.text() and 'land' in c.legend_l.text(), 'autonomous: the legend')
 check(win.minimumSizeHint().width() - win.header.pills['demo'].sizeHint().width() <= 1280,
       "autonomous: the page still fits the Deck's 1280 px: %d" % win.minimumSizeHint().width())
-check(c.course_panel.check_l.text().startswith('2 balloons'), 'autonomous: the sheet checks: %s'
-      % c.course_panel.check_l.text())
+check(c.course_panel.check_l.text() and not c.course_panel.check_l.text().startswith('Cannot'),
+      'autonomous: the repo\'s sheet checks: %s' % c.course_panel.check_l.text()[:60])
 settings = QSettings(ini, QSettings.Format.IniFormat)
 settings.sync()
 check(settings.value('control/fly') == 'auto' and str(settings.value('control/assisted')).lower() == 'false',

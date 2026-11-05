@@ -207,7 +207,8 @@ def warnings(sheet, standoff_m=0.5):
     for k, (_, d, _) in enumerate(legs(s, standoff_m)):
         if d > CAM_REACH_M and k < n:
             out.append('balloon %d is %.1f m from where the blimp looks for it, beyond the camera\'s reach (about '
-                       '%.1f m): it scans, and lands if it does not see it' % (k + 1, d, CAM_REACH_M))
+                       '%.1f m): it scans, flies blind pulses toward where it should be, and lands if it still does '
+                       'not see it' % (k + 1, d, CAM_REACH_M))
     return out
 
 
